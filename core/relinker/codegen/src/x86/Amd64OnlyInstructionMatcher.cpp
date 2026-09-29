@@ -3,6 +3,7 @@
 #include <codegen/x86/Amd64OnlySubstitutionTable.hpp>
 #include <codegen/x86/Sse4aLowering.hpp>
 #include <codegen/x86/Sse4aOperands.hpp>
+#include <codegen/x86/ShaNiLowering.hpp>
 #include <codegen/x86/SystemInstructionLowering.hpp>
 #include <codegen/x86/X64OpcodeConstants.hpp>
 #include <codegen/CodegenException.hpp>
@@ -36,6 +37,10 @@ public:
 private:
     Sse4aLowering _lowering;
     SystemInstructionLowering _systemLowering;
+    ShaNiLowering _shaLowering;
+
+    [[nodiscard]] Amd64OnlyMatch _matchShaNi(const DecodedInstruction& instr, std::span<const std::uint8_t> trailing) const;
+    [[nodiscard]] static const Entry& _shaEntry(const ShaNiOperands& operands);
 
     [[nodiscard]] Amd64OnlyMatch _matchSystem(const DecodedInstruction& instr, const Entry& entry, SystemInstruction instruction, std::span<const std::uint8_t> trailing) const;
     [[nodiscard]] static std::optional<SystemInstruction> _systemInstruction(const DecodedInstruction& instr);
@@ -55,6 +60,34 @@ Amd64OnlyMatch Amd64OnlyInstructionMatcher::_matchMovnts(const DecodedInstructio
     std::vector<std::uint8_t> replacement(instr.Data, instr.Data + instr.Length);
     replacement[opcodeOffset + 1] = kMovsStoreOpcode;
     return Amd64OnlyMatch{entry.Name, instr.Length, Amd64OnlyLowering::InPlace, std::move(replacement), {}, 0};
+}
+
+const Entry& Amd64OnlyInstructionMatcher::_shaEntry(const ShaNiOperands& operands) {
+    if (operands.ThreeByte3A)
+        return kSha1Rnds4;
+    switch (operands.Opcode) {
+    case Codegen::kShaOpSha1Nexte:
+        return kSha1Nexte;
+    case Codegen::kShaOpSha1Msg1:
+        return kSha1Msg1;
+    case Codegen::kShaOpSha1Msg2:
+        return kSha1Msg2;
+    case Codegen::kShaOpSha256Rnds2:
+        return kSha256Rnds2;
+    case Codegen::kShaOpSha256Msg1:
+        return kSha256Msg1;
+    default:
+        return kSha256Msg2;
+    }
+}
+
+Amd64OnlyMatch Amd64OnlyInstructionMatcher::_matchShaNi(const DecodedInstruction& instr, const std::span<const std::uint8_t> trailing) const {
+    const auto operands = DecodeShaNi(instr.Data, instr.Length);
+    const auto& entry = _shaEntry(operands);
+    if (!_shaLowering.CanLower(operands))
+        return _unsupported(entry, instr.Length);
+    auto body = _shaLowering.LowerOutOfLine(std::span<const ShaNiOperands>(&operands, 1), trailing);
+    return Amd64OnlyMatch{entry.Name, instr.Length, Amd64OnlyLowering::Trampoline, {}, std::move(body.Bytes), body.ReturnBranchOffset};
 }
 
 std::optional<SystemInstruction> Amd64OnlyInstructionMatcher::_systemInstruction(const DecodedInstruction& instr) {
@@ -93,6 +126,22 @@ std::optional<Amd64OnlyMatch> Amd64OnlyInstructionMatcher::MatchSequence(
 ) const {
     if (instructions.empty())
         return std::nullopt;
+    std::vector<ShaNiOperands> shaSequence;
+    for (const auto& instruction : instructions) {
+        const DecodedInstruction instr{instruction.data(), instruction.size()};
+        if (!instr.IsShaNi()) {
+            shaSequence.clear();
+            break;
+        }
+        const auto operands = DecodeShaNi(instr.Data, instr.Length);
+        if (!_shaLowering.CanLower(operands))
+            return std::nullopt;
+        shaSequence.push_back(operands);
+    }
+    if (!shaSequence.empty()) {
+        auto shaBody = _shaLowering.LowerOutOfLine(shaSequence, trailing);
+        return Amd64OnlyMatch{_shaEntry(shaSequence.front()).Name, instructions.front().size(), Amd64OnlyLowering::Trampoline, {}, std::move(shaBody.Bytes), shaBody.ReturnBranchOffset};
+    }
     std::vector<SystemInstruction> systemSequence;
     for (const auto& instruction : instructions) {
         const DecodedInstruction instr{instruction.data(), instruction.size()};
@@ -127,6 +176,9 @@ std::optional<Amd64OnlyMatch> Amd64OnlyInstructionMatcher::Match(
     std::span<const std::uint8_t> trailing
 ) const {
     const DecodedInstruction instr{data, length};
+
+    if (instr.IsShaNi())
+        return _matchShaNi(instr, trailing);
 
     if (instr.IsMovntss())
         return _matchMovnts(instr, kMovntss);
