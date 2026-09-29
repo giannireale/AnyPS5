@@ -158,7 +158,9 @@ void matcherSubstitutions() {
     require(sha256rnds2 && sha256rnds2->Lowering == Codegen::Amd64OnlyLowering::Trampoline && sha256rnds2->InstructionName == "SHA256RNDS2", "SHA256RNDS2 was not lowered through a stub");
     const auto sha1rnds4 = match({0x0F, 0x3A, 0xCC, 0xD9, 0x02});
     require(sha1rnds4 && sha1rnds4->Lowering == Codegen::Amd64OnlyLowering::Trampoline && sha1rnds4->InstructionName == "SHA1RNDS4", "SHA1RNDS4 was not lowered through a stub");
-    requireFailure([&] { (void)match({0x0F, 0x38, 0xC8, 0x18}); }, "SHA1NEXTE with a memory operand was accepted");
+    const auto shaMemory = match({0x0F, 0x38, 0xC8, 0x18});
+    require(shaMemory && shaMemory->Lowering == Codegen::Amd64OnlyLowering::Trampoline, "SHA1NEXTE with a memory operand was not lowered through a stub");
+    requireFailure([&] { (void)match({0x0F, 0x38, 0xC8, 0x1D, 0x00, 0x00, 0x00, 0x00}); }, "SHA1NEXTE with a RIP-relative operand was accepted");
     const auto rdpru = match({0x0F, 0x01, 0xFD});
     require(rdpru && rdpru->Lowering == Codegen::Amd64OnlyLowering::Unsupported && rdpru->InstructionName == "RDPRU", "RDPRU was not reported as unsupported");
     const auto registerForm = match({0x66, 0x0F, 0x79, 0xCA});
@@ -610,6 +612,69 @@ void runSha1Rnds4Native(const std::uint32_t* destination, const std::uint32_t* s
     }
 }
 
+void shaMemoryExecution() {
+    const auto matcher = Codegen::MakeAmd64OnlyInstructionMatcher();
+    std::uint32_t seed = 0x1b873593u;
+    const auto next = [&] {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        return seed;
+    };
+    const Bytes indirect = {0x0F, 0x38, 0xC9, 0x1F};
+    const Bytes scaled = {0x0F, 0x38, 0xCD, 0x5C, 0x8F, 0x08};
+    const Bytes stackRelative = {0x0F, 0x38, 0xC8, 0x5C, 0x24, 0x20};
+    for (int variant = 0; variant < 3; ++variant) {
+        const auto& site = variant == 0 ? indirect : (variant == 1 ? scaled : stackRelative);
+        const std::uint8_t opcode = site[2];
+        const auto match = matcher->Match(site.data(), site.size());
+        require(match && match->Lowering == Codegen::Amd64OnlyLowering::Trampoline, "SHA-NI memory form stub was not produced");
+        auto body = match->StubBody;
+        const auto ret = body.size();
+        body.push_back(0xC3);
+        const auto displacement = static_cast<std::int32_t>(ret - (match->ReturnBranchOffset + 5));
+        std::memcpy(body.data() + match->ReturnBranchOffset + 1, &displacement, sizeof(displacement));
+        void* code = mmap(nullptr, 8192, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        require(code != MAP_FAILED, "cannot map executable memory for the stub");
+        std::memcpy(code, body.data(), body.size());
+        for (int iteration = 0; iteration < 64; ++iteration) {
+            alignas(16) std::uint32_t destination[4];
+            alignas(16) std::uint32_t memory[16];
+            alignas(16) std::uint32_t out[4] = {};
+            for (auto& value : destination) value = next();
+            for (auto& value : memory) value = next();
+            const std::uint32_t* operand = memory;
+            const std::uint64_t index = 2;
+            if (variant == 0) {
+                asm volatile("movdqu (%[d]), %%xmm3\n\t sub $128, %%rsp\n\t call *%[c]\n\t add $128, %%rsp\n\t movdqu %%xmm3, (%[o])"
+                             : : [d] "r"(destination), [c] "r"(code), [o] "r"(out), "D"(memory)
+                             : "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory", "cc");
+            } else if (variant == 1) {
+                operand = memory + index;
+                asm volatile("movdqu (%[d]), %%xmm3\n\t sub $128, %%rsp\n\t call *%[cd]\n\t add $128, %%rsp\n\t movdqu %%xmm3, (%[o])"
+                             : : [d] "r"(destination), [cd] "r"(code), [o] "r"(out), "D"(reinterpret_cast<const std::uint8_t*>(memory) - 8), "c"(index)
+                             : "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory", "cc");
+            } else {
+                // The relinker reaches a stub with a jump, this harness with a call: the pushed
+                // return address shifts RSP by eight, so the payload is duplicated eight bytes down.
+                asm volatile("sub $0x60, %%rsp\n\t movdqu (%[m]), %%xmm4\n\t movdqu %%xmm4, 0x20(%%rsp)\n\t movdqu %%xmm4, 0x18(%%rsp)\n\t"
+                             "movdqu (%[d]), %%xmm3\n\t call *%[c]\n\t movdqu %%xmm3, (%[o])\n\t add $0x60, %%rsp"
+                             : : [d] "r"(destination), [m] "r"(memory), [c] "r"(code), [o] "r"(out)
+                             : "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory", "cc");
+            }
+            std::uint32_t expected[4] = {};
+            shaReference(opcode, destination, operand, expected);
+            require(std::memcmp(out, expected, sizeof(expected)) == 0, "SHA-NI memory form stub does not match the reference model");
+            if (__builtin_cpu_supports("sha")) {
+                alignas(16) std::uint32_t native[4] = {};
+                runShaNative(opcode, destination, operand, native);
+                require(std::memcmp(out, native, sizeof(native)) == 0, "SHA-NI memory form stub does not match the hardware instruction");
+            }
+        }
+        munmap(code, 8192);
+    }
+}
+
 void shaRoundExecution() {
     const auto matcher = Codegen::MakeAmd64OnlyInstructionMatcher();
     std::uint32_t seed = 0x9e3779b9u;
@@ -925,6 +990,7 @@ int main() {
         clzeroExecution();
         shaNiExecution();
         shaRoundExecution();
+        shaMemoryExecution();
         converterSegment();
         converterFailureOffsets();
         linuxPlacement();

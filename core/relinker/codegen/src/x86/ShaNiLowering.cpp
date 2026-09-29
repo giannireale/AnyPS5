@@ -11,6 +11,10 @@ constexpr std::uint8_t kRexFirst = 0x40;
 constexpr std::uint8_t kRexLast = 0x4F;
 constexpr std::uint8_t kRexR = 0x04;
 constexpr std::uint8_t kRexB = 0x01;
+constexpr std::uint8_t kRexX = 0x02;
+constexpr std::uint8_t kModRmRipBase = 5;
+constexpr std::uint8_t kModRmSibBase = 4;
+constexpr std::int32_t kMemoryFrame = 0x90;
 constexpr std::uint8_t kEscape = 0x0F;
 constexpr std::uint8_t kEscape38 = 0x38;
 constexpr std::uint8_t kEscape3A = 0x3A;
@@ -308,7 +312,7 @@ ShaNiOperands DecodeShaNi(const std::uint8_t* data, const std::size_t length) {
     std::uint8_t rex = 0;
     while (position < length && data[position] >= kRexFirst && data[position] <= kRexLast)
         rex = data[position++];
-    if (position + 3 >= length + 1 && position + 3 > length)
+    if (position + 3 > length)
         throw CodegenException("SHA-NI instruction truncated before its ModRM byte");
     if (data[position] != kEscape || (data[position + 1] != kEscape38 && data[position + 1] != kEscape3A))
         throw CodegenException("Instruction is not a SHA-NI opcode");
@@ -318,14 +322,52 @@ ShaNiOperands DecodeShaNi(const std::uint8_t* data, const std::size_t length) {
     if (position + 3 >= length)
         throw CodegenException("SHA-NI instruction truncated before its ModRM byte");
     const auto modrm = data[position + 3];
-    if ((modrm >> kModRmModShift) != kModRmRegisterMod)
-        throw CodegenException("SHA-NI instruction with a memory operand has no Intel lowering");
+    const auto mod = static_cast<std::uint8_t>(modrm >> kModRmModShift);
     operands.Destination = static_cast<std::uint8_t>(((modrm >> 3) & 7) | ((rex & kRexR) != 0 ? 8 : 0));
-    operands.Source = static_cast<std::uint8_t>((modrm & 7) | ((rex & kRexB) != 0 ? 8 : 0));
+    operands.RexExtension = static_cast<std::uint8_t>(rex & (kRexX | kRexB));
+    if (mod == kModRmRegisterMod) {
+        operands.Source = static_cast<std::uint8_t>((modrm & 7) | ((rex & kRexB) != 0 ? 8 : 0));
+    } else {
+        operands.MemoryForm = true;
+        const auto rm = static_cast<std::uint8_t>(modrm & 7);
+        if (mod == 0 && rm == kModRmRipBase)
+            throw CodegenException("SHA-NI instruction with a RIP-relative operand has no Intel lowering");
+        std::size_t cursor = position + 4;
+        std::uint8_t sib = 0;
+        const bool hasSib = rm == kModRmSibBase;
+        if (hasSib) {
+            if (cursor >= length)
+                throw CodegenException("SHA-NI instruction truncated before its SIB byte");
+            sib = data[cursor++];
+        }
+        std::size_t displacementSize = 0;
+        if (mod == 1) displacementSize = 1;
+        else if (mod == 2) displacementSize = 4;
+        else if (hasSib && (sib & 7) == kModRmRipBase) displacementSize = 4;
+        if (cursor + displacementSize > length)
+            throw CodegenException("SHA-NI instruction truncated before its displacement");
+        std::int32_t displacement = 0;
+        if (displacementSize == 1) {
+            displacement = static_cast<std::int8_t>(data[cursor]);
+        } else if (displacementSize == 4) {
+            std::uint32_t raw = 0;
+            for (std::size_t index = 0; index < 4; ++index)
+                raw |= static_cast<std::uint32_t>(data[cursor + index]) << (index * 8);
+            displacement = static_cast<std::int32_t>(raw);
+        }
+        operands.StackRelative = hasSib && (sib & 7) == kModRmSibBase && (rex & kRexB) == 0 && mod != 0;
+        if (hasSib && (sib & 7) == kModRmSibBase && (rex & kRexB) == 0 && mod == 0)
+            operands.StackRelative = true;
+        operands.Displacement = displacement;
+        operands.Address.assign(data + position + 3, data + cursor + displacementSize);
+        if (hasSib)
+            operands.Source = sib;
+    }
     if (operands.ThreeByte3A) {
-        if (position + 4 >= length)
+        const auto immediateOffset = position + 3 + (operands.MemoryForm ? operands.Address.size() : 1);
+        if (immediateOffset >= length)
             throw CodegenException("SHA1RNDS4 truncated before its immediate");
-        operands.Immediate = data[position + 4];
+        operands.Immediate = data[immediateOffset];
     }
     return operands;
 }
@@ -346,35 +388,61 @@ bool ShaNiLowering::CanLower(const ShaNiOperands& operands) const {
     }
 }
 
+void _emitOperation(StubBodyBuilder& body, const ShaNiOperands& operands) {
+    if (operands.ThreeByte3A) {
+        _emitSha1Rnds4(body, operands);
+        return;
+    }
+    switch (operands.Opcode) {
+    case kShaOpSha256Rnds2:
+        _emitSha256Rnds2(body, operands);
+        return;
+    case kShaOpSha1Nexte:
+        _emitSha1Nexte(body, operands);
+        return;
+    case kShaOpSha1Msg1:
+        _emitSha1Msg1(body, operands);
+        return;
+    case kShaOpSha1Msg2:
+        _emitSha1Msg2(body, operands);
+        return;
+    case kShaOpSha256Msg1:
+        _emitSha256Msg1(body, operands);
+        return;
+    default:
+        _emitSha256Msg2(body, operands);
+        return;
+    }
+}
+
+void _emitMemoryForm(StubBodyBuilder& body, const ShaNiOperands& operands) {
+    std::uint8_t loaded = 0;
+    while (loaded == operands.Destination || (operands.Opcode == kShaOpSha256Rnds2 && !operands.ThreeByte3A && loaded == 0))
+        ++loaded;
+    auto registerForm = operands;
+    registerForm.MemoryForm = false;
+    registerForm.Source = loaded;
+    registerForm.Address.clear();
+    body.AdjustStack(-kMemoryFrame);
+    body.StoreXmm(loaded, 0);
+    if (operands.StackRelative)
+        body.LoadXmmStackRelative(loaded, operands.RexExtension, operands.Source, operands.Displacement + kMemoryFrame);
+    else
+        body.LoadXmmIndirect(loaded, operands.RexExtension, operands.Address);
+    _emitOperation(body, registerForm);
+    body.LoadXmm(loaded, 0);
+    body.AdjustStack(kMemoryFrame);
+}
+
 LoweredBody ShaNiLowering::LowerOutOfLine(const std::span<const ShaNiOperands> sequence, const std::span<const std::uint8_t> trailing) const {
     StubBodyBuilder body;
     for (const auto& operands : sequence) {
         if (!CanLower(operands))
             throw CodegenException("SHA-NI opcode has no Intel lowering");
-        if (operands.ThreeByte3A) {
-            _emitSha1Rnds4(body, operands);
-            continue;
-        }
-        switch (operands.Opcode) {
-        case kShaOpSha256Rnds2:
-            _emitSha256Rnds2(body, operands);
-            break;
-        case kShaOpSha1Nexte:
-            _emitSha1Nexte(body, operands);
-            break;
-        case kShaOpSha1Msg1:
-            _emitSha1Msg1(body, operands);
-            break;
-        case kShaOpSha1Msg2:
-            _emitSha1Msg2(body, operands);
-            break;
-        case kShaOpSha256Msg1:
-            _emitSha256Msg1(body, operands);
-            break;
-        default:
-            _emitSha256Msg2(body, operands);
-            break;
-        }
+        if (operands.MemoryForm)
+            _emitMemoryForm(body, operands);
+        else
+            _emitOperation(body, operands);
     }
     body.Raw(trailing);
     return body.Finish();

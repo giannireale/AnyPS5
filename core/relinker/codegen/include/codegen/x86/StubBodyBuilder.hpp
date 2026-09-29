@@ -48,6 +48,8 @@ public:
     void GprNot(std::uint8_t reg);
     void GprRotate(bool left, std::uint8_t reg, std::uint8_t count);
     void GprAddImmediate(std::uint8_t reg, std::uint32_t value);
+    void LoadXmmIndirect(std::uint8_t reg, std::uint8_t rexExtension, std::span<const std::uint8_t> address);
+    void LoadXmmStackRelative(std::uint8_t reg, std::uint8_t rexExtension, std::uint8_t sib, std::int32_t offset);
     [[nodiscard]] LoweredBody Finish();
 
 private:
