@@ -518,14 +518,19 @@ bool IsImageOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::ImageStoreMip:
         case RdnaOpcode::ImageAtomicSwap:
         case RdnaOpcode::ImageAtomicAdd:
+        case RdnaOpcode::ImageAtomicSub:
+        case RdnaOpcode::ImageAtomicSmin:
         case RdnaOpcode::ImageAtomicUmin:
+        case RdnaOpcode::ImageAtomicSmax:
         case RdnaOpcode::ImageAtomicUmax:
         case RdnaOpcode::ImageAtomicAnd:
         case RdnaOpcode::ImageAtomicOr:
         case RdnaOpcode::ImageAtomicXor:
+        case RdnaOpcode::ImageGather4:
         case RdnaOpcode::ImageGather4Lz:
         case RdnaOpcode::ImageGather4C:
         case RdnaOpcode::ImageGather4CLz:
+        case RdnaOpcode::ImageGather4O:
         case RdnaOpcode::ImageGather4LzO:
         case RdnaOpcode::ImageGather4CO:
         case RdnaOpcode::ImageGather4CLzO:

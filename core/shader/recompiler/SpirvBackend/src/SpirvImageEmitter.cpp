@@ -538,6 +538,12 @@ std::uint32_t ImageAtomicOpcode(IrOpcode opcode) {
             return spv::OpAtomicExchange;
         case IrOpcode::ImageAtomicIAdd32:
             return spv::OpAtomicIAdd;
+        case IrOpcode::ImageAtomicISub32:
+            return spv::OpAtomicISub;
+        case IrOpcode::ImageAtomicSMin32:
+            return spv::OpAtomicSMin;
+        case IrOpcode::ImageAtomicSMax32:
+            return spv::OpAtomicSMax;
         case IrOpcode::ImageAtomicUMin32:
             return spv::OpAtomicUMin;
         case IrOpcode::ImageAtomicUMax32:
@@ -657,6 +663,9 @@ void EmitGatherOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access, con
     }
     if (dimension == RdnaImageDimension::Dim1DArray) {
         ctx.Fail(access.inst, "has an unsupported 1D-array gather");
+    }
+    if (!HasFlag(mem, RdnaImageSampleFlagLevelZero) && state.program.Resources().stage != IrShaderStage::Pixel) {
+        ctx.Fail(access.inst, "uses an implicit-LOD gather outside a pixel shader");
     }
     const auto sampled = MakeSampledImage(state, mem.resource, mem.sampler, access.slot);
     const auto sample = state.module.AllocateId();
@@ -848,7 +857,10 @@ void EmitImage(SpirvValueEmitContext& ctx, const IrValue& inst) {
             return;
         case IrOpcode::ImageAtomicSwap32:
         case IrOpcode::ImageAtomicIAdd32:
+        case IrOpcode::ImageAtomicISub32:
+        case IrOpcode::ImageAtomicSMin32:
         case IrOpcode::ImageAtomicUMin32:
+        case IrOpcode::ImageAtomicSMax32:
         case IrOpcode::ImageAtomicUMax32:
         case IrOpcode::ImageAtomicAnd32:
         case IrOpcode::ImageAtomicOr32:
@@ -901,6 +913,18 @@ void EmitImageAtomicSwap32(SpirvValueEmitContext& ctx, const IrValue& inst) {
 }
 
 void EmitImageAtomicIAdd32(SpirvValueEmitContext& ctx, const IrValue& inst) {
+    EmitImage(ctx, inst);
+}
+
+void EmitImageAtomicISub32(SpirvValueEmitContext& ctx, const IrValue& inst) {
+    EmitImage(ctx, inst);
+}
+
+void EmitImageAtomicSMin32(SpirvValueEmitContext& ctx, const IrValue& inst) {
+    EmitImage(ctx, inst);
+}
+
+void EmitImageAtomicSMax32(SpirvValueEmitContext& ctx, const IrValue& inst) {
     EmitImage(ctx, inst);
 }
 
