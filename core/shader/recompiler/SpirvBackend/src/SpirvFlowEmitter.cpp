@@ -494,6 +494,7 @@ void EmitDirectInstruction(SpirvValueEmitContext& ctx, const IrValue& inst) {
         case IrOpcode::ImageGatherRaw: return Invoke(EmitImageGatherRaw, ctx, inst);
         case IrOpcode::ImageAtomicSwap32: return Invoke(EmitImageAtomicSwap32, ctx, inst);
         case IrOpcode::ImageAtomicIAdd32: return Invoke(EmitImageAtomicIAdd32, ctx, inst);
+        case IrOpcode::ImageAtomicCompareSwap32: return Invoke(EmitImageAtomicCompareSwap32, ctx, inst);
         case IrOpcode::ImageAtomicISub32: return Invoke(EmitImageAtomicISub32, ctx, inst);
         case IrOpcode::ImageAtomicSMin32: return Invoke(EmitImageAtomicSMin32, ctx, inst);
         case IrOpcode::ImageAtomicSMax32: return Invoke(EmitImageAtomicSMax32, ctx, inst);

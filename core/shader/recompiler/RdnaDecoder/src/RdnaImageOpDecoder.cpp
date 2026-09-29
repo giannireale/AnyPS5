@@ -59,6 +59,7 @@ constexpr ImageOpcodeInfo imageOpcodes[] = {
     {0x5fu, RdnaOpcode::ImageGather4CLzO, nullptr, RdnaImageSampleFlagCompare | RdnaImageSampleFlagLevelZero | RdnaImageSampleFlagOffset, false, true, false},
     {0x61u, RdnaOpcode::ImageGather4h, nullptr, RdnaImageSampleFlagGatherHorizontal, false, true, false},
     {0x0fu, RdnaOpcode::ImageAtomicSwap, nullptr, 0, false, false, true},
+    {0x10u, RdnaOpcode::ImageAtomicCmpswap, nullptr, 0, false, false, true},
     {0x11u, RdnaOpcode::ImageAtomicAdd, nullptr, 0, false, false, true},
     {0x12u, RdnaOpcode::ImageAtomicSub, nullptr, 0, false, false, true},
     {0x14u, RdnaOpcode::ImageAtomicSmin, nullptr, 0, false, false, true},
@@ -256,8 +257,9 @@ RdnaInstruction DecodeRdnaMimg(std::uint32_t programCounter, std::span<const std
     if (multisampled && (info.sample || info.gather || opcode == 0x60u || opcode == 1u || opcode == 9u)) {
         throw std::runtime_error("unsupported multisampled MIMG operation");
     }
+    const bool compareSwap = info.opcode == RdnaOpcode::ImageAtomicCmpswap;
     const auto dmask = (word0 >> 8u) & 15u;
-    if (dmask == 0u || ((info.gather || info.atomic) && !std::has_single_bit(dmask))) {
+    if (dmask == 0u || (compareSwap ? dmask != 3u : (info.gather || info.atomic) && !std::has_single_bit(dmask))) {
         throw std::runtime_error("invalid MIMG data mask");
     }
     if (d16 && !(info.sample || info.gather || opcode == 0u || opcode == 1u || opcode == 8u || opcode == 9u)) {

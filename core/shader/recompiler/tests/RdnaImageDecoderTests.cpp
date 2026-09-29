@@ -93,6 +93,13 @@ void atomics() {
         require(instruction.dataComponents == 1u, "image atomic operates on a single dword");
         require(IsImageOpcode(entry.expected), "signed image atomic is not classified as an image opcode");
     }
+    const auto compareSwap = decode(0x10u, 3u);
+    require(compareSwap.op == RdnaOpcode::ImageAtomicCmpswap, "IMAGE_ATOMIC_CMPSWAP decoded to the wrong opcode");
+    require(compareSwap.dataComponents == 2u && compareSwap.dataDwordCount == 2u, "IMAGE_ATOMIC_CMPSWAP takes a value and a comparator");
+    require(IsImageOpcode(RdnaOpcode::ImageAtomicCmpswap), "IMAGE_ATOMIC_CMPSWAP is not classified as an image opcode");
+    requireFailure([] { (void)decode(0x10u, 1u); }, "IMAGE_ATOMIC_CMPSWAP with a single data dword was accepted");
+    requireFailure([] { (void)decode(0x10u, 0xfu); }, "64-bit IMAGE_ATOMIC_CMPSWAP was accepted");
+    requireFailure([] { (void)decode(0x11u, 3u); }, "IMAGE_ATOMIC_ADD with two data dwords was accepted");
     require(decode(0x11u).op == RdnaOpcode::ImageAtomicAdd, "IMAGE_ATOMIC_ADD regressed");
     require(decode(0x15u).op == RdnaOpcode::ImageAtomicUmin, "IMAGE_ATOMIC_UMIN regressed");
     requireFailure([] { (void)decode(0x13u); }, "reserved atomic opcode 0x13 was accepted");

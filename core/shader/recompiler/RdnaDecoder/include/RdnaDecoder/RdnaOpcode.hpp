@@ -552,6 +552,7 @@ enum class RdnaOpcode : std::uint16_t {
     ImageLoadMip,
     ImageStoreMip,
     ImageAtomicSwap,
+    ImageAtomicCmpswap,
     ImageAtomicAdd,
     ImageAtomicSub,
     ImageAtomicSmin,
