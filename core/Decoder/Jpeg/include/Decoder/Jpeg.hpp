@@ -1,6 +1,8 @@
 #ifndef DECODER_JPEG_HPP
 #define DECODER_JPEG_HPP
 
+#include "Decoder/JpegEncoder.hpp"
+
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -16,7 +18,7 @@ struct Image {
 };
 
 std::vector<std::uint8_t> Encode(std::span<const std::uint8_t> pixels, std::uint32_t width, std::uint32_t height,
-                                 std::uint32_t channels, int quality);
+                                 std::uint32_t channels, int quality, Sampling sampling = Sampling::Full);
 
 std::optional<Image> Decode(std::span<const std::uint8_t> jpeg);
 

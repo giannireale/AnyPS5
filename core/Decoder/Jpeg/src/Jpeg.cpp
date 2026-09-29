@@ -4,11 +4,6 @@
 #include <cstddef>
 #include <stdexcept>
 
-#define STB_IMAGE_WRITE_STATIC
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#define STBI_WRITE_NO_STDIO
-#include "stb_image_write.h"
-
 #define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_JPEG
@@ -21,16 +16,10 @@ namespace {
 
 constexpr std::uint32_t MAX_DIMENSION = 0xFFFF;
 
-void appendBytes(void* context, void* data, int size) {
-    auto* output = static_cast<std::vector<std::uint8_t>*>(context);
-    const auto* bytes = static_cast<const std::uint8_t*>(data);
-    output->insert(output->end(), bytes, bytes + size);
-}
-
 }  // namespace
 
 std::vector<std::uint8_t> Encode(std::span<const std::uint8_t> pixels, std::uint32_t width, std::uint32_t height,
-                                 std::uint32_t channels, int quality) {
+                                 std::uint32_t channels, int quality, Sampling sampling) {
     if (width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION) {
         throw std::invalid_argument("Jpeg::Encode: unsupported image size");
     }
@@ -40,11 +29,7 @@ std::vector<std::uint8_t> Encode(std::span<const std::uint8_t> pixels, std::uint
         throw std::invalid_argument("Jpeg::Encode: pixel buffer is too small");
     }
 
-    std::vector<std::uint8_t> output;
-    const int written = stbi_write_jpg_to_func(appendBytes, &output, static_cast<int>(width), static_cast<int>(height),
-                                               static_cast<int>(channels), pixels.data(), quality);
-    if (written == 0) throw std::runtime_error("Jpeg::Encode: encoding failed");
-    return output;
+    return EncodeBaseline(pixels, width, height, channels, quality, sampling);
 }
 
 std::optional<Image> Decode(std::span<const std::uint8_t> jpeg) {
