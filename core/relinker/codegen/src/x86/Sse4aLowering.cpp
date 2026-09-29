@@ -1,6 +1,5 @@
 #include <codegen/x86/Sse4aLowering.hpp>
 #include <codegen/x86/Amd64OnlySubstitutionTable.hpp>
-#include <codegen/CodegenException.hpp>
 #include <algorithm>
 #include <array>
 #include <span>
@@ -23,9 +22,13 @@ constexpr std::uint8_t kModRmRegister = 0xC0;
 constexpr std::uint8_t kModRmRip = 0x05;
 constexpr std::uint8_t kModRmRspBase = 0x04;
 constexpr std::uint8_t kSibRsp = 0x24;
+constexpr std::uint8_t kPrefixInsert = 0xF2;
 constexpr std::uint8_t kShiftRight = 2;
+constexpr std::uint8_t kShiftBytesRight = 3;
 constexpr std::uint8_t kShiftLeft = 6;
 constexpr std::uint8_t kFieldBits = 64;
+constexpr std::uint8_t kInsertqLengthByte = 8;
+constexpr std::uint8_t kInsertqIndexByte = 9;
 
 std::uint8_t _rex(const std::uint8_t reg, const std::uint8_t rm) {
     return static_cast<std::uint8_t>(kRexBase | ((reg & 8) != 0 ? kRexR : 0) | ((rm & 8) != 0 ? kRexB : 0));
@@ -73,9 +76,12 @@ public:
 
     void RipOperand(const std::initializer_list<std::uint8_t> opcode, const std::uint8_t reg, const Constant& constant) {
         _emit(_bytes, kPrefixPacked, reg, 0, opcode, static_cast<std::uint8_t>(((reg & 7) << 3) | kModRmRip));
-        _fixups.push_back({_bytes.size(), _bytes.size() + 4, _constants.size()});
+        const auto existing = std::find(_constants.begin(), _constants.end(), constant);
+        const auto index = static_cast<std::size_t>(existing - _constants.begin());
+        _fixups.push_back({_bytes.size(), _bytes.size() + 4, index});
         _bytes.insert(_bytes.end(), 4, 0);
-        _constants.push_back(constant);
+        if (existing == _constants.end())
+            _constants.push_back(constant);
     }
 
     void Spill(const std::uint8_t reg) {
@@ -125,10 +131,48 @@ private:
     std::vector<Constant> _constants;
 };
 
+void _emitInsertqRegisterForm(BodyBuilder& body, const Sse4aOperands& operands) {
+    const auto dst = operands.Destination;
+    const auto src = operands.Source;
+    std::array<std::uint8_t, 3> scratch{};
+    for (std::uint8_t reg = 0, found = 0; found < scratch.size(); ++reg)
+        if (reg != dst && reg != src) scratch[found++] = reg;
+    Constant fieldMask{};
+    fieldMask[0] = kFieldBits - 1;
+    Constant one{};
+    one[0] = 1;
+    body.Spill(scratch[0]);
+    body.Spill(scratch[1]);
+    body.Spill(scratch[2]);
+    body.Sse(kPrefixPacked, {0x0F, 0x6F}, scratch[0], src);
+    body.ShiftImm(kShiftBytesRight, scratch[0], kInsertqIndexByte);
+    body.RipOperand({0x0F, 0xDB}, scratch[0], fieldMask);
+    body.Sse(kPrefixPacked, {0x0F, 0x6F}, scratch[1], src);
+    body.ShiftImm(kShiftBytesRight, scratch[1], kInsertqLengthByte);
+    body.RipOperand({0x0F, 0xDB}, scratch[1], fieldMask);
+    body.RipOperand({0x0F, 0xEF}, scratch[1], fieldMask);
+    body.RipOperand({0x0F, 0xD4}, scratch[1], one);
+    body.RipOperand({0x0F, 0xDB}, scratch[1], fieldMask);
+    body.Sse(kPrefixPacked, {0x0F, 0x76}, scratch[2], scratch[2]);
+    body.Sse(kPrefixPacked, {0x0F, 0xD3}, scratch[2], scratch[1]);
+    body.Sse(kPrefixPacked, {0x0F, 0xF3}, scratch[2], scratch[0]);
+    body.Sse(kPrefixPacked, {0x0F, 0x6F}, scratch[1], src);
+    body.Sse(kPrefixPacked, {0x0F, 0xF3}, scratch[1], scratch[0]);
+    body.Sse(kPrefixPacked, {0x0F, 0xDB}, scratch[1], scratch[2]);
+    body.Sse(kPrefixPacked, {0x0F, 0xDF}, scratch[2], dst);
+    body.Sse(kPrefixPacked, {0x0F, 0xEB}, scratch[2], scratch[1]);
+    body.Sse(kPrefixInsert, {0x0F, 0x10}, dst, scratch[2]);
+    body.Restore(scratch[2]);
+    body.Restore(scratch[1]);
+    body.Restore(scratch[0]);
+}
+
 void _emitOutOfLine(BodyBuilder& body, const Sse4aOperands& operands) {
     if (operands.RegisterForm) {
-        if (operands.Insertq)
-            throw CodegenException("INSERTQ register form has no Intel lowering");
+        if (operands.Insertq) {
+            _emitInsertqRegisterForm(body, operands);
+            return;
+        }
         const auto dst = operands.Destination;
         const auto src = operands.Source;
         std::array<std::uint8_t, 2> scratch{};
