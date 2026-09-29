@@ -93,7 +93,7 @@ int main(const int argc, char* argv[]) {
 
         std::shared_ptr<Elfpatcher::IElfPatcher> patcher;
         if (args.toWindows) {
-            patcher = std::make_shared<Elfpatcher::Windows::WindowsPePatcher>(args.windowsGui);
+            patcher = std::make_shared<Elfpatcher::Windows::WindowsPePatcher>(args.windowsGui, args.iconPath.empty() ? std::vector<std::uint8_t>{} : fileReader.Read(args.iconPath));
         } else {
             patcher = std::make_shared<Elfpatcher::Linux::LinuxElfPatcher>(
                 std::make_shared<Elfpatcher::EntryStubBuilder>(),
