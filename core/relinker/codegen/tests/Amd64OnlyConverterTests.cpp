@@ -155,9 +155,9 @@ void matcherSubstitutions() {
         require(lowered && lowered->Lowering == Codegen::Amd64OnlyLowering::Trampoline, "SHA-NI message schedule opcode was not lowered through a stub");
     }
     const auto sha256rnds2 = match({0x0F, 0x38, 0xCB, 0xD9});
-    require(sha256rnds2 && sha256rnds2->Lowering == Codegen::Amd64OnlyLowering::Unsupported && sha256rnds2->InstructionName == "SHA256RNDS2", "SHA256RNDS2 was not reported as unsupported");
+    require(sha256rnds2 && sha256rnds2->Lowering == Codegen::Amd64OnlyLowering::Trampoline && sha256rnds2->InstructionName == "SHA256RNDS2", "SHA256RNDS2 was not lowered through a stub");
     const auto sha1rnds4 = match({0x0F, 0x3A, 0xCC, 0xD9, 0x02});
-    require(sha1rnds4 && sha1rnds4->Lowering == Codegen::Amd64OnlyLowering::Unsupported && sha1rnds4->InstructionName == "SHA1RNDS4", "SHA1RNDS4 was not reported as unsupported");
+    require(sha1rnds4 && sha1rnds4->Lowering == Codegen::Amd64OnlyLowering::Trampoline && sha1rnds4->InstructionName == "SHA1RNDS4", "SHA1RNDS4 was not lowered through a stub");
     requireFailure([&] { (void)match({0x0F, 0x38, 0xC8, 0x18}); }, "SHA1NEXTE with a memory operand was accepted");
     const auto rdpru = match({0x0F, 0x01, 0xFD});
     require(rdpru && rdpru->Lowering == Codegen::Amd64OnlyLowering::Unsupported && rdpru->InstructionName == "RDPRU", "RDPRU was not reported as unsupported");
@@ -512,6 +512,53 @@ void shaReference(const std::uint8_t opcode, const std::uint32_t* destination, c
     }
 }
 
+void sha1Rnds4Reference(const std::uint32_t* destination, const std::uint32_t* source, const std::uint8_t immediate, std::uint32_t* out) {
+    static const std::uint32_t constants[4] = {0x5A827999u, 0x6ED9EBA1u, 0x8F1BBCDCu, 0xCA62C1D6u};
+    const auto selector = immediate & 3u;
+    std::uint32_t a = destination[3], b = destination[2], c = destination[1], d = destination[0], e = 0;
+    const std::uint32_t w[4] = {source[3], source[2], source[1], source[0]};
+    for (int round = 0; round < 4; ++round) {
+        std::uint32_t mixed;
+        if (selector == 0) mixed = (b & c) | (~b & d);
+        else if (selector == 2) mixed = (b & c) | (b & d) | (c & d);
+        else mixed = b ^ c ^ d;
+        const auto value = mixed + rotateLeft(a, 5) + w[round] + e + constants[selector];
+        e = d;
+        d = c;
+        c = rotateLeft(b, 30);
+        b = a;
+        a = value;
+    }
+    out[3] = a;
+    out[2] = b;
+    out[1] = c;
+    out[0] = d;
+}
+
+void sha256Rnds2Reference(const std::uint32_t* destination, const std::uint32_t* source, const std::uint32_t* implicit, std::uint32_t* out) {
+    std::uint32_t a = source[3], b = source[2], c = destination[3], d = destination[2];
+    std::uint32_t e = source[1], f = source[0], g = destination[1], h = destination[0];
+    for (int round = 0; round < 2; ++round) {
+        const auto choose = (e & f) ^ (~e & g);
+        const auto sigma1 = rotateRight(e, 6) ^ rotateRight(e, 11) ^ rotateRight(e, 25);
+        const auto sigma0 = rotateRight(a, 2) ^ rotateRight(a, 13) ^ rotateRight(a, 22);
+        const auto majority = (a & b) ^ (a & c) ^ (b & c);
+        const auto value = choose + sigma1 + implicit[round] + h;
+        h = g;
+        g = f;
+        f = e;
+        e = d + value;
+        d = c;
+        c = b;
+        b = a;
+        a = value + majority + sigma0;
+    }
+    out[3] = a;
+    out[2] = b;
+    out[1] = e;
+    out[0] = f;
+}
+
 void runShaNative(const std::uint8_t opcode, const std::uint32_t* destination, const std::uint32_t* source, std::uint32_t* out) {
     switch (opcode) {
     case 0xC8:
@@ -534,6 +581,95 @@ void runShaNative(const std::uint8_t opcode, const std::uint32_t* destination, c
         asm volatile("movdqu (%[s]), %%xmm1\n\t movdqu (%[d]), %%xmm3\n\t .byte 0x0f,0x38,0xcd,0xd9\n\t movdqu %%xmm3, (%[o])"
                      : : [d] "r"(destination), [s] "r"(source), [o] "r"(out) : "xmm1", "xmm3", "memory");
         return;
+    }
+}
+
+void runSha256Rnds2Native(const std::uint32_t* destination, const std::uint32_t* source, const std::uint32_t* implicit, std::uint32_t* out) {
+    asm volatile("movdqu (%[k]), %%xmm0\n\t movdqu (%[s]), %%xmm1\n\t movdqu (%[d]), %%xmm3\n\t .byte 0x0f,0x38,0xcb,0xd9\n\t movdqu %%xmm3, (%[o])"
+                 : : [d] "r"(destination), [s] "r"(source), [k] "r"(implicit), [o] "r"(out) : "xmm0", "xmm1", "xmm3", "memory");
+}
+
+void runSha1Rnds4Native(const std::uint32_t* destination, const std::uint32_t* source, const std::uint8_t immediate, std::uint32_t* out) {
+    switch (immediate & 3u) {
+    case 0:
+        asm volatile("movdqu (%[s]), %%xmm1\n\t movdqu (%[d]), %%xmm3\n\t .byte 0x0f,0x3a,0xcc,0xd9,0x00\n\t movdqu %%xmm3, (%[o])"
+                     : : [d] "r"(destination), [s] "r"(source), [o] "r"(out) : "xmm1", "xmm3", "memory");
+        return;
+    case 1:
+        asm volatile("movdqu (%[s]), %%xmm1\n\t movdqu (%[d]), %%xmm3\n\t .byte 0x0f,0x3a,0xcc,0xd9,0x01\n\t movdqu %%xmm3, (%[o])"
+                     : : [d] "r"(destination), [s] "r"(source), [o] "r"(out) : "xmm1", "xmm3", "memory");
+        return;
+    case 2:
+        asm volatile("movdqu (%[s]), %%xmm1\n\t movdqu (%[d]), %%xmm3\n\t .byte 0x0f,0x3a,0xcc,0xd9,0x02\n\t movdqu %%xmm3, (%[o])"
+                     : : [d] "r"(destination), [s] "r"(source), [o] "r"(out) : "xmm1", "xmm3", "memory");
+        return;
+    default:
+        asm volatile("movdqu (%[s]), %%xmm1\n\t movdqu (%[d]), %%xmm3\n\t .byte 0x0f,0x3a,0xcc,0xd9,0x03\n\t movdqu %%xmm3, (%[o])"
+                     : : [d] "r"(destination), [s] "r"(source), [o] "r"(out) : "xmm1", "xmm3", "memory");
+        return;
+    }
+}
+
+void shaRoundExecution() {
+    const auto matcher = Codegen::MakeAmd64OnlyInstructionMatcher();
+    std::uint32_t seed = 0x9e3779b9u;
+    const auto next = [&] {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        return seed;
+    };
+    for (int variant = 0; variant < 5; ++variant) {
+        const bool rounds4 = variant < 4;
+        const auto immediate = static_cast<std::uint8_t>(variant & 3);
+        const Bytes site = rounds4 ? Bytes{0x0F, 0x3A, 0xCC, 0xD9, immediate} : Bytes{0x0F, 0x38, 0xCB, 0xD9};
+        const auto match = matcher->Match(site.data(), site.size());
+        require(match && match->Lowering == Codegen::Amd64OnlyLowering::Trampoline, "SHA-NI round stub was not produced");
+        auto body = match->StubBody;
+        const auto ret = body.size();
+        body.push_back(0xC3);
+        const auto displacement = static_cast<std::int32_t>(ret - (match->ReturnBranchOffset + 5));
+        std::memcpy(body.data() + match->ReturnBranchOffset + 1, &displacement, sizeof(displacement));
+        void* code = mmap(nullptr, 8192, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        require(code != MAP_FAILED, "cannot map executable memory for the stub");
+        std::memcpy(code, body.data(), body.size());
+        for (int iteration = 0; iteration < 128; ++iteration) {
+            alignas(16) std::uint32_t destination[4];
+            alignas(16) std::uint32_t source[4];
+            alignas(16) std::uint32_t implicit[4];
+            alignas(16) std::uint32_t out[4] = {};
+            for (auto& value : destination) value = next();
+            for (auto& value : source) value = next();
+            for (auto& value : implicit) value = next();
+            std::uint64_t flags = 0;
+            asm volatile(
+                "movdqu (%[k]), %%xmm0\n\t"
+                "movdqu (%[src]), %%xmm1\n\t"
+                "movdqu (%[dst]), %%xmm3\n\t"
+                "lea -128(%%rsp), %%rsp\n\t"
+                "stc\n\t"
+                "call *%[code]\n\t"
+                "pushfq\n\t"
+                "popq %%rdx\n\t"
+                "lea 128(%%rsp), %%rsp\n\t"
+                "movdqu %%xmm3, (%[out])\n\t"
+                "movq %%rdx, %[flagsOut]"
+                : [flagsOut] "=m"(flags)
+                : [dst] "r"(destination), [src] "r"(source), [k] "r"(implicit), [code] "r"(code), [out] "r"(out)
+                : "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm3", "memory", "cc");
+            std::uint32_t expected[4] = {};
+            if (rounds4) sha1Rnds4Reference(destination, source, immediate, expected);
+            else sha256Rnds2Reference(destination, source, implicit, expected);
+            require(std::memcmp(out, expected, sizeof(expected)) == 0, "SHA-NI round stub does not match the reference model");
+            require((flags & 1u) == 1u, "SHA-NI round stub did not preserve the flags");
+            if (__builtin_cpu_supports("sha")) {
+                alignas(16) std::uint32_t native[4] = {};
+                if (rounds4) runSha1Rnds4Native(destination, source, immediate, native);
+                else runSha256Rnds2Native(destination, source, implicit, native);
+                require(std::memcmp(out, native, sizeof(native)) == 0, "SHA-NI round stub does not match the hardware instruction");
+            }
+        }
+        munmap(code, 8192);
     }
 }
 
@@ -788,6 +924,7 @@ int main() {
         insertqRegisterFormExecution();
         clzeroExecution();
         shaNiExecution();
+        shaRoundExecution();
         converterSegment();
         converterFailureOffsets();
         linuxPlacement();
