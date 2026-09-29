@@ -1,4 +1,5 @@
 #include <elfpatcher/general/GuestModuleWriter.hpp>
+#include <elfpatcher/general/TrampolineWriter.hpp>
 #include <io/BufferUtils.hpp>
 #include <algorithm>
 #include <limits>
@@ -23,6 +24,8 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteLinux(const Relinker::GuestIma
     const auto extraOffset = bytes.size();
     const auto extraAddress = Io::AlignUp64(end, 0x4000);
     const auto address = [&] { return extraAddress + bytes.size() - extraOffset; };
+    for (const auto& site : image.Trampolines)
+        AppendTrampoline(bytes, site, extraOffset, [&](const std::uint64_t offset) { return extraAddress + offset - extraOffset; });
     auto strings = image.Dynamic.DynStrData;
     auto symbols = image.Dynamic.DynSymData;
     const auto addString = [&](const std::string& value) {

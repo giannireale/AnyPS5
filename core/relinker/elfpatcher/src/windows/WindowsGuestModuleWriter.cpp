@@ -1,4 +1,5 @@
 #include <elfpatcher/general/GuestModuleWriter.hpp>
+#include <elfpatcher/windows/WindowsTrampolineBuilder.hpp>
 #include <elfpatcher/windows/WindowsLoadImage.hpp>
 #include <elfpatcher/windows/WindowsTlsBuilder.hpp>
 #include <elfpatcher/windows/WindowsPeWriter.hpp>
@@ -76,6 +77,7 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteWindows(const Relinker::GuestI
     apply(guest.Dynamic.RelaPltData);
     auto sections = image.BuildSections();
     auto nextRva = image.GetEndRva();
+    WindowsTrampolineBuilder().Build(guest.Trampolines, image, sections, nextRva);
     std::array<PeDirectory, 16> directories{};
     std::uint32_t tlsIndex = 0;
     directories[9] = WindowsTlsBuilder().Build(guest.Bytes, guest.Headers, image, sections, relocations, nextRva, &tlsIndex);

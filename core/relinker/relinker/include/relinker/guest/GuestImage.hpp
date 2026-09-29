@@ -1,6 +1,7 @@
 #ifndef RELINKER_GUESTIMAGE_HPP
 #define RELINKER_GUESTIMAGE_HPP
 
+#include <codegen/CodegenTypes.hpp>
 #include <domain/Types.hpp>
 #include <relinker/domain/ISyscallScanner.hpp>
 #include <filesystem>
@@ -26,6 +27,7 @@ struct GuestImage {
     std::vector<GuestSymbol> Symbols;
     std::vector<std::string> Dependencies;
     Domain::SysVDynamicSection Dynamic;
+    std::vector<Codegen::TrampolineSite> Trampolines;
     std::uint64_t Init = 0;
     std::uint64_t Fini = 0;
     std::uint64_t Got = 0;
