@@ -25,30 +25,118 @@ constexpr std::uint8_t kRotateLeft = 30;
 constexpr std::uint8_t kRotateRight = 2;
 constexpr std::size_t kHighLaneOffset = 12;
 
-std::array<std::uint8_t, 2> _scratch(const ShaNiOperands& operands) {
-    std::array<std::uint8_t, 2> scratch{};
-    for (std::uint8_t reg = 0, found = 0; found < scratch.size(); ++reg)
-        if (reg != operands.Destination && reg != operands.Source) scratch[found++] = reg;
+constexpr std::uint8_t kPxor[] = {0x0F, 0xEF};
+constexpr std::uint8_t kShiftLeftBytes = 7;
+constexpr std::uint8_t kShiftRightBytes = 3;
+constexpr std::uint8_t kDwordBits = 32;
+
+template <std::size_t TCount>
+std::array<std::uint8_t, TCount> _scratchRegisters(const ShaNiOperands& operands, const bool keepXmm0) {
+    std::array<std::uint8_t, TCount> scratch{};
+    std::uint8_t found = 0;
+    for (std::uint8_t reg = 0; found < TCount; ++reg) {
+        if (reg == operands.Destination || reg == operands.Source) continue;
+        if (keepXmm0 && reg == 0) continue;
+        scratch[found++] = reg;
+    }
     return scratch;
 }
 
+void _move(StubBodyBuilder& body, const std::uint8_t dst, const std::uint8_t src) {
+    body.Sse(kStubPrefixPacked, {kMovdqa[0], kMovdqa[1]}, dst, src);
+}
+
+void _rotateLeft(StubBodyBuilder& body, const std::uint8_t reg, const std::uint8_t temp, const std::uint8_t count) {
+    _move(body, temp, reg);
+    body.ShiftImm(kStubShiftDword, kShiftLeftDword, reg, count);
+    body.ShiftImm(kStubShiftDword, kShiftRightDword, temp, static_cast<std::uint8_t>(kDwordBits - count));
+    body.Sse(kStubPrefixPacked, {kPor[0], kPor[1]}, reg, temp);
+}
+
+void _sigma(StubBodyBuilder& body, const std::uint8_t out, const std::uint8_t in, const std::uint8_t tempA, const std::uint8_t tempB, const std::uint8_t rotateA, const std::uint8_t rotateB, const std::uint8_t shift) {
+    _move(body, out, in);
+    _rotateLeft(body, out, tempA, rotateA);
+    _move(body, tempB, in);
+    _rotateLeft(body, tempB, tempA, rotateB);
+    body.Sse(kStubPrefixPacked, {kPxor[0], kPxor[1]}, out, tempB);
+    _move(body, tempB, in);
+    body.ShiftImm(kStubShiftDword, kShiftRightDword, tempB, shift);
+    body.Sse(kStubPrefixPacked, {kPxor[0], kPxor[1]}, out, tempB);
+}
+
 void _emitSha1Nexte(StubBodyBuilder& body, const ShaNiOperands& operands) {
-    const auto scratch = _scratch(operands);
+    const auto scratch = _scratchRegisters<2>(operands, false);
     StubConstant highLane{};
     for (std::size_t index = kHighLaneOffset; index < highLane.size(); ++index)
         highLane[index] = 0xFF;
     body.Spill(scratch[0]);
     body.Spill(scratch[1]);
-    body.Sse(kStubPrefixPacked, {kMovdqa[0], kMovdqa[1]}, scratch[0], operands.Destination);
+    _move(body, scratch[0], operands.Destination);
     body.ShiftImm(kStubShiftDword, kShiftLeftDword, scratch[0], kRotateLeft);
-    body.Sse(kStubPrefixPacked, {kMovdqa[0], kMovdqa[1]}, scratch[1], operands.Destination);
+    _move(body, scratch[1], operands.Destination);
     body.ShiftImm(kStubShiftDword, kShiftRightDword, scratch[1], kRotateRight);
     body.Sse(kStubPrefixPacked, {kPor[0], kPor[1]}, scratch[0], scratch[1]);
     body.RipOperand({kPand[0], kPand[1]}, scratch[0], highLane);
-    body.Sse(kStubPrefixPacked, {kMovdqa[0], kMovdqa[1]}, operands.Destination, operands.Source);
+    _move(body, operands.Destination, operands.Source);
     body.Sse(kStubPrefixPacked, {kPaddd[0], kPaddd[1]}, operands.Destination, scratch[0]);
     body.Restore(scratch[1]);
     body.Restore(scratch[0]);
+}
+
+void _emitSha1Msg1(StubBodyBuilder& body, const ShaNiOperands& operands) {
+    const auto scratch = _scratchRegisters<2>(operands, false);
+    body.Spill(scratch[0]);
+    body.Spill(scratch[1]);
+    _move(body, scratch[0], operands.Destination);
+    body.ShiftImm(kStubShiftQword, kShiftLeftBytes, scratch[0], 8);
+    _move(body, scratch[1], operands.Source);
+    body.ShiftImm(kStubShiftQword, kShiftRightBytes, scratch[1], 8);
+    body.Sse(kStubPrefixPacked, {kPor[0], kPor[1]}, scratch[0], scratch[1]);
+    body.Sse(kStubPrefixPacked, {kPxor[0], kPxor[1]}, operands.Destination, scratch[0]);
+    body.Restore(scratch[1]);
+    body.Restore(scratch[0]);
+}
+
+void _emitSha1Msg2(StubBodyBuilder& body, const ShaNiOperands& operands) {
+    const auto scratch = _scratchRegisters<3>(operands, false);
+    for (const auto reg : scratch) body.Spill(reg);
+    _move(body, scratch[0], operands.Source);
+    body.ShiftImm(kStubShiftQword, kShiftLeftBytes, scratch[0], 4);
+    body.Sse(kStubPrefixPacked, {kPxor[0], kPxor[1]}, scratch[0], operands.Destination);
+    _rotateLeft(body, scratch[0], scratch[1], 1);
+    _move(body, scratch[1], scratch[0]);
+    body.ShiftImm(kStubShiftQword, kShiftRightBytes, scratch[1], 12);
+    _rotateLeft(body, scratch[1], scratch[2], 1);
+    body.Sse(kStubPrefixPacked, {kPxor[0], kPxor[1]}, scratch[0], scratch[1]);
+    _move(body, operands.Destination, scratch[0]);
+    for (auto index = scratch.size(); index > 0; --index) body.Restore(scratch[index - 1]);
+}
+
+void _emitSha256Msg1(StubBodyBuilder& body, const ShaNiOperands& operands) {
+    const auto scratch = _scratchRegisters<4>(operands, false);
+    for (const auto reg : scratch) body.Spill(reg);
+    _move(body, scratch[0], operands.Destination);
+    body.ShiftImm(kStubShiftQword, kShiftRightBytes, scratch[0], 4);
+    _move(body, scratch[1], operands.Source);
+    body.ShiftImm(kStubShiftQword, kShiftLeftBytes, scratch[1], 12);
+    body.Sse(kStubPrefixPacked, {kPor[0], kPor[1]}, scratch[0], scratch[1]);
+    _sigma(body, scratch[1], scratch[0], scratch[2], scratch[3], 25, 14, 3);
+    body.Sse(kStubPrefixPacked, {kPaddd[0], kPaddd[1]}, operands.Destination, scratch[1]);
+    for (auto index = scratch.size(); index > 0; --index) body.Restore(scratch[index - 1]);
+}
+
+void _emitSha256Msg2(StubBodyBuilder& body, const ShaNiOperands& operands) {
+    const auto scratch = _scratchRegisters<4>(operands, false);
+    for (const auto reg : scratch) body.Spill(reg);
+    _move(body, scratch[0], operands.Source);
+    body.ShiftImm(kStubShiftQword, kShiftRightBytes, scratch[0], 8);
+    _sigma(body, scratch[1], scratch[0], scratch[2], scratch[3], 15, 13, 10);
+    body.Sse(kStubPrefixPacked, {kPaddd[0], kPaddd[1]}, operands.Destination, scratch[1]);
+    _move(body, scratch[0], operands.Destination);
+    body.ShiftImm(kStubShiftQword, kShiftLeftBytes, scratch[0], 8);
+    _sigma(body, scratch[1], scratch[0], scratch[2], scratch[3], 15, 13, 10);
+    body.Sse(kStubPrefixPacked, {kPaddd[0], kPaddd[1]}, operands.Destination, scratch[1]);
+    for (auto index = scratch.size(); index > 0; --index) body.Restore(scratch[index - 1]);
 }
 
 }
@@ -81,7 +169,18 @@ ShaNiOperands DecodeShaNi(const std::uint8_t* data, const std::size_t length) {
 }
 
 bool ShaNiLowering::CanLower(const ShaNiOperands& operands) const {
-    return !operands.ThreeByte3A && operands.Opcode == kShaOpSha1Nexte;
+    if (operands.ThreeByte3A)
+        return false;
+    switch (operands.Opcode) {
+    case kShaOpSha1Nexte:
+    case kShaOpSha1Msg1:
+    case kShaOpSha1Msg2:
+    case kShaOpSha256Msg1:
+    case kShaOpSha256Msg2:
+        return true;
+    default:
+        return false;
+    }
 }
 
 LoweredBody ShaNiLowering::LowerOutOfLine(const std::span<const ShaNiOperands> sequence, const std::span<const std::uint8_t> trailing) const {
@@ -89,7 +188,23 @@ LoweredBody ShaNiLowering::LowerOutOfLine(const std::span<const ShaNiOperands> s
     for (const auto& operands : sequence) {
         if (!CanLower(operands))
             throw CodegenException("SHA-NI opcode has no Intel lowering");
-        _emitSha1Nexte(body, operands);
+        switch (operands.Opcode) {
+        case kShaOpSha1Nexte:
+            _emitSha1Nexte(body, operands);
+            break;
+        case kShaOpSha1Msg1:
+            _emitSha1Msg1(body, operands);
+            break;
+        case kShaOpSha1Msg2:
+            _emitSha1Msg2(body, operands);
+            break;
+        case kShaOpSha256Msg1:
+            _emitSha256Msg1(body, operands);
+            break;
+        default:
+            _emitSha256Msg2(body, operands);
+            break;
+        }
     }
     body.Raw(trailing);
     return body.Finish();
