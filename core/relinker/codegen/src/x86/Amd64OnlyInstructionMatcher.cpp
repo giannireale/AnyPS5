@@ -3,6 +3,7 @@
 #include <codegen/x86/Amd64OnlySubstitutionTable.hpp>
 #include <codegen/x86/Sse4aLowering.hpp>
 #include <codegen/x86/Sse4aOperands.hpp>
+#include <codegen/x86/SystemInstructionLowering.hpp>
 #include <codegen/x86/X64OpcodeConstants.hpp>
 #include <codegen/CodegenException.hpp>
 #include <memory>
@@ -34,6 +35,10 @@ public:
 
 private:
     Sse4aLowering _lowering;
+    SystemInstructionLowering _systemLowering;
+
+    [[nodiscard]] Amd64OnlyMatch _matchSystem(const DecodedInstruction& instr, const Entry& entry, SystemInstruction instruction, std::span<const std::uint8_t> trailing) const;
+    [[nodiscard]] static std::optional<SystemInstruction> _systemInstruction(const DecodedInstruction& instr);
 
     [[nodiscard]] Amd64OnlyMatch _matchMovnts(const DecodedInstruction& instr, const Entry& entry) const;
     [[nodiscard]] Amd64OnlyMatch _matchSse4a(const DecodedInstruction& instr, const Entry& entry, const Entry& registerFormEntry, std::span<const std::uint8_t> trailing) const;
@@ -50,6 +55,25 @@ Amd64OnlyMatch Amd64OnlyInstructionMatcher::_matchMovnts(const DecodedInstructio
     std::vector<std::uint8_t> replacement(instr.Data, instr.Data + instr.Length);
     replacement[opcodeOffset + 1] = kMovsStoreOpcode;
     return Amd64OnlyMatch{entry.Name, instr.Length, Amd64OnlyLowering::InPlace, std::move(replacement), {}, 0};
+}
+
+std::optional<SystemInstruction> Amd64OnlyInstructionMatcher::_systemInstruction(const DecodedInstruction& instr) {
+    if (instr.IsMonitorx())
+        return SystemInstruction::Monitorx;
+    if (instr.IsMwaitx())
+        return SystemInstruction::Mwaitx;
+    if (instr.IsClzero())
+        return SystemInstruction::Clzero;
+    if (instr.IsMcommit())
+        return SystemInstruction::Mcommit;
+    return std::nullopt;
+}
+
+Amd64OnlyMatch Amd64OnlyInstructionMatcher::_matchSystem(const DecodedInstruction& instr, const Entry& entry, const SystemInstruction instruction, const std::span<const std::uint8_t> trailing) const {
+    if (instruction != SystemInstruction::Clzero && trailing.empty())
+        return Amd64OnlyMatch{entry.Name, instr.Length, Amd64OnlyLowering::InPlace, _systemLowering.LowerInPlace(instruction, instr.Length), {}, 0};
+    auto body = _systemLowering.LowerOutOfLine(std::span<const SystemInstruction>(&instruction, 1), trailing);
+    return Amd64OnlyMatch{entry.Name, instr.Length, Amd64OnlyLowering::Trampoline, {}, std::move(body.Bytes), body.ReturnBranchOffset};
 }
 
 Amd64OnlyMatch Amd64OnlyInstructionMatcher::_matchSse4a(const DecodedInstruction& instr, const Entry& entry, const Entry& registerFormEntry, std::span<const std::uint8_t> trailing) const {
@@ -69,6 +93,21 @@ std::optional<Amd64OnlyMatch> Amd64OnlyInstructionMatcher::MatchSequence(
 ) const {
     if (instructions.empty())
         return std::nullopt;
+    std::vector<SystemInstruction> systemSequence;
+    for (const auto& instruction : instructions) {
+        const DecodedInstruction instr{instruction.data(), instruction.size()};
+        const auto system = _systemInstruction(instr);
+        if (!system.has_value()) {
+            systemSequence.clear();
+            break;
+        }
+        systemSequence.push_back(*system);
+    }
+    if (!systemSequence.empty()) {
+        const auto& entry = systemSequence.front() == SystemInstruction::Clzero ? kClzero : (systemSequence.front() == SystemInstruction::Monitorx ? kMonitorx : (systemSequence.front() == SystemInstruction::Mwaitx ? kMwaitx : kMcommit));
+        auto systemBody = _systemLowering.LowerOutOfLine(systemSequence, trailing);
+        return Amd64OnlyMatch{entry.Name, instructions.front().size(), Amd64OnlyLowering::Trampoline, {}, std::move(systemBody.Bytes), systemBody.ReturnBranchOffset};
+    }
     std::vector<Sse4aOperands> sequence;
     for (const auto& instruction : instructions) {
         const DecodedInstruction instr{instruction.data(), instruction.size()};
@@ -102,19 +141,19 @@ std::optional<Amd64OnlyMatch> Amd64OnlyInstructionMatcher::Match(
         return _matchSse4a(instr, kInsertq, kInsertqRegisterForm, trailing);
 
     if (instr.IsMonitorx())
-        return _unsupported(kMonitorx, length);
+        return _matchSystem(instr, kMonitorx, SystemInstruction::Monitorx, trailing);
 
     if (instr.IsMwaitx())
-        return _unsupported(kMwaitx, length);
+        return _matchSystem(instr, kMwaitx, SystemInstruction::Mwaitx, trailing);
 
     if (instr.IsClzero())
-        return _unsupported(kClzero, length);
+        return _matchSystem(instr, kClzero, SystemInstruction::Clzero, trailing);
 
     if (instr.IsRdpru())
         return _unsupported(kRdpru, length);
 
     if (instr.IsMcommit())
-        return _unsupported(kMcommit, length);
+        return _matchSystem(instr, kMcommit, SystemInstruction::Mcommit, trailing);
 
     return std::nullopt;
 }
