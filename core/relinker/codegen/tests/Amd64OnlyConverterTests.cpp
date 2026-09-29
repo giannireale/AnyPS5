@@ -140,7 +140,15 @@ void matcherSubstitutions() {
     require(movntsd && movntsd->Lowering == Codegen::Amd64OnlyLowering::InPlace && movntsd->ReplacementBytes == Bytes{0xF2, 0x44, 0x0F, 0x11, 0x4C, 0x24, 0x10} && movntsd->InstructionName == "MOVNTSD", "MOVNTSD was not rewritten to MOVSD");
     requireFailure([&] { (void)match({0xF3, 0x0F, 0x2B, 0xC1}); }, "MOVNTSS with a register operand was accepted");
     const auto monitorx = match({0x0F, 0x01, 0xFA});
-    require(monitorx && monitorx->Lowering == Codegen::Amd64OnlyLowering::Unsupported && monitorx->InstructionName == "MONITORX", "MONITORX was not reported as unsupported");
+    require(monitorx && monitorx->Lowering == Codegen::Amd64OnlyLowering::InPlace && monitorx->ReplacementBytes == Bytes{0x0F, 0x1F, 0x00} && monitorx->InstructionName == "MONITORX", "MONITORX was not rewritten to a three byte NOP");
+    const auto mwaitx = match({0x0F, 0x01, 0xFB});
+    require(mwaitx && mwaitx->Lowering == Codegen::Amd64OnlyLowering::InPlace && mwaitx->ReplacementBytes == Bytes{0xF3, 0x90, 0x90} && mwaitx->InstructionName == "MWAITX", "MWAITX was not rewritten to PAUSE");
+    const auto mcommit = match({0xF3, 0x0F, 0x01, 0xFA});
+    require(mcommit && mcommit->Lowering == Codegen::Amd64OnlyLowering::InPlace && mcommit->ReplacementBytes == Bytes{0x0F, 0xAE, 0xF0, 0xF8} && mcommit->InstructionName == "MCOMMIT", "MCOMMIT was not rewritten to MFENCE and CLC");
+    const auto clzero = match({0x0F, 0x01, 0xFC});
+    require(clzero && clzero->Lowering == Codegen::Amd64OnlyLowering::Trampoline && clzero->InstructionName == "CLZERO", "CLZERO was not lowered through a stub");
+    const auto rdpru = match({0x0F, 0x01, 0xFD});
+    require(rdpru && rdpru->Lowering == Codegen::Amd64OnlyLowering::Unsupported && rdpru->InstructionName == "RDPRU", "RDPRU was not reported as unsupported");
     const auto registerForm = match({0x66, 0x0F, 0x79, 0xCA});
     require(registerForm && registerForm->Lowering == Codegen::Amd64OnlyLowering::Trampoline && registerForm->InstructionName == "EXTRQ register form", "EXTRQ register form was not lowered through a stub");
     const auto insertqRegisterForm = match({0xF2, 0x0F, 0x79, 0xCA});
@@ -219,12 +227,25 @@ void converterSegment() {
     auto branchInside = file;
     branchInside[0x207] = 0x02;
     requireFailure([&] { (void)converter->Convert(branchInside, {segmentHeader(20)}); }, "Branch into an AMD-only instruction was accepted");
+    auto rdpru = file;
+    rdpru[0x20F] = 0x0F;
+    rdpru[0x210] = 0x01;
+    rdpru[0x211] = 0xFD;
+    rdpru[0x212] = 0x90;
+    requireFailure([&] { (void)converter->Convert(rdpru, {segmentHeader(20)}); }, "RDPRU was silently kept");
     auto monitorx = file;
     monitorx[0x20F] = 0x0F;
     monitorx[0x210] = 0x01;
     monitorx[0x211] = 0xFA;
     monitorx[0x212] = 0x90;
-    requireFailure([&] { (void)converter->Convert(monitorx, {segmentHeader(20)}); }, "MONITORX was silently kept");
+    const auto monitorxResult = converter->Convert(monitorx, {segmentHeader(20)});
+    require(monitorxResult.ReplacedCount == 1 && monitorxResult.Bytes[0x20F] == 0x0F && monitorxResult.Bytes[0x210] == 0x1F && monitorxResult.Bytes[0x211] == 0x00, "MONITORX was not replaced in place");
+    auto clzero = monitorx;
+    clzero[0x211] = 0xFC;
+    clzero[0x213] = 0x90;
+    const auto clzeroResult = converter->Convert(clzero, {segmentHeader(20)});
+    require(clzeroResult.Trampolines.size() == 2 && clzeroResult.Trampolines[1].Offset == 0x20F && clzeroResult.Trampolines[1].Length == 5, "Short CLZERO did not absorb the following instructions");
+    require(clzeroResult.Trampolines[1].Body[clzeroResult.Trampolines[1].ReturnBranchOffset] == 0xE9, "CLZERO stub does not end with the return jump");
     auto registerForm = file;
     const Bytes extrqRegister = {0x66, 0x0F, 0x79, 0xCA};
     std::copy(extrqRegister.begin(), extrqRegister.end(), registerForm.begin() + 0x20F);
@@ -252,10 +273,10 @@ void converterFailureOffsets() {
     auto movntsRegister = file;
     movntsRegister[0x212] = 0xC1;
     require(failureOffset([&] { (void)converter->Convert(movntsRegister, {segmentHeader(20)}); }, "MOVNTSS register form was accepted") == 0x20F, "MOVNTSS failure does not carry the file offset");
-    auto monitorx = file;
-    const Bytes monitorxBytes = {0x0F, 0x01, 0xFA, 0x90};
-    std::copy(monitorxBytes.begin(), monitorxBytes.end(), monitorx.begin() + 0x20F);
-    require(failureOffset([&] { (void)converter->Convert(monitorx, {segmentHeader(20)}); }, "MONITORX was accepted") == 0x20F, "Unsupported instruction failure does not carry the file offset");
+    auto rdpru = file;
+    const Bytes rdpruBytes = {0x0F, 0x01, 0xFD, 0x90};
+    std::copy(rdpruBytes.begin(), rdpruBytes.end(), rdpru.begin() + 0x20F);
+    require(failureOffset([&] { (void)converter->Convert(rdpru, {segmentHeader(20)}); }, "RDPRU was accepted") == 0x20F, "Unsupported instruction failure does not carry the file offset");
 }
 
 Bytes elfFixture(const Bytes& text) {
@@ -428,6 +449,46 @@ void runInsertqStub(const Bytes& site, std::uint64_t destination, std::uint64_t 
     *high = out[1];
 }
 
+void clzeroExecution() {
+    const auto matcher = Codegen::MakeAmd64OnlyInstructionMatcher();
+    const Bytes site = {0x0F, 0x01, 0xFC};
+    const auto match = matcher->Match(site.data(), site.size());
+    require(match && match->Lowering == Codegen::Amd64OnlyLowering::Trampoline, "CLZERO stub was not produced");
+    auto body = match->StubBody;
+    const auto ret = body.size();
+    body.push_back(0xC3);
+    const auto displacement = static_cast<std::int32_t>(ret - (match->ReturnBranchOffset + 5));
+    std::memcpy(body.data() + match->ReturnBranchOffset + 1, &displacement, sizeof(displacement));
+    void* code = mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    require(code != MAP_FAILED, "cannot map executable memory for the stub");
+    std::memcpy(code, body.data(), body.size());
+    alignas(64) std::uint8_t buffer[192];
+    std::memset(buffer, 0xAA, sizeof(buffer));
+    std::uint8_t* const target = buffer + 70;
+    std::uint64_t returnedRax = 0;
+    std::uint64_t returnedFlags = 0;
+    asm volatile(
+        "movq %[target], %%rax\n\t"
+        "lea -128(%%rsp), %%rsp\n\t"
+        "stc\n\t"
+        "call *%[code]\n\t"
+        "pushfq\n\t"
+        "popq %%rdx\n\t"
+        "lea 128(%%rsp), %%rsp\n\t"
+        "movq %%rax, %[rax]\n\t"
+        "movq %%rdx, %[flags]"
+        : [rax] "=m"(returnedRax), [flags] "=m"(returnedFlags)
+        : [target] "r"(target), [code] "r"(code)
+        : "rax", "rdx", "memory", "cc");
+    munmap(code, 4096);
+    require(returnedRax == reinterpret_cast<std::uint64_t>(target), "CLZERO stub did not preserve RAX");
+    require((returnedFlags & 1u) == 1u, "CLZERO stub did not preserve the flags");
+    for (std::size_t index = 0; index < sizeof(buffer); ++index) {
+        const bool inLine = index >= 64 && index < 128;
+        require(buffer[index] == (inLine ? 0x00 : 0xAA), "CLZERO stub zeroed the wrong bytes");
+    }
+}
+
 void insertqRegisterFormExecution() {
     const Bytes distinct = {0xF2, 0x0F, 0x79, 0xD5};
     const Bytes same = {0xF2, 0x0F, 0x79, 0xD2};
@@ -458,6 +519,46 @@ void registerFormExecution() {
 }
 #else
 void registerFormExecution() {}
+void clzeroExecution() {
+    const auto matcher = Codegen::MakeAmd64OnlyInstructionMatcher();
+    const Bytes site = {0x0F, 0x01, 0xFC};
+    const auto match = matcher->Match(site.data(), site.size());
+    require(match && match->Lowering == Codegen::Amd64OnlyLowering::Trampoline, "CLZERO stub was not produced");
+    auto body = match->StubBody;
+    const auto ret = body.size();
+    body.push_back(0xC3);
+    const auto displacement = static_cast<std::int32_t>(ret - (match->ReturnBranchOffset + 5));
+    std::memcpy(body.data() + match->ReturnBranchOffset + 1, &displacement, sizeof(displacement));
+    void* code = mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    require(code != MAP_FAILED, "cannot map executable memory for the stub");
+    std::memcpy(code, body.data(), body.size());
+    alignas(64) std::uint8_t buffer[192];
+    std::memset(buffer, 0xAA, sizeof(buffer));
+    std::uint8_t* const target = buffer + 70;
+    std::uint64_t returnedRax = 0;
+    std::uint64_t returnedFlags = 0;
+    asm volatile(
+        "movq %[target], %%rax\n\t"
+        "lea -128(%%rsp), %%rsp\n\t"
+        "stc\n\t"
+        "call *%[code]\n\t"
+        "pushfq\n\t"
+        "popq %%rdx\n\t"
+        "lea 128(%%rsp), %%rsp\n\t"
+        "movq %%rax, %[rax]\n\t"
+        "movq %%rdx, %[flags]"
+        : [rax] "=m"(returnedRax), [flags] "=m"(returnedFlags)
+        : [target] "r"(target), [code] "r"(code)
+        : "rax", "rdx", "memory", "cc");
+    munmap(code, 4096);
+    require(returnedRax == reinterpret_cast<std::uint64_t>(target), "CLZERO stub did not preserve RAX");
+    require((returnedFlags & 1u) == 1u, "CLZERO stub did not preserve the flags");
+    for (std::size_t index = 0; index < sizeof(buffer); ++index) {
+        const bool inLine = index >= 64 && index < 128;
+        require(buffer[index] == (inLine ? 0x00 : 0xAA), "CLZERO stub zeroed the wrong bytes");
+    }
+}
+
 void insertqRegisterFormExecution() {}
 #endif
 
@@ -469,6 +570,7 @@ int main() {
         goldenBodies();
         registerFormExecution();
         insertqRegisterFormExecution();
+        clzeroExecution();
         converterSegment();
         converterFailureOffsets();
         linuxPlacement();
