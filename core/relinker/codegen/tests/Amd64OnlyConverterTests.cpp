@@ -147,6 +147,13 @@ void matcherSubstitutions() {
     require(mcommit && mcommit->Lowering == Codegen::Amd64OnlyLowering::InPlace && mcommit->ReplacementBytes == Bytes{0x0F, 0xAE, 0xF0, 0xF8} && mcommit->InstructionName == "MCOMMIT", "MCOMMIT was not rewritten to MFENCE and CLC");
     const auto clzero = match({0x0F, 0x01, 0xFC});
     require(clzero && clzero->Lowering == Codegen::Amd64OnlyLowering::Trampoline && clzero->InstructionName == "CLZERO", "CLZERO was not lowered through a stub");
+    const auto sha1nexte = match({0x0F, 0x38, 0xC8, 0xD9});
+    require(sha1nexte && sha1nexte->Lowering == Codegen::Amd64OnlyLowering::Trampoline && sha1nexte->InstructionName == "SHA1NEXTE", "SHA1NEXTE was not lowered through a stub");
+    const auto sha256rnds2 = match({0x0F, 0x38, 0xCB, 0xD9});
+    require(sha256rnds2 && sha256rnds2->Lowering == Codegen::Amd64OnlyLowering::Unsupported && sha256rnds2->InstructionName == "SHA256RNDS2", "SHA256RNDS2 was not reported as unsupported");
+    const auto sha1rnds4 = match({0x0F, 0x3A, 0xCC, 0xD9, 0x02});
+    require(sha1rnds4 && sha1rnds4->Lowering == Codegen::Amd64OnlyLowering::Unsupported && sha1rnds4->InstructionName == "SHA1RNDS4", "SHA1RNDS4 was not reported as unsupported");
+    requireFailure([&] { (void)match({0x0F, 0x38, 0xC8, 0x18}); }, "SHA1NEXTE with a memory operand was accepted");
     const auto rdpru = match({0x0F, 0x01, 0xFD});
     require(rdpru && rdpru->Lowering == Codegen::Amd64OnlyLowering::Unsupported && rdpru->InstructionName == "RDPRU", "RDPRU was not reported as unsupported");
     const auto registerForm = match({0x66, 0x0F, 0x79, 0xCA});
@@ -449,6 +456,76 @@ void runInsertqStub(const Bytes& site, std::uint64_t destination, std::uint64_t 
     *high = out[1];
 }
 
+std::uint32_t sha1nexteLane(const std::uint32_t value) {
+    return (value << 30) | (value >> 2);
+}
+
+void sha1nexteExecution() {
+    const auto matcher = Codegen::MakeAmd64OnlyInstructionMatcher();
+    const Bytes site = {0x0F, 0x38, 0xC8, 0xD9};
+    const auto match = matcher->Match(site.data(), site.size());
+    require(match && match->Lowering == Codegen::Amd64OnlyLowering::Trampoline, "SHA1NEXTE stub was not produced");
+    auto body = match->StubBody;
+    const auto ret = body.size();
+    body.push_back(0xC3);
+    const auto displacement = static_cast<std::int32_t>(ret - (match->ReturnBranchOffset + 5));
+    std::memcpy(body.data() + match->ReturnBranchOffset + 1, &displacement, sizeof(displacement));
+    void* code = mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    require(code != MAP_FAILED, "cannot map executable memory for the stub");
+    std::memcpy(code, body.data(), body.size());
+    std::uint32_t seed = 0x2545f491u;
+    const auto next = [&] {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        return seed;
+    };
+    for (int iteration = 0; iteration < 256; ++iteration) {
+        alignas(16) std::uint32_t destination[4];
+        alignas(16) std::uint32_t source[4];
+        alignas(16) std::uint32_t out[4] = {};
+        alignas(16) std::uint32_t scratchIn[8];
+        alignas(16) std::uint32_t scratchOut[8] = {};
+        for (auto& value : destination) value = next();
+        for (auto& value : source) value = next();
+        for (auto& value : scratchIn) value = next();
+        asm volatile(
+            "movdqu (%[scratch]), %%xmm0\n\t"
+            "movdqu 16(%[scratch]), %%xmm2\n\t"
+            "movdqu (%[src]), %%xmm1\n\t"
+            "movdqu (%[dst]), %%xmm3\n\t"
+            "sub $128, %%rsp\n\t"
+            "call *%[code]\n\t"
+            "add $128, %%rsp\n\t"
+            "movdqu %%xmm3, (%[out])\n\t"
+            "movdqu %%xmm0, (%[scratchOut])\n\t"
+            "movdqu %%xmm2, 16(%[scratchOut])"
+            :
+            : [scratch] "r"(scratchIn), [dst] "r"(destination), [src] "r"(source), [code] "r"(code), [out] "r"(out), [scratchOut] "r"(scratchOut)
+            : "xmm0", "xmm1", "xmm2", "xmm3", "memory", "cc");
+        std::uint32_t expected[4];
+        expected[0] = source[0];
+        expected[1] = source[1];
+        expected[2] = source[2];
+        expected[3] = source[3] + sha1nexteLane(destination[3]);
+        require(std::memcmp(out, expected, sizeof(expected)) == 0, "SHA1NEXTE stub does not match the reference model");
+        require(std::memcmp(scratchOut, scratchIn, sizeof(scratchIn)) == 0, "SHA1NEXTE stub clobbered a scratch register");
+        if (__builtin_cpu_supports("sha")) {
+            alignas(16) std::uint32_t native[4] = {};
+            asm volatile(
+                "movdqu (%[src]), %%xmm1\n\t"
+                "movdqu (%[dst]), %%xmm3\n\t"
+                ".byte 0x0f, 0x38, 0xc8, 0xd9\n\t"
+                "movdqu %%xmm3, (%[out])"
+                :
+                : [dst] "r"(destination), [src] "r"(source), [out] "r"(native)
+                : "xmm1", "xmm3", "memory");
+            require(std::memcmp(out, native, sizeof(native)) == 0, "SHA1NEXTE stub does not match the hardware instruction");
+        }
+    }
+    munmap(code, 4096);
+}
+
 void clzeroExecution() {
     const auto matcher = Codegen::MakeAmd64OnlyInstructionMatcher();
     const Bytes site = {0x0F, 0x01, 0xFC};
@@ -519,6 +596,76 @@ void registerFormExecution() {
 }
 #else
 void registerFormExecution() {}
+std::uint32_t sha1nexteLane(const std::uint32_t value) {
+    return (value << 30) | (value >> 2);
+}
+
+void sha1nexteExecution() {
+    const auto matcher = Codegen::MakeAmd64OnlyInstructionMatcher();
+    const Bytes site = {0x0F, 0x38, 0xC8, 0xD9};
+    const auto match = matcher->Match(site.data(), site.size());
+    require(match && match->Lowering == Codegen::Amd64OnlyLowering::Trampoline, "SHA1NEXTE stub was not produced");
+    auto body = match->StubBody;
+    const auto ret = body.size();
+    body.push_back(0xC3);
+    const auto displacement = static_cast<std::int32_t>(ret - (match->ReturnBranchOffset + 5));
+    std::memcpy(body.data() + match->ReturnBranchOffset + 1, &displacement, sizeof(displacement));
+    void* code = mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    require(code != MAP_FAILED, "cannot map executable memory for the stub");
+    std::memcpy(code, body.data(), body.size());
+    std::uint32_t seed = 0x2545f491u;
+    const auto next = [&] {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        return seed;
+    };
+    for (int iteration = 0; iteration < 256; ++iteration) {
+        alignas(16) std::uint32_t destination[4];
+        alignas(16) std::uint32_t source[4];
+        alignas(16) std::uint32_t out[4] = {};
+        alignas(16) std::uint32_t scratchIn[8];
+        alignas(16) std::uint32_t scratchOut[8] = {};
+        for (auto& value : destination) value = next();
+        for (auto& value : source) value = next();
+        for (auto& value : scratchIn) value = next();
+        asm volatile(
+            "movdqu (%[scratch]), %%xmm0\n\t"
+            "movdqu 16(%[scratch]), %%xmm2\n\t"
+            "movdqu (%[src]), %%xmm1\n\t"
+            "movdqu (%[dst]), %%xmm3\n\t"
+            "sub $128, %%rsp\n\t"
+            "call *%[code]\n\t"
+            "add $128, %%rsp\n\t"
+            "movdqu %%xmm3, (%[out])\n\t"
+            "movdqu %%xmm0, (%[scratchOut])\n\t"
+            "movdqu %%xmm2, 16(%[scratchOut])"
+            :
+            : [scratch] "r"(scratchIn), [dst] "r"(destination), [src] "r"(source), [code] "r"(code), [out] "r"(out), [scratchOut] "r"(scratchOut)
+            : "xmm0", "xmm1", "xmm2", "xmm3", "memory", "cc");
+        std::uint32_t expected[4];
+        expected[0] = source[0];
+        expected[1] = source[1];
+        expected[2] = source[2];
+        expected[3] = source[3] + sha1nexteLane(destination[3]);
+        require(std::memcmp(out, expected, sizeof(expected)) == 0, "SHA1NEXTE stub does not match the reference model");
+        require(std::memcmp(scratchOut, scratchIn, sizeof(scratchIn)) == 0, "SHA1NEXTE stub clobbered a scratch register");
+        if (__builtin_cpu_supports("sha")) {
+            alignas(16) std::uint32_t native[4] = {};
+            asm volatile(
+                "movdqu (%[src]), %%xmm1\n\t"
+                "movdqu (%[dst]), %%xmm3\n\t"
+                ".byte 0x0f, 0x38, 0xc8, 0xd9\n\t"
+                "movdqu %%xmm3, (%[out])"
+                :
+                : [dst] "r"(destination), [src] "r"(source), [out] "r"(native)
+                : "xmm1", "xmm3", "memory");
+            require(std::memcmp(out, native, sizeof(native)) == 0, "SHA1NEXTE stub does not match the hardware instruction");
+        }
+    }
+    munmap(code, 4096);
+}
+
 void clzeroExecution() {
     const auto matcher = Codegen::MakeAmd64OnlyInstructionMatcher();
     const Bytes site = {0x0F, 0x01, 0xFC};
@@ -571,6 +718,7 @@ int main() {
         registerFormExecution();
         insertqRegisterFormExecution();
         clzeroExecution();
+        sha1nexteExecution();
         converterSegment();
         converterFailureOffsets();
         linuxPlacement();
