@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <vector>
 
 namespace Codegen {
 
@@ -22,6 +23,11 @@ struct ShaNiOperands {
     std::uint8_t Source = 0;
     std::uint8_t Immediate = 0;
     bool ThreeByte3A = false;
+    bool MemoryForm = false;
+    bool StackRelative = false;
+    std::uint8_t RexExtension = 0;
+    std::int32_t Displacement = 0;
+    std::vector<std::uint8_t> Address;
 };
 
 [[nodiscard]] ShaNiOperands DecodeShaNi(const std::uint8_t* data, std::size_t length);

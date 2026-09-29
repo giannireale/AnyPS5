@@ -179,6 +179,27 @@ void StubBodyBuilder::GprAddImmediate(const std::uint8_t reg, const std::uint32_
     _appendDword(_bytes, value);
 }
 
+void StubBodyBuilder::LoadXmmIndirect(const std::uint8_t reg, const std::uint8_t rexExtension, const std::span<const std::uint8_t> address) {
+    _bytes.push_back(kPrefixScalar);
+    const auto rex = static_cast<std::uint8_t>(kRexBase | rexExtension | ((reg & 8) != 0 ? kRexR : 0));
+    if (rex != kRexBase)
+        _bytes.push_back(rex);
+    _bytes.insert(_bytes.end(), {0x0F, 0x6F});
+    _bytes.push_back(static_cast<std::uint8_t>((address[0] & ~0x38) | ((reg & 7) << 3)));
+    _bytes.insert(_bytes.end(), address.begin() + 1, address.end());
+}
+
+void StubBodyBuilder::LoadXmmStackRelative(const std::uint8_t reg, const std::uint8_t rexExtension, const std::uint8_t sib, const std::int32_t offset) {
+    _bytes.push_back(kPrefixScalar);
+    const auto rex = static_cast<std::uint8_t>(kRexBase | rexExtension | ((reg & 8) != 0 ? kRexR : 0));
+    if (rex != kRexBase)
+        _bytes.push_back(rex);
+    _bytes.insert(_bytes.end(), {0x0F, 0x6F});
+    _bytes.push_back(static_cast<std::uint8_t>(0x80 | ((reg & 7) << 3) | kModRmRspBase));
+    _bytes.push_back(sib);
+    _appendDword(_bytes, static_cast<std::uint32_t>(offset));
+}
+
 LoweredBody StubBodyBuilder::Finish() {
     const auto returnBranchOffset = _bytes.size();
     _bytes.insert(_bytes.end(), kJmpRel32.Bytes, kJmpRel32.Bytes + kJmpRel32.Size);
