@@ -169,3 +169,17 @@ function(add_shader_recompiler target runtimeTarget)
     endif()
     target_compile_definitions(${target} PUBLIC ANYPS5_ENABLE_SPIRV_TOOLS=$<BOOL:${ANYPS5_ENABLE_SPIRV_TOOLS}>)
 endfunction()
+
+if(BUILD_TESTING)
+    add_executable(rdna_image_decoder_tests
+            ${CMAKE_CURRENT_LIST_DIR}/tests/RdnaImageDecoderTests.cpp
+            ${CMAKE_CURRENT_LIST_DIR}/RdnaDecoder/src/RdnaImageOpDecoder.cpp
+            ${CMAKE_CURRENT_LIST_DIR}/RdnaDecoder/src/RdnaOpcode.cpp
+    )
+    target_include_directories(rdna_image_decoder_tests PRIVATE
+            ${CMAKE_CURRENT_LIST_DIR}
+            ${CMAKE_CURRENT_LIST_DIR}/RdnaDecoder/include
+    )
+    target_compile_features(rdna_image_decoder_tests PRIVATE cxx_std_20)
+    add_test(NAME rdna_image_decoder COMMAND rdna_image_decoder_tests)
+endif()
