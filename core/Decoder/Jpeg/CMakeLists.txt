@@ -1,4 +1,7 @@
-add_library(decoder_jpeg STATIC ${CMAKE_CURRENT_SOURCE_DIR}/src/Jpeg.cpp)
+add_library(decoder_jpeg STATIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/Jpeg.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/JpegEncoder.cpp
+)
 target_include_directories(decoder_jpeg PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(decoder_jpeg SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/3rdparty/stb)
 set_target_properties(decoder_jpeg PROPERTIES
