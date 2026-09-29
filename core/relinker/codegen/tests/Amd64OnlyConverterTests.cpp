@@ -144,7 +144,7 @@ void matcherSubstitutions() {
     const auto registerForm = match({0x66, 0x0F, 0x79, 0xCA});
     require(registerForm && registerForm->Lowering == Codegen::Amd64OnlyLowering::Trampoline && registerForm->InstructionName == "EXTRQ register form", "EXTRQ register form was not lowered through a stub");
     const auto insertqRegisterForm = match({0xF2, 0x0F, 0x79, 0xCA});
-    require(insertqRegisterForm && insertqRegisterForm->Lowering == Codegen::Amd64OnlyLowering::Unsupported, "INSERTQ register form was not reported as unsupported");
+    require(insertqRegisterForm && insertqRegisterForm->Lowering == Codegen::Amd64OnlyLowering::Trampoline && insertqRegisterForm->InstructionName == "INSERTQ register form", "INSERTQ register form was not lowered through a stub");
     require(!match({0x66, 0x0F, 0x2B, 0x07}) && !match({0x0F, 0x2B, 0x07}) && !match({0x48, 0x8B, 0x05, 0, 0, 0, 0}), "Ordinary instruction was matched");
     const auto stub = match(kInsertqHighSite);
     require(stub && stub->Lowering == Codegen::Amd64OnlyLowering::Trampoline && stub->StubBody == kInsertqHighBody && stub->ReturnBranchOffset == 15 && stub->InstructionName == "INSERTQ", "INSERTQ was not lowered through a stub");
@@ -181,7 +181,8 @@ void goldenBodies() {
     const auto generic = lowering.LowerOutOfLine(Codegen::Sse4aOperands{true, false, 9, 4, 5, 3});
     require(generic.Bytes[0] == 0x48 && generic.Bytes.size() % 16 == 0 && generic.ReturnBranchOffset < generic.Bytes.size(), "Generic INSERTQ body does not start with the red-zone skip");
     (void)highRegisters;
-    requireFailure([&] { (void)lowering.LowerOutOfLine(Codegen::Sse4aOperands{true, true, 1, 2, 0, 0}); }, "Register form was lowered out of line");
+    const auto registerFormBody = lowering.LowerOutOfLine(Codegen::Sse4aOperands{true, true, 1, 2, 0, 0});
+    require(registerFormBody.Bytes[0] == 0x48 && registerFormBody.Bytes.size() % 16 == 0 && registerFormBody.ReturnBranchOffset < registerFormBody.Bytes.size(), "INSERTQ register form body does not start with the red-zone skip");
 }
 
 Bytes segmentFixture() {
@@ -378,6 +379,73 @@ std::uint64_t runExtrqStub(const Bytes& site, std::uint64_t destination, std::ui
     return out[0];
 }
 
+std::uint64_t insertqReference(std::uint64_t destination, std::uint64_t value, std::uint64_t control) {
+    const auto rawLength = static_cast<unsigned>(control & 0x3f);
+    const auto index = static_cast<unsigned>((control >> 8) & 0x3f);
+    const auto length = rawLength == 0 ? 64u : rawLength;
+    const auto mask = length >= 64 ? ~std::uint64_t{0} : ((std::uint64_t{1} << length) - 1);
+    return (destination & ~(mask << index)) | ((value & mask) << index);
+}
+
+void runInsertqStub(const Bytes& site, std::uint64_t destination, std::uint64_t value, std::uint64_t control, std::uint64_t* low, std::uint64_t* high) {
+    const auto matcher = Codegen::MakeAmd64OnlyInstructionMatcher();
+    const auto match = matcher->Match(site.data(), site.size());
+    require(match && match->Lowering == Codegen::Amd64OnlyLowering::Trampoline, "INSERTQ register form stub was not produced");
+    auto body = match->StubBody;
+    const auto ret = body.size();
+    body.push_back(0xC3);
+    const auto displacement = static_cast<std::int32_t>(ret - (match->ReturnBranchOffset + 5));
+    std::memcpy(body.data() + match->ReturnBranchOffset + 1, &displacement, sizeof(displacement));
+    void* code = mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    require(code != MAP_FAILED, "cannot map executable memory for the stub");
+    std::memcpy(code, body.data(), body.size());
+    alignas(16) std::uint64_t destinationIn[2] = {destination, 0x1122334455667788ull};
+    alignas(16) std::uint64_t sourceIn[2] = {value, control};
+    alignas(16) std::uint64_t out[2] = {};
+    alignas(16) std::uint64_t scratchIn[6] = {0x0123456789abcdefull, 0xfedcba9876543210ull, 0x00ff00ff00ff00ffull, 0xff00ff00ff00ff00ull, 0xdeadbeefcafebabeull, 0xbaadf00dfeedfaceull};
+    alignas(16) std::uint64_t scratchOut[6] = {};
+    const bool same = site[3] == 0xD2;
+    asm volatile(
+        "movdqu (%[scratch]), %%xmm0\n\t"
+        "movdqu 16(%[scratch]), %%xmm1\n\t"
+        "movdqu 32(%[scratch]), %%xmm3\n\t"
+        "movdqu (%[src]), %%xmm5\n\t"
+        "movdqu (%[dst]), %%xmm2\n\t"
+        "sub $128, %%rsp\n\t"
+        "call *%[code]\n\t"
+        "add $128, %%rsp\n\t"
+        "movdqu %%xmm2, (%[out])\n\t"
+        "movdqu %%xmm0, (%[scratchOut])\n\t"
+        "movdqu %%xmm1, 16(%[scratchOut])\n\t"
+        "movdqu %%xmm3, 32(%[scratchOut])\n\t"
+        :
+        : [scratch] "r"(scratchIn), [dst] "r"(same ? sourceIn : destinationIn), [src] "r"(sourceIn), [code] "r"(code), [out] "r"(out), [scratchOut] "r"(scratchOut)
+        : "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory", "cc");
+    munmap(code, 4096);
+    for (std::size_t index = 0; index < 6; ++index)
+        require(scratchOut[index] == scratchIn[index], "INSERTQ stub clobbered a scratch register");
+    *low = out[0];
+    *high = out[1];
+}
+
+void insertqRegisterFormExecution() {
+    const Bytes distinct = {0xF2, 0x0F, 0x79, 0xD5};
+    const Bytes same = {0xF2, 0x0F, 0x79, 0xD2};
+    const std::uint64_t destination = 0x0f1e2d3c4b5a6978ull;
+    const std::uint64_t value = 0x9e3779b97f4a7c15ull;
+    for (const auto [length, index] : {std::pair{8u, 4u}, {0u, 0u}, {40u, 20u}, {63u, 1u}, {1u, 63u}, {16u, 48u}, {64u, 0u}, {32u, 32u}}) {
+        const auto control = (static_cast<std::uint64_t>(length) & 0x3f) | ((static_cast<std::uint64_t>(index) & 0x3f) << 8) | 0xffffc0c0ull;
+        std::uint64_t low = 0;
+        std::uint64_t high = 0;
+        runInsertqStub(distinct, destination, value, control, &low, &high);
+        require(low == insertqReference(destination, value, control), "INSERTQ register form stub inserted the wrong field");
+        require(high == 0x1122334455667788ull, "INSERTQ register form stub changed the upper quadword of the destination");
+        runInsertqStub(same, value, value, control, &low, &high);
+        require(low == insertqReference(value, value, control), "INSERTQ register form stub with equal operands inserted the wrong field");
+        require(high == control, "INSERTQ register form stub with equal operands changed the upper quadword of the destination");
+    }
+}
+
 void registerFormExecution() {
     const Bytes distinct = {0x66, 0x0F, 0x79, 0xD5};
     const Bytes same = {0x66, 0x0F, 0x79, 0xD2};
@@ -390,6 +458,7 @@ void registerFormExecution() {
 }
 #else
 void registerFormExecution() {}
+void insertqRegisterFormExecution() {}
 #endif
 
 int main() {
@@ -399,6 +468,7 @@ int main() {
         matcherSubstitutions();
         goldenBodies();
         registerFormExecution();
+        insertqRegisterFormExecution();
         converterSegment();
         converterFailureOffsets();
         linuxPlacement();
