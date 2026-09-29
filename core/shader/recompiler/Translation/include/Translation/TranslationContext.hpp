@@ -82,6 +82,7 @@ private:
     bool bufferStore(const RdnaInstruction& inst);
     bool bufferAtomic(const RdnaInstruction& inst, IrOpcode opcode);
     bool imageAtomic(const RdnaInstruction& inst, IrOpcode opcode);
+    bool imageAtomicCompareSwap(const RdnaInstruction& inst);
     bool dsAtomic(const RdnaInstruction& inst, IrOpcode opcode, bool returnsValue);
     bool flatLoad(const RdnaInstruction& inst);
     bool flatStore(const RdnaInstruction& inst);

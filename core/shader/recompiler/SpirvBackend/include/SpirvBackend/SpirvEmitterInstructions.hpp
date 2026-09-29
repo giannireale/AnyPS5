@@ -274,6 +274,7 @@ void EmitImageSampleRaw(SpirvValueEmitContext& ctx, const IrValue& inst);
 void EmitImageGatherRaw(SpirvValueEmitContext& ctx, const IrValue& inst);
 void EmitImageAtomicSwap32(SpirvValueEmitContext& ctx, const IrValue& inst);
 void EmitImageAtomicIAdd32(SpirvValueEmitContext& ctx, const IrValue& inst);
+void EmitImageAtomicCompareSwap32(SpirvValueEmitContext& ctx, const IrValue& inst);
 void EmitImageAtomicISub32(SpirvValueEmitContext& ctx, const IrValue& inst);
 void EmitImageAtomicSMin32(SpirvValueEmitContext& ctx, const IrValue& inst);
 void EmitImageAtomicSMax32(SpirvValueEmitContext& ctx, const IrValue& inst);

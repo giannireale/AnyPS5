@@ -367,6 +367,7 @@ constexpr std::array<OpcodeMeta, static_cast<std::size_t>(IrOpcode::Count)> Meta
     makeMeta("ImageSampleRaw", U32x4, ImageResource, SamplerResource, ImageAddress),
     makeMeta("ImageGatherRaw", U32x4, ImageResource, SamplerResource, ImageAddress),
     makeMeta("ImageAtomicSwap32", U32, ImageResource, ImageAddress, U32, U1),
+    makeMeta("ImageAtomicCompareSwap32", U32, ImageResource, ImageAddress, U32, U32, U1),
     makeMeta("ImageAtomicIAdd32", U32, ImageResource, ImageAddress, U32, U1),
     makeMeta("ImageAtomicISub32", U32, ImageResource, ImageAddress, U32, U1),
     makeMeta("ImageAtomicSMin32", U32, ImageResource, ImageAddress, U32, U1),
@@ -570,6 +571,7 @@ ImageOpcodeInfo ImageOpcodeInfoOf(IrOpcode opcode) {
         case IrOpcode::StoreImage:
             return {ImageAccess::Write, ImageResourceClass::Storage, false};
         case IrOpcode::ImageAtomicSwap32:
+        case IrOpcode::ImageAtomicCompareSwap32:
         case IrOpcode::ImageAtomicIAdd32:
         case IrOpcode::ImageAtomicISub32:
         case IrOpcode::ImageAtomicSMin32:

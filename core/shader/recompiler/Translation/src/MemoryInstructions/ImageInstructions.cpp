@@ -61,6 +61,20 @@ bool TranslationContext::imageAtomic(const RdnaInstruction& inst, IrOpcode opcod
     return true;
 }
 
+bool TranslationContext::imageAtomicCompareSwap(const RdnaInstruction& inst) {
+    const MemoryInfo memory = imageMemoryInfoFromInstruction(inst);
+    IrValue* resource = getImageResource(memory);
+    IrValue* address = makeImageAddress(inst, inst.source0);
+    const IrU32 value = readU32(inst.destination);
+    const IrU32 comparator = readU32(offsetOperand(inst.destination, 1u));
+    IrValue& exec = ir.GetExec();
+    IrValue& result = ir.Emit(IrOpcode::ImageAtomicCompareSwap32, IrOpcodeType(IrOpcode::ImageAtomicCompareSwap32), {resource, address, &value.Value(), &comparator.Value(), &exec}, addMemoryInfo(memory, inst.programCounter));
+    if (inst.glc) {
+        writeOperand(inst.destination, &result);
+    }
+    return true;
+}
+
 bool TranslationContext::imageGetResinfo(const RdnaInstruction& inst) {
     const MemoryInfo memory = imageMemoryInfoFromInstruction(inst);
     IrValue* resource = getImageResource(memory);

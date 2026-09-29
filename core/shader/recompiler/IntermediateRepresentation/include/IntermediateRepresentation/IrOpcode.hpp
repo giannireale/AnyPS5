@@ -326,6 +326,7 @@ enum class IrOpcode : std::uint16_t {
     ImageSampleRaw,
     ImageGatherRaw,
     ImageAtomicSwap32,
+    ImageAtomicCompareSwap32,
     ImageAtomicIAdd32,
     ImageAtomicISub32,
     ImageAtomicSMin32,

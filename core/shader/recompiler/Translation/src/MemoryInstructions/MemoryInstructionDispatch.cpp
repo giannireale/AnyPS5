@@ -210,6 +210,8 @@ bool TranslationContext::emitMemory(const RdnaInstruction& inst) {
         return imageGather(inst);
     case RdnaOpcode::ImageAtomicSwap:
         return imageAtomic(inst, IrOpcode::ImageAtomicSwap32);
+    case RdnaOpcode::ImageAtomicCmpswap:
+        return imageAtomicCompareSwap(inst);
     case RdnaOpcode::ImageAtomicAdd:
         return imageAtomic(inst, IrOpcode::ImageAtomicIAdd32);
     case RdnaOpcode::ImageAtomicSub:
