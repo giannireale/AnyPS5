@@ -8,6 +8,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PRX = ROOT / "core" / "libs" / "prx"
 OPCODES = ROOT / "core" / "shader" / "recompiler" / "RdnaDecoder" / "include" / "RdnaDecoder" / "RdnaOpcode.hpp"
+IMAGE_DECODER = ROOT / "core" / "shader" / "recompiler" / "RdnaDecoder" / "src" / "RdnaImageOpDecoder.cpp"
+IMAGE_ENTRY = re.compile(r'\{\s*0x[0-9a-fA-F]+u,\s*RdnaOpcode::\w+,\s*"(\w+)",\s*(.*?),\s*(?:true|false),')
+IMAGE_REJECTED_FLAGS = ("RdnaImageSampleFlagLodClamp", "RdnaImageSampleFlagCd", "RdnaImageSampleFlagAdjust")
 ISA = Path(__file__).resolve().parent / "rdna_isa.txt"
 SOURCE = f'https://github.com/{os.environ.get("GITHUB_REPOSITORY", "boykopovar/AnyPS5")}/blob/main'
 DEFINITION = re.compile(r"\bAPS5_VABI\s+(\w+)\s*\([^;{]*\)\s*(?:noexcept\s*)?\{")
@@ -70,6 +73,14 @@ def camel(name):
     return "".join(part.capitalize() for part in name.split("_"))
 
 
+def decoded_image_names():
+    names = set()
+    for name, flags in IMAGE_ENTRY.findall(IMAGE_DECODER.read_text()):
+        if not any(rejected in flags for rejected in IMAGE_REJECTED_FLAGS):
+            names.add(name.upper())
+    return names
+
+
 def collect_shaders():
     isa = {}
     for line in ISA.read_text().splitlines():
@@ -80,6 +91,7 @@ def collect_shaders():
     enum = re.search(r"enum class RdnaOpcode[^{]*\{(.*?)\};", OPCODES.read_text(), re.S).group(1)
     opcodes = [o for o in re.findall(r"^\s*([A-Z]\w*)\s*[,=]", enum, re.M) if o not in OPCODE_SENTINELS]
     supported, extra = set(), []
+    supported.update(name for name in decoded_image_names() if name in isa)
     for opcode in opcodes:
         name = OPCODE_ALIASES.get(opcode) or by_camel.get(opcode)
         if name in isa:
