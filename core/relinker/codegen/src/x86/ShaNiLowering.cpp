@@ -1,6 +1,7 @@
 #include <codegen/x86/ShaNiLowering.hpp>
 #include <codegen/CodegenException.hpp>
 #include <array>
+#include <span>
 
 namespace Codegen {
 
@@ -64,6 +65,167 @@ void _sigma(StubBodyBuilder& body, const std::uint8_t out, const std::uint8_t in
     body.Sse(kStubPrefixPacked, {kPxor[0], kPxor[1]}, out, tempB);
 }
 
+constexpr std::int32_t kFrameSize = 0x100;
+constexpr std::int32_t kDestinationSlot = 0x08;
+constexpr std::int32_t kSourceSlot = 0x18;
+constexpr std::int32_t kImplicitSlot = 0x28;
+constexpr std::int32_t kSaveSlot = 0x38;
+constexpr std::int32_t kTempSlot = 0x90;
+constexpr std::uint8_t kRax = 0;
+constexpr std::uint8_t kRcx = 1;
+constexpr std::uint8_t kRdx = 2;
+constexpr std::uint8_t kRbx = 3;
+constexpr std::uint8_t kRbp = 5;
+constexpr std::uint8_t kRsi = 6;
+constexpr std::uint8_t kRdi = 7;
+constexpr std::uint8_t kR8 = 8;
+constexpr std::uint8_t kR9 = 9;
+constexpr std::uint8_t kR10 = 10;
+constexpr std::uint8_t kR11 = 11;
+constexpr std::uint32_t kSha1Constants[] = {0x5A827999u, 0x6ED9EBA1u, 0x8F1BBCDCu, 0xCA62C1D6u};
+
+void _saveGeneralRegisters(StubBodyBuilder& body, const std::span<const std::uint8_t> registers) {
+    for (std::size_t index = 0; index < registers.size(); ++index)
+        body.StoreQword(registers[index], kSaveSlot + static_cast<std::int32_t>(index) * 8);
+}
+
+void _restoreGeneralRegisters(StubBodyBuilder& body, const std::span<const std::uint8_t> registers) {
+    for (std::size_t index = 0; index < registers.size(); ++index)
+        body.LoadQword(registers[index], kSaveSlot + static_cast<std::int32_t>(index) * 8);
+}
+
+void _rotateCopy(StubBodyBuilder& body, const std::uint8_t out, const std::uint8_t in, const std::uint8_t count) {
+    body.GprBinary(kGprMov, out, in);
+    body.GprRotate(false, out, count);
+}
+
+void _emitSha1Rnds4(StubBodyBuilder& body, const ShaNiOperands& operands) {
+    constexpr std::uint8_t saved[] = {kRax, kRcx, kRdx, kRbx, kRsi, kRdi, kR8};
+    const std::uint8_t a = kRax, b = kRcx, c = kRdx, d = kRbx, e = kRsi, t = kRdi, tmp = kR8;
+    const auto function = operands.Immediate & 3u;
+    body.AdjustStack(-kFrameSize);
+    body.PushFlags();
+    body.StoreXmm(operands.Destination, kDestinationSlot);
+    body.StoreXmm(operands.Source, kSourceSlot);
+    _saveGeneralRegisters(body, saved);
+    body.LoadDword(a, kDestinationSlot + 12);
+    body.LoadDword(b, kDestinationSlot + 8);
+    body.LoadDword(c, kDestinationSlot + 4);
+    body.LoadDword(d, kDestinationSlot);
+    body.GprBinary(kGprXor, e, e);
+    for (int round = 0; round < 4; ++round) {
+        if (function == 0) {
+            body.GprBinary(kGprMov, tmp, b);
+            body.GprNot(tmp);
+            body.GprBinary(kGprAnd, tmp, d);
+            body.GprBinary(kGprMov, t, b);
+            body.GprBinary(kGprAnd, t, c);
+            body.GprBinary(kGprOr, t, tmp);
+        } else if (function == 2) {
+            body.GprBinary(kGprMov, t, b);
+            body.GprBinary(kGprAnd, t, c);
+            body.GprBinary(kGprMov, tmp, b);
+            body.GprBinary(kGprAnd, tmp, d);
+            body.GprBinary(kGprOr, t, tmp);
+            body.GprBinary(kGprMov, tmp, c);
+            body.GprBinary(kGprAnd, tmp, d);
+            body.GprBinary(kGprOr, t, tmp);
+        } else {
+            body.GprBinary(kGprMov, t, b);
+            body.GprBinary(kGprXor, t, c);
+            body.GprBinary(kGprXor, t, d);
+        }
+        body.GprBinary(kGprMov, tmp, a);
+        body.GprRotate(true, tmp, 5);
+        body.GprBinary(kGprAdd, t, tmp);
+        body.AddDwordFromStack(t, kSourceSlot + 12 - round * 4);
+        body.GprBinary(kGprAdd, t, e);
+        body.GprAddImmediate(t, kSha1Constants[function]);
+        body.GprBinary(kGprMov, e, d);
+        body.GprBinary(kGprMov, d, c);
+        body.GprBinary(kGprMov, c, b);
+        body.GprRotate(true, c, 30);
+        body.GprBinary(kGprMov, b, a);
+        body.GprBinary(kGprMov, a, t);
+    }
+    body.StoreDword(a, kDestinationSlot + 12);
+    body.StoreDword(b, kDestinationSlot + 8);
+    body.StoreDword(c, kDestinationSlot + 4);
+    body.StoreDword(d, kDestinationSlot);
+    body.LoadXmm(operands.Destination, kDestinationSlot);
+    _restoreGeneralRegisters(body, saved);
+    body.PopFlags();
+    body.AdjustStack(kFrameSize);
+}
+
+void _emitSha256Rnds2(StubBodyBuilder& body, const ShaNiOperands& operands) {
+    constexpr std::uint8_t saved[] = {kRax, kRcx, kRdx, kRbx, kRsi, kRdi, kRbp, kR8, kR9, kR10, kR11};
+    const std::uint8_t a = kRax, b = kRcx, c = kRdx, d = kRbx, e = kRsi, f = kRdi, g = kR8, h = kR9;
+    const std::uint8_t t1 = kR10, tmp = kR11, tmp2 = kRbp;
+    body.AdjustStack(-kFrameSize);
+    body.PushFlags();
+    body.StoreXmm(operands.Destination, kDestinationSlot);
+    body.StoreXmm(operands.Source, kSourceSlot);
+    body.StoreXmm(0, kImplicitSlot);
+    _saveGeneralRegisters(body, saved);
+    body.LoadDword(a, kSourceSlot + 12);
+    body.LoadDword(b, kSourceSlot + 8);
+    body.LoadDword(e, kSourceSlot + 4);
+    body.LoadDword(f, kSourceSlot);
+    body.LoadDword(c, kDestinationSlot + 12);
+    body.LoadDword(d, kDestinationSlot + 8);
+    body.LoadDword(g, kDestinationSlot + 4);
+    body.LoadDword(h, kDestinationSlot);
+    for (int round = 0; round < 2; ++round) {
+        _rotateCopy(body, t1, e, 6);
+        _rotateCopy(body, tmp, e, 11);
+        body.GprBinary(kGprXor, t1, tmp);
+        _rotateCopy(body, tmp, e, 25);
+        body.GprBinary(kGprXor, t1, tmp);
+        body.GprBinary(kGprMov, tmp, e);
+        body.GprNot(tmp);
+        body.GprBinary(kGprAnd, tmp, g);
+        body.GprBinary(kGprMov, tmp2, e);
+        body.GprBinary(kGprAnd, tmp2, f);
+        body.GprBinary(kGprXor, tmp, tmp2);
+        body.GprBinary(kGprAdd, t1, tmp);
+        body.GprBinary(kGprAdd, t1, h);
+        body.AddDwordFromStack(t1, kImplicitSlot + round * 4);
+        _rotateCopy(body, tmp, a, 2);
+        _rotateCopy(body, tmp2, a, 13);
+        body.GprBinary(kGprXor, tmp, tmp2);
+        _rotateCopy(body, tmp2, a, 22);
+        body.GprBinary(kGprXor, tmp, tmp2);
+        body.StoreDword(tmp, kTempSlot);
+        body.GprBinary(kGprMov, tmp, a);
+        body.GprBinary(kGprAnd, tmp, b);
+        body.GprBinary(kGprMov, tmp2, a);
+        body.GprBinary(kGprAnd, tmp2, c);
+        body.GprBinary(kGprXor, tmp, tmp2);
+        body.GprBinary(kGprMov, tmp2, b);
+        body.GprBinary(kGprAnd, tmp2, c);
+        body.GprBinary(kGprXor, tmp, tmp2);
+        body.AddDwordFromStack(tmp, kTempSlot);
+        body.GprBinary(kGprMov, h, g);
+        body.GprBinary(kGprMov, g, f);
+        body.GprBinary(kGprMov, f, e);
+        body.GprBinary(kGprMov, e, d);
+        body.GprBinary(kGprAdd, e, t1);
+        body.GprBinary(kGprMov, d, c);
+        body.GprBinary(kGprMov, c, b);
+        body.GprBinary(kGprMov, b, a);
+        body.GprBinary(kGprMov, a, t1);
+        body.GprBinary(kGprAdd, a, tmp);
+    }
+    body.StoreDword(a, kDestinationSlot + 12);
+    body.StoreDword(b, kDestinationSlot + 8);
+    body.StoreDword(e, kDestinationSlot + 4);
+    body.StoreDword(f, kDestinationSlot);
+    body.LoadXmm(operands.Destination, kDestinationSlot);
+    _restoreGeneralRegisters(body, saved);
+    body.PopFlags();
+    body.AdjustStack(kFrameSize);
+}
 void _emitSha1Nexte(StubBodyBuilder& body, const ShaNiOperands& operands) {
     const auto scratch = _scratchRegisters<2>(operands, false);
     StubConstant highLane{};
@@ -170,8 +332,9 @@ ShaNiOperands DecodeShaNi(const std::uint8_t* data, const std::size_t length) {
 
 bool ShaNiLowering::CanLower(const ShaNiOperands& operands) const {
     if (operands.ThreeByte3A)
-        return false;
+        return operands.Opcode == kShaOpSha1Rnds4;
     switch (operands.Opcode) {
+    case kShaOpSha256Rnds2:
     case kShaOpSha1Nexte:
     case kShaOpSha1Msg1:
     case kShaOpSha1Msg2:
@@ -188,7 +351,14 @@ LoweredBody ShaNiLowering::LowerOutOfLine(const std::span<const ShaNiOperands> s
     for (const auto& operands : sequence) {
         if (!CanLower(operands))
             throw CodegenException("SHA-NI opcode has no Intel lowering");
+        if (operands.ThreeByte3A) {
+            _emitSha1Rnds4(body, operands);
+            continue;
+        }
         switch (operands.Opcode) {
+        case kShaOpSha256Rnds2:
+            _emitSha256Rnds2(body, operands);
+            break;
         case kShaOpSha1Nexte:
             _emitSha1Nexte(body, operands);
             break;

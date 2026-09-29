@@ -83,6 +83,102 @@ void StubBodyBuilder::Raw(const std::span<const std::uint8_t> bytes) {
     _bytes.insert(_bytes.end(), bytes.begin(), bytes.end());
 }
 
+namespace {
+
+void _appendDword(std::vector<std::uint8_t>& out, const std::uint32_t value) {
+    for (int index = 0; index < 4; ++index)
+        out.push_back(static_cast<std::uint8_t>(value >> (index * 8)));
+}
+
+}
+
+void StubBodyBuilder::AdjustStack(const std::int32_t delta) {
+    _bytes.insert(_bytes.end(), {0x48, 0x8D, 0xA4, 0x24});
+    _appendDword(_bytes, static_cast<std::uint32_t>(delta));
+}
+
+void StubBodyBuilder::PushFlags() {
+    _bytes.push_back(0x9C);
+}
+
+void StubBodyBuilder::PopFlags() {
+    _bytes.push_back(0x9D);
+}
+
+void StubBodyBuilder::_stackOperand(const std::initializer_list<std::uint8_t> opcode, const std::uint8_t prefix, const bool wide, const std::uint8_t reg, const std::int32_t offset) {
+    if (prefix != 0)
+        _bytes.push_back(prefix);
+    const auto rex = static_cast<std::uint8_t>((wide ? 0x48 : kRexBase) | ((reg & 8) != 0 ? kRexR : 0));
+    if (rex != kRexBase)
+        _bytes.push_back(rex);
+    _bytes.insert(_bytes.end(), opcode.begin(), opcode.end());
+    _bytes.push_back(static_cast<std::uint8_t>(0x80 | ((reg & 7) << 3) | kModRmRspBase));
+    _bytes.push_back(kSibRsp);
+    _appendDword(_bytes, static_cast<std::uint32_t>(offset));
+}
+
+void StubBodyBuilder::StoreXmm(const std::uint8_t reg, const std::int32_t offset) {
+    _stackOperand({0x0F, 0x7F}, kPrefixScalar, false, reg, offset);
+}
+
+void StubBodyBuilder::LoadXmm(const std::uint8_t reg, const std::int32_t offset) {
+    _stackOperand({0x0F, 0x6F}, kPrefixScalar, false, reg, offset);
+}
+
+void StubBodyBuilder::StoreQword(const std::uint8_t reg, const std::int32_t offset) {
+    _stackOperand({0x89}, 0, true, reg, offset);
+}
+
+void StubBodyBuilder::LoadQword(const std::uint8_t reg, const std::int32_t offset) {
+    _stackOperand({0x8B}, 0, true, reg, offset);
+}
+
+void StubBodyBuilder::StoreDword(const std::uint8_t reg, const std::int32_t offset) {
+    _stackOperand({0x89}, 0, false, reg, offset);
+}
+
+void StubBodyBuilder::LoadDword(const std::uint8_t reg, const std::int32_t offset) {
+    _stackOperand({0x8B}, 0, false, reg, offset);
+}
+
+void StubBodyBuilder::AddDwordFromStack(const std::uint8_t reg, const std::int32_t offset) {
+    _stackOperand({0x03}, 0, false, reg, offset);
+}
+
+void StubBodyBuilder::GprBinary(const std::uint8_t opcode, const std::uint8_t dst, const std::uint8_t src) {
+    const auto rex = static_cast<std::uint8_t>(kRexBase | ((src & 8) != 0 ? kRexR : 0) | ((dst & 8) != 0 ? kRexB : 0));
+    if (rex != kRexBase)
+        _bytes.push_back(rex);
+    _bytes.push_back(opcode);
+    _bytes.push_back(static_cast<std::uint8_t>(kModRmRegister | ((src & 7) << 3) | (dst & 7)));
+}
+
+void StubBodyBuilder::GprNot(const std::uint8_t reg) {
+    const auto rex = static_cast<std::uint8_t>(kRexBase | ((reg & 8) != 0 ? kRexB : 0));
+    if (rex != kRexBase)
+        _bytes.push_back(rex);
+    _bytes.push_back(0xF7);
+    _bytes.push_back(static_cast<std::uint8_t>(kModRmRegister | (2 << 3) | (reg & 7)));
+}
+
+void StubBodyBuilder::GprRotate(const bool left, const std::uint8_t reg, const std::uint8_t count) {
+    const auto rex = static_cast<std::uint8_t>(kRexBase | ((reg & 8) != 0 ? kRexB : 0));
+    if (rex != kRexBase)
+        _bytes.push_back(rex);
+    _bytes.push_back(0xC1);
+    _bytes.push_back(static_cast<std::uint8_t>(kModRmRegister | ((left ? 0 : 1) << 3) | (reg & 7)));
+    _bytes.push_back(count);
+}
+
+void StubBodyBuilder::GprAddImmediate(const std::uint8_t reg, const std::uint32_t value) {
+    const auto rex = static_cast<std::uint8_t>(kRexBase | ((reg & 8) != 0 ? kRexB : 0));
+    if (rex != kRexBase)
+        _bytes.push_back(rex);
+    _bytes.push_back(0x81);
+    _bytes.push_back(static_cast<std::uint8_t>(kModRmRegister | (reg & 7)));
+    _appendDword(_bytes, value);
+}
+
 LoweredBody StubBodyBuilder::Finish() {
     const auto returnBranchOffset = _bytes.size();
     _bytes.insert(_bytes.end(), kJmpRel32.Bytes, kJmpRel32.Bytes + kJmpRel32.Size);
