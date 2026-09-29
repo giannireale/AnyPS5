@@ -3,6 +3,7 @@
 #include <elfpatcher/windows/WindowsLoadImage.hpp>
 #include <elfpatcher/windows/WindowsPeWriter.hpp>
 #include <elfpatcher/windows/WindowsRelocationBuilder.hpp>
+#include <elfpatcher/windows/WindowsResourceBuilder.hpp>
 #include <elfpatcher/windows/WindowsTlsBuilder.hpp>
 #include <elfpatcher/windows/WindowsTrampolineBuilder.hpp>
 #include <io/BufferUtils.hpp>
@@ -40,7 +41,7 @@ void writeGotStub(std::vector<PeSection>& sections, const std::uint32_t targetRv
 
 }
 
-WindowsPePatcher::WindowsPePatcher(const bool windowsGui) : _windowsGui(windowsGui) {
+WindowsPePatcher::WindowsPePatcher(const bool windowsGui, std::vector<std::uint8_t> icon) : _windowsGui(windowsGui), _icon(std::move(icon)) {
 }
 
 std::vector<std::uint8_t> WindowsPePatcher::Patch(const std::vector<std::uint8_t>& sourceElf, const std::vector<Domain::ProgramHeader>& originalHeaders, const Domain::SysVDynamicSection& dynamicSection, const std::uint64_t originalPltGotVaddr, const std::string& runPath, const bool lazyBinding, const bool dependencyDiagnostics, const std::vector<Codegen::TrampolineSite>& trampolines) {
@@ -76,6 +77,12 @@ std::vector<std::uint8_t> WindowsPePatcher::Patch(const std::vector<std::uint8_t
     if (!relocationData.empty()) {
         directories[5] = {nextRva, CheckedRva(relocationData.size())};
         sections.push_back({".reloc", nextRva, SectionRead | 0x02000040u, std::move(relocationData)});
+        nextRva = AlignRva(nextRva + sections.back().Data.size());
+    }
+    if (!_icon.empty()) {
+        auto resources = WindowsResourceBuilder().Build(_icon, nextRva);
+        directories[2] = resources.Directory;
+        sections.push_back(std::move(resources.Section));
         nextRva = AlignRva(nextRva + sections.back().Data.size());
     }
     const WindowsImportBuilder importBuilder;

@@ -20,6 +20,7 @@ struct Args {
     std::string inputPath;
     std::string outputPath;
     std::string runPath = "$ORIGIN/libs";
+    std::string iconPath;
 };
 
 Args ParseArgs(int argc, char* argv[]);
