@@ -1,5 +1,6 @@
 #include "SceTypes.hpp"
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -15,6 +16,7 @@ int APS5_VABI sceNgs2SystemGetInfo(Ngs2Handle system_handle, Ngs2SystemInfo* inf
 int APS5_VABI sceNgs2SystemSetGrainSamples(Ngs2Handle system_handle, std::uint32_t num_samples);
 int APS5_VABI sceNgs2RackQueryBufferSize(std::uint32_t rack_id, const Ngs2RackOption* option, Ngs2ContextBufferInfo* buffer_info);
 int APS5_VABI sceNgs2RackCreate(Ngs2Handle system_handle, std::uint32_t rack_id, const Ngs2RackOption* option, const Ngs2ContextBufferInfo* buffer_info, Ngs2Handle* handle);
+int APS5_VABI sceNgs2RackCreateWithAllocator(Ngs2Handle system_handle, std::uint32_t rack_id, const Ngs2RackOption* option, const Ngs2BufferAllocator* allocator, Ngs2Handle* handle);
 int APS5_VABI sceNgs2RackDestroy(Ngs2Handle rack_handle, Ngs2ContextBufferInfo* buffer_info);
 int APS5_VABI sceNgs2RackGetInfo(Ngs2Handle rack_handle, Ngs2RackInfo* info, std::size_t info_size);
 int APS5_VABI sceNgs2RackGetVoiceHandle(Ngs2Handle rack_handle, std::uint32_t voice_id, Ngs2Handle* handle);
@@ -69,6 +71,15 @@ Ngs2RackOption MakeRackOption(const std::uint32_t voices) {
     option.max_matrices = 5;
     option.max_ports = 3;
     return option;
+}
+
+void WritePs5RackOption(std::array<std::uint8_t, 200>& bytes, const std::uint32_t grain, const std::uint32_t voices) {
+    bytes.fill(0);
+    const std::size_t size = bytes.size();
+    std::memcpy(bytes.data(), &size, sizeof(size));
+    std::memcpy(bytes.data() + 8, "ps5-rack", 8);
+    std::memcpy(bytes.data() + 76, &grain, sizeof(grain));
+    std::memcpy(bytes.data() + 80, &voices, sizeof(voices));
 }
 
 }
@@ -174,12 +185,92 @@ int main() {
     Require(std::memcmp(&unchangedInfo, &originalInfo, sizeof(unchangedInfo)) == 0, "a destroyed rack info handle changed its output");
     Require(sceNgs2VoiceGetStateFlags(voice, &flags) != 0, "a voice outlived its rack");
 
+    alignas(8) std::array<std::uint8_t, 200> ps5OptionBytes{};
+    WritePs5RackOption(ps5OptionBytes, 512, 5);
+    const auto* ps5Option = reinterpret_cast<const Ngs2RackOption*>(ps5OptionBytes.data());
+    Ngs2ContextBufferInfo ps5RackBuffer{};
+    Require(sceNgs2RackQueryBufferSize(0, ps5Option, &ps5RackBuffer) == 0, "the PS5 rack option buffer size was refused");
+    Require(ps5RackBuffer.host_buffer_size == 1024 + 5 * 512, "the PS5 rack option lost its voice count");
+    std::vector<std::uint8_t> ps5RackStorage(ps5RackBuffer.host_buffer_size);
+    ps5RackBuffer.host_buffer = ps5RackStorage.data();
+    Ngs2Handle ps5Rack = 0;
+    Require(sceNgs2RackCreate(system, 43, ps5Option, &ps5RackBuffer, &ps5Rack) == 0, "the PS5 rack option was not created");
+    std::array<Ngs2Handle, 5> ps5Voices{};
+    for (std::uint32_t index = 0; index < ps5Voices.size(); ++index) {
+        Require(sceNgs2RackGetVoiceHandle(ps5Rack, index, &ps5Voices[index]) == 0 && ps5Voices[index] != 0,
+                "a PS5 rack voice was not created");
+        for (std::uint32_t previous = 0; previous < index; ++previous) {
+            Require(ps5Voices[index] != ps5Voices[previous], "PS5 rack voices share a handle");
+        }
+    }
+    Ngs2Handle ps5PastEnd = 0x1234;
+    Require(sceNgs2RackGetVoiceHandle(ps5Rack, 5, &ps5PastEnd) != 0 && ps5PastEnd == 0x1234,
+            "a voice past the PS5 rack size was returned");
+    struct Ps5RackInfoWithCanary {
+        Ngs2RackInfo info;
+        std::uint8_t canary[64];
+    } ps5Info;
+    std::memset(&ps5Info, 0xA5, sizeof(ps5Info));
+    Require(sceNgs2RackGetInfo(ps5Rack, &ps5Info.info, sizeof(ps5Info.info)) == 0, "the PS5 rack info was refused");
+    Require(std::strcmp(ps5Info.info.name, "ps5-rack") == 0, "the PS5 rack name was not normalized");
+    Require(ps5Info.info.max_grain_samples == 512 && ps5Info.info.max_voices == 5,
+            "the PS5 rack limits were not normalized");
+    bool ps5TailUnchanged = true;
+    for (const auto value : ps5Info.canary) ps5TailUnchanged = ps5TailUnchanged && value == 0xA5;
+    Require(ps5TailUnchanged, "the PS5 rack info overwrote its canary");
+
+    Ngs2ContextBufferInfo unchangedBuffer{};
+    std::memset(&unchangedBuffer, 0x6B, sizeof(unchangedBuffer));
+    const Ngs2ContextBufferInfo originalBuffer = unchangedBuffer;
+    Ngs2Handle unchangedRack = 0x5678;
+    auto invalidPs5Option = ps5OptionBytes;
+    const std::uint32_t invalidGrain = 2048;
+    std::memcpy(invalidPs5Option.data() + 76, &invalidGrain, sizeof(invalidGrain));
+    Require(sceNgs2RackQueryBufferSize(0, reinterpret_cast<const Ngs2RackOption*>(invalidPs5Option.data()), &unchangedBuffer) != 0,
+            "an invalid PS5 rack grain was accepted");
+    Require(std::memcmp(&unchangedBuffer, &originalBuffer, sizeof(unchangedBuffer)) == 0,
+            "an invalid PS5 rack grain changed its query output");
+    Require(sceNgs2RackCreate(system, 43, reinterpret_cast<const Ngs2RackOption*>(invalidPs5Option.data()),
+                              &ps5RackBuffer, &unchangedRack) != 0 && unchangedRack == 0x5678,
+            "an invalid PS5 rack grain changed the create output");
+    invalidPs5Option = ps5OptionBytes;
+    const std::uint32_t invalidVoices = 513;
+    std::memcpy(invalidPs5Option.data() + 80, &invalidVoices, sizeof(invalidVoices));
+    Require(sceNgs2RackQueryBufferSize(0, reinterpret_cast<const Ngs2RackOption*>(invalidPs5Option.data()), &unchangedBuffer) != 0,
+            "an invalid PS5 rack voice count was accepted");
+    Require(std::memcmp(&unchangedBuffer, &originalBuffer, sizeof(unchangedBuffer)) == 0,
+            "an invalid PS5 rack voice count changed its query output");
+    Require(sceNgs2RackCreate(system, 43, reinterpret_cast<const Ngs2RackOption*>(invalidPs5Option.data()),
+                              &ps5RackBuffer, &unchangedRack) != 0 && unchangedRack == 0x5678,
+            "an invalid PS5 rack voice count changed the create output");
+    invalidPs5Option = ps5OptionBytes;
+    const std::size_t unsupportedSize = 192;
+    std::memcpy(invalidPs5Option.data(), &unsupportedSize, sizeof(unsupportedSize));
+    Require(sceNgs2RackQueryBufferSize(0, reinterpret_cast<const Ngs2RackOption*>(invalidPs5Option.data()), &unchangedBuffer) != 0,
+            "an unsupported PS5 rack option size was accepted");
+    Require(std::memcmp(&unchangedBuffer, &originalBuffer, sizeof(unchangedBuffer)) == 0,
+            "an unsupported PS5 rack option size changed its query output");
+    Require(sceNgs2RackCreate(system, 43, reinterpret_cast<const Ngs2RackOption*>(invalidPs5Option.data()),
+                              &ps5RackBuffer, &unchangedRack) != 0 && unchangedRack == 0x5678,
+            "an unsupported PS5 rack option size changed the create output");
+    Require(sceNgs2RackDestroy(ps5Rack, nullptr) == 0, "the PS5 rack was not destroyed");
+
     const Ngs2BufferAllocator allocator{Allocate, Release, 0};
     Ngs2Handle allocated = 0;
     Require(sceNgs2SystemCreateWithAllocator(&systemOption, &allocator, &allocated) == 0, "the allocator path failed");
     Require(allocations == 1, "the allocator was not called");
     Require(sceNgs2SystemDestroy(allocated, nullptr) == 0, "the allocated system was not destroyed");
     Require(releases == 1, "the allocated buffer was not released");
+
+    Ngs2Handle allocatedPs5Rack = 0;
+    Require(sceNgs2RackCreateWithAllocator(system, 44, ps5Option, &allocator, &allocatedPs5Rack) == 0,
+            "the PS5 rack allocator path failed");
+    Ngs2Handle allocatedPs5Voice = 0;
+    Require(sceNgs2RackGetVoiceHandle(allocatedPs5Rack, 4, &allocatedPs5Voice) == 0 && allocatedPs5Voice != 0,
+            "the PS5 rack allocator lost its voice count");
+    Require(allocations == 2, "the PS5 rack allocator was not called");
+    Require(sceNgs2RackDestroy(allocatedPs5Rack, nullptr) == 0, "the allocated PS5 rack was not destroyed");
+    Require(releases == 2, "the allocated PS5 rack buffer was not released");
 
     Require(sceNgs2SystemDestroy(system, &returned) == 0, "the system was not destroyed");
     Require(returned.host_buffer == storage.data(), "the system did not return its buffer");

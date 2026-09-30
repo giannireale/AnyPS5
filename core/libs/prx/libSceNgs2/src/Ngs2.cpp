@@ -122,14 +122,34 @@ int validateSystemOption(const Ngs2SystemOption* option, std::uint32_t* outGrain
     return 0;
 }
 
-int validateRackOption(const Ngs2RackOption* option, std::uint32_t* outVoices) {
+constexpr std::size_t Ps5RackOptionSize = 200;
+constexpr std::size_t Ps5RackOptionFlagsOffset = 72;
+constexpr std::size_t Ps5RackOptionMaxGrainOffset = 76;
+constexpr std::size_t Ps5RackOptionMaxVoicesOffset = 80;
+
+int normalizeRackOption(const Ngs2RackOption* option, Ngs2RackOption* normalized, std::uint32_t* outVoices) {
     std::uint32_t voices = 1;
+    Ngs2RackOption value{};
     if (option != nullptr) {
-        if (option->size != sizeof(Ngs2RackOption)) return SCE_NGS2_ERROR_INVALID_OPTION_SIZE;
-        if (option->max_voices > MaxRackVoices) return SCE_NGS2_ERROR_INVALID_MAX_VOICES;
-        if (option->max_voices != 0) voices = option->max_voices;
-        if (option->max_grain_samples > MaxGrainSamples) return SCE_NGS2_ERROR_INVALID_MAX_GRAIN_SAMPLES;
+        std::size_t optionSize = 0;
+        std::memcpy(&optionSize, option, sizeof(optionSize));
+        if (optionSize == sizeof(Ngs2RackOption)) {
+            value = *option;
+        } else if (optionSize == Ps5RackOptionSize) {
+            // Observed SDK compatibility fields; the remaining bytes are opaque.
+            value.size = sizeof(Ngs2RackOption);
+            std::memcpy(value.name, reinterpret_cast<const std::uint8_t*>(option) + 8, sizeof(value.name));
+            std::memcpy(&value.flags, reinterpret_cast<const std::uint8_t*>(option) + Ps5RackOptionFlagsOffset, sizeof(value.flags));
+            std::memcpy(&value.max_grain_samples, reinterpret_cast<const std::uint8_t*>(option) + Ps5RackOptionMaxGrainOffset, sizeof(value.max_grain_samples));
+            std::memcpy(&value.max_voices, reinterpret_cast<const std::uint8_t*>(option) + Ps5RackOptionMaxVoicesOffset, sizeof(value.max_voices));
+        } else {
+            return SCE_NGS2_ERROR_INVALID_OPTION_SIZE;
+        }
+        if (value.max_voices > MaxRackVoices) return SCE_NGS2_ERROR_INVALID_MAX_VOICES;
+        if (value.max_voices != 0) voices = value.max_voices;
+        if (value.max_grain_samples > MaxGrainSamples) return SCE_NGS2_ERROR_INVALID_MAX_GRAIN_SAMPLES;
     }
+    if (normalized != nullptr) *normalized = value;
     *outVoices = voices;
     return 0;
 }
@@ -184,7 +204,8 @@ int createRack(System* system, const std::uint32_t rackId, const Ngs2RackOption*
                const Ngs2ContextBufferInfo& bufferInfo, const bool ownsBuffer,
                const Ngs2BufferAllocator& allocator, Ngs2Handle* handle) {
     std::uint32_t voices = 0;
-    const int optionResult = validateRackOption(option, &voices);
+    Ngs2RackOption normalizedOption{};
+    const int optionResult = normalizeRackOption(option, &normalizedOption, &voices);
     if (optionResult != 0) return optionResult;
     if (bufferInfo.host_buffer == nullptr) return SCE_NGS2_ERROR_INVALID_BUFFER_ADDRESS;
     if (bufferInfo.host_buffer_size < rackBufferSize(voices)) return SCE_NGS2_ERROR_INVALID_BUFFER_SIZE;
@@ -193,7 +214,7 @@ int createRack(System* system, const std::uint32_t rackId, const Ngs2RackOption*
     created->handle = nextHandle();
     created->rackId = rackId;
     created->uid = g_nextUid++;
-    if (option != nullptr) created->option = *option;
+    created->option = normalizedOption;
     created->bufferInfo = bufferInfo;
     created->ownsBuffer = ownsBuffer;
     created->allocator = allocator;
@@ -307,7 +328,7 @@ int APS5_VABI sceNgs2RackQueryBufferSize(std::uint32_t rack_id, const Ngs2RackOp
     (void)rack_id;
     if (buffer_info == nullptr) return SCE_NGS2_ERROR_INVALID_OUT_ADDRESS;
     std::uint32_t voices = 0;
-    const int optionResult = validateRackOption(option, &voices);
+    const int optionResult = normalizeRackOption(option, nullptr, &voices);
     if (optionResult != 0) return optionResult;
     buffer_info->host_buffer = nullptr;
     buffer_info->host_buffer_size = rackBufferSize(voices);
@@ -328,7 +349,7 @@ int APS5_VABI sceNgs2RackCreateWithAllocator(Ngs2Handle system_handle, std::uint
                                              const Ngs2BufferAllocator* allocator, Ngs2Handle* handle) {
     if (handle == nullptr) return SCE_NGS2_ERROR_INVALID_OUT_ADDRESS;
     std::uint32_t voices = 0;
-    const int optionResult = validateRackOption(option, &voices);
+    const int optionResult = normalizeRackOption(option, nullptr, &voices);
     if (optionResult != 0) return optionResult;
     Ngs2ContextBufferInfo info{};
     const int bufferResult = acquireBuffer(allocator, rackBufferSize(voices), &info);
