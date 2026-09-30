@@ -120,8 +120,17 @@ int main() {
     Require(sceVoiceDeletePort(in) != 0, "the port was deleted twice");
     Require(sceVoiceGetPortInfo(out, &info) == 0 && info.edge_count == 0, "the output kept a dangling source");
 
+    std::uint32_t second = 0;
+    Require(sceVoiceCreatePort(&second, &input) == 0, "the second input port was refused");
+    Require(sceVoiceConnectIPortToOPort(second, out) == 0, "the second input was not connected");
+    Require(sceVoiceGetPortInfo(second, &info) == 0 && info.edge_count == 1, "the second input has no edge");
+    Require(sceVoiceDeletePort(out) == 0, "the output port was not deleted");
+    Require(sceVoiceGetPortInfo(second, &info) == 0 && info.edge_count == 0, "the input kept an edge to a deleted output");
+    size = sizeof(payload);
+    Require(sceVoiceWriteToIPort(second, payload, &size, 0) == 0 && size == 0, "writing to an input whose output is gone delivered bytes");
+
     Require(sceVoiceEnd_nid_postfix() == 0, "the library did not shut down");
-    Require(sceVoiceGetPortInfo(out, &info) != 0, "a port outlived the library");
+    Require(sceVoiceGetPortInfo(second, &info) != 0, "a port outlived the library");
 
     if (failures != 0) return 1;
     std::printf("Voice port tests passed\n");
