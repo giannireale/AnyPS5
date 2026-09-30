@@ -22,14 +22,17 @@ CPU Intel.
 
 | Cosa | Dove |
 |---|---|
-| Fork con il lavoro | <https://github.com/giannireale/AnyPS5> — `main` = `a7f5246`, 22 commit sopra l'upstream `75a8668` |
+| Fork con il lavoro | <https://github.com/giannireale/AnyPS5> — `main` = `9fd2496`, 28 commit sopra l'upstream `75a8668` |
 | Clone locale | `/home/user/AnyPS5` (branch `main`) |
 | Branch per le PR | 11 branch `pr/*`, ricostruiti sopra l'upstream, uno per argomento |
 | Branch di lavoro | 14 branch `feat/*` e `fix/*`, tutti **già contenuti in `main`**: ridondanti, cancellabili |
-| Testi PR pronti | `/home/user/PR-DESCRIPTIONS.md` (inglese, con nota di verifica per ciascuna) |
-| Diario completo | `/home/user/AnyPS5-STATO.md` |
-| Modelli SHA-NI validati sul silicio | `/home/user/sha-ni-reference-models.cpp` |
-| Strumenti di misura | `/home/user/bench/` (`scan.cpp` + binari compilati) |
+| Testi PR pronti | `notes/PR-DESCRIPTIONS.md` |
+| Diario completo | `notes/STATO.md` |
+| Censimento degli altri progetti | `notes/PORTING-SURVEY.md` |
+| Modelli SHA-NI validati sul silicio | `/home/user/bench/sha-ni-reference-models.cpp` |
+| Strumenti di misura | `/home/user/bench/` (solo sorgenti: `scan.cpp`, `ajmwrap.cpp`, `stubs.cpp`) |
+
+I `.patch` sono stati rimossi: ogni commit e' sul fork, `git format-patch` li rigenera.
 
 **Nessuna PR è stata aperta** verso l'upstream: scelta esplicita dell'utente, che vuole prima
 provare di persona.
@@ -50,6 +53,10 @@ provare di persona.
 - `69a1834` la scansione non muore sulla coda del segmento
 - `48786d5` si scandiscono le **sezioni** eseguibili, non l'intero segmento
 - `35d19c0` i salti che entrano nel sito vengono rediretti dentro lo stub
+
+### Librerie di sistema
+- `da5237d` `libSceAjm` costruito come wrapper su `libSceAjm.native` (12 delle 13 funzioni)
+- `9fd2496` `libSceNgs2`: ciclo di vita di sistema, rack e voci (15 delle 25)
 
 ### Strumenti
 - `a7f5246` `tools/compat_report.py`: dato il registro degli import di un gioco, dice quante
