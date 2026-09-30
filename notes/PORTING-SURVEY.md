@@ -77,6 +77,37 @@ Careful with the per directory numbers: `libSceX` and `libSceX.native` are count
 the implementation usually lives in the `.native` one. `libSceAjm` reads 0/13 while
 `libSceAjm.native` has 33 functions and decodes ATRAC9.
 
+## 3b. Prosper, read but not copied
+
+Prosper (`mattias800/prosper`) was cloned and read. Its README states the position plainly:
+*"No LICENSE file exists yet, so no license is granted by default. Open an issue to ask."* That is
+deliberate, not an oversight, so **no line of it is in this repository** and none can be until the
+author grants a license. What follows is description, not code.
+
+It matters more than the emulators because it is the only project that shares AnyPS5's shape: a
+user-space compatibility layer, guest code running natively with no CPU emulation, SELF/ELF modules
+linked into one address space, system libraries reimplemented on host facilities, AGC command
+streams translated to Vulkan through an RDNA2 to SPIR-V recompiler.
+
+Three differences worth knowing:
+
+- **When the linking happens.** Prosper loads and links the guest modules at run time, in process,
+  the way Wine does. AnyPS5 relinks the executable into a native binary beforehand. Same end,
+  opposite moment, and it is why their loader code has no counterpart here.
+- **How the HLE is organised.** Prosper groups by subsystem — `audio`, `fs`, `graphics`, `kernel`,
+  `net`, `np`, `sync`, `video` — about fifty thousand lines in thirty-seven files. AnyPS5 groups by
+  PS5 module name, one directory per `libSceX`. Theirs makes a subsystem easy to reason about;
+  ours makes the guest ABI surface easy to audit, which is what the NID patcher needs.
+- **Pluggable host backends.** Audio and video are frontends chosen at build time: `audio_sdl3`,
+  `audio_ffmpeg`, `video_vaapi`, `video_mf`. That is a way to have FFmpeg-backed decoding without
+  forcing the dependency on everyone, which is the exact obstacle that stopped `libSceAudiodec`
+  here.
+
+Their working practice is also worth stealing, and stealing a practice is free: a per title script
+for each game they test, a tracker issue per title, a machine-generated progress file kept in step
+by CI, and a charter that records the mistakes that cost the most time. AnyPS5 has a compatibility
+list with one row and no reproducible route attached to it.
+
 ## 4. What transfers, in practice
 
 Not files. These:
