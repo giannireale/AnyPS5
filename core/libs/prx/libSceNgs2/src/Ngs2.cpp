@@ -51,6 +51,7 @@ struct System;
 struct Rack {
     Ngs2Handle handle = 0;
     std::uint32_t rackId = 0;
+    std::uint32_t uid = 0;
     Ngs2RackOption option{};
     Ngs2ContextBufferInfo bufferInfo{};
     bool ownsBuffer = false;
@@ -191,6 +192,7 @@ int createRack(System* system, const std::uint32_t rackId, const Ngs2RackOption*
     auto created = std::make_unique<Rack>();
     created->handle = nextHandle();
     created->rackId = rackId;
+    created->uid = g_nextUid++;
     if (option != nullptr) created->option = *option;
     created->bufferInfo = bufferInfo;
     created->ownsBuffer = ownsBuffer;
@@ -347,6 +349,31 @@ int APS5_VABI sceNgs2RackDestroy(Ngs2Handle rack_handle, Ngs2ContextBufferInfo* 
     Rack* rack = findRack(rack_handle);
     if (rack == nullptr) return SCE_NGS2_ERROR_INVALID_RACK_HANDLE;
     destroyRack(rack->system, rack, buffer_info);
+    return 0;
+}
+
+int APS5_VABI sceNgs2RackGetInfo(Ngs2Handle rack_handle, Ngs2RackInfo* info, std::size_t info_size) {
+    if (info == nullptr) return SCE_NGS2_ERROR_INVALID_OUT_ADDRESS;
+    if (info_size != sizeof(Ngs2RackInfo)) return SCE_NGS2_ERROR_INVALID_OUT_SIZE;
+    std::lock_guard lock(g_lock);
+    const Rack* rack = findRack(rack_handle);
+    if (rack == nullptr) return SCE_NGS2_ERROR_INVALID_RACK_HANDLE;
+    std::memset(info, 0, sizeof(Ngs2RackInfo));
+    std::memcpy(info->name, rack->option.name, sizeof(info->name));
+    info->rack_handle = rack->handle;
+    info->buffer_info = rack->bufferInfo;
+    info->owner_system_handle = rack->system->handle;
+    info->rack_id = rack->rackId;
+    info->uid = rack->uid;
+    info->min_grain_samples = MinGrainSamples;
+    info->max_grain_samples = rack->option.max_grain_samples != 0
+                                  ? rack->option.max_grain_samples
+                                  : (rack->system->option.max_grain_samples != 0
+                                         ? rack->system->option.max_grain_samples
+                                         : MaxGrainSamples);
+    info->max_voices = static_cast<std::uint32_t>(rack->voices.size());
+    info->max_matrices = rack->option.max_matrices;
+    info->max_ports = rack->option.max_ports;
     return 0;
 }
 

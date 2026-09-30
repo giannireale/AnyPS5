@@ -16,6 +16,7 @@ int APS5_VABI sceNgs2SystemSetGrainSamples(Ngs2Handle system_handle, std::uint32
 int APS5_VABI sceNgs2RackQueryBufferSize(std::uint32_t rack_id, const Ngs2RackOption* option, Ngs2ContextBufferInfo* buffer_info);
 int APS5_VABI sceNgs2RackCreate(Ngs2Handle system_handle, std::uint32_t rack_id, const Ngs2RackOption* option, const Ngs2ContextBufferInfo* buffer_info, Ngs2Handle* handle);
 int APS5_VABI sceNgs2RackDestroy(Ngs2Handle rack_handle, Ngs2ContextBufferInfo* buffer_info);
+int APS5_VABI sceNgs2RackGetInfo(Ngs2Handle rack_handle, Ngs2RackInfo* info, std::size_t info_size);
 int APS5_VABI sceNgs2RackGetVoiceHandle(Ngs2Handle rack_handle, std::uint32_t voice_id, Ngs2Handle* handle);
 int APS5_VABI sceNgs2RackLock(Ngs2Handle rack_handle);
 int APS5_VABI sceNgs2RackUnlock(Ngs2Handle rack_handle);
@@ -63,7 +64,10 @@ Ngs2SystemOption MakeSystemOption() {
 Ngs2RackOption MakeRackOption(const std::uint32_t voices) {
     Ngs2RackOption option{};
     option.size = sizeof(option);
+    std::strcpy(option.name, "rack-test");
     option.max_voices = voices;
+    option.max_matrices = 5;
+    option.max_ports = 3;
     return option;
 }
 
@@ -114,9 +118,41 @@ int main() {
     std::vector<std::uint8_t> rackStorage(rackBuffer.host_buffer_size);
     rackBuffer.host_buffer = rackStorage.data();
     Ngs2Handle rack = 0;
-    Require(sceNgs2RackCreate(system, 0, &rackOption, &rackBuffer, &rack) == 0, "the rack was not created");
+    Require(sceNgs2RackCreate(system, 42, &rackOption, &rackBuffer, &rack) == 0, "the rack was not created");
     Require(sceNgs2RackCreate(0, 0, &rackOption, &rackBuffer, &rack) != 0, "a rack on an invalid system was accepted");
     Require(sceNgs2SystemGetInfo(system, &info, sizeof(info)) == 0 && info.rack_count == 1, "the system does not count its rack");
+
+    struct OversizedRackInfo {
+        Ngs2RackInfo info;
+        std::uint8_t canary[64];
+    } oversizedInfo;
+    std::memset(&oversizedInfo, 0xA5, sizeof(oversizedInfo));
+    Require(sceNgs2RackGetInfo(rack, &oversizedInfo.info, sizeof(oversizedInfo.info)) == 0, "the rack info was refused");
+    Require(std::strcmp(oversizedInfo.info.name, "rack-test") == 0, "the rack info lost its name");
+    Require(oversizedInfo.info.rack_handle == rack && oversizedInfo.info.rack_id == 42, "the rack info reports another rack");
+    Require(oversizedInfo.info.buffer_info.host_buffer == rackStorage.data() &&
+                oversizedInfo.info.buffer_info.host_buffer_size == rackStorage.size(),
+            "the rack info lost its buffer");
+    Require(oversizedInfo.info.owner_system_handle == system, "the rack info reports another owner system");
+    Require(oversizedInfo.info.uid != 0, "the rack info has no uid");
+    Require(oversizedInfo.info.min_grain_samples == 64 && oversizedInfo.info.max_grain_samples == 512,
+            "the rack info lost its grain limits");
+    Require(oversizedInfo.info.max_voices == 4 && oversizedInfo.info.max_matrices == 5 && oversizedInfo.info.max_ports == 3,
+            "the rack info lost its configured limits");
+    bool tailUnchanged = true;
+    for (const auto value : oversizedInfo.canary) tailUnchanged = tailUnchanged && value == 0xA5;
+    Require(tailUnchanged, "the rack info overwrote the oversized tail");
+
+    Ngs2RackInfo unchangedInfo;
+    std::memset(&unchangedInfo, 0x6B, sizeof(unchangedInfo));
+    const Ngs2RackInfo originalInfo = unchangedInfo;
+    Require(sceNgs2RackGetInfo(rack, nullptr, sizeof(unchangedInfo)) != 0, "a null rack info output was accepted");
+    Require(sceNgs2RackGetInfo(rack, &unchangedInfo, sizeof(unchangedInfo) - 1) != 0, "an undersized rack info was accepted");
+    Require(std::memcmp(&unchangedInfo, &originalInfo, sizeof(unchangedInfo)) == 0, "an undersized rack info changed its output");
+    Require(sceNgs2RackGetInfo(rack, &unchangedInfo, sizeof(oversizedInfo)) != 0, "an oversized rack info was accepted");
+    Require(std::memcmp(&unchangedInfo, &originalInfo, sizeof(unchangedInfo)) == 0, "an oversized rack info changed its output");
+    Require(sceNgs2RackGetInfo(0, &unchangedInfo, sizeof(unchangedInfo)) != 0, "an invalid rack info handle was accepted");
+    Require(std::memcmp(&unchangedInfo, &originalInfo, sizeof(unchangedInfo)) == 0, "an invalid rack info handle changed its output");
 
     Ngs2Handle voice = 0;
     Require(sceNgs2RackGetVoiceHandle(rack, 3, &voice) == 0 && voice != 0, "the last voice of the rack is missing");
@@ -134,6 +170,8 @@ int main() {
     Require(sceNgs2RackDestroy(rack, &returned) == 0, "the rack was not destroyed");
     Require(returned.host_buffer == rackStorage.data(), "the rack did not return its buffer");
     Require(sceNgs2RackDestroy(rack, &returned) != 0, "the rack was destroyed twice");
+    Require(sceNgs2RackGetInfo(rack, &unchangedInfo, sizeof(unchangedInfo)) != 0, "a destroyed rack info handle was accepted");
+    Require(std::memcmp(&unchangedInfo, &originalInfo, sizeof(unchangedInfo)) == 0, "a destroyed rack info handle changed its output");
     Require(sceNgs2VoiceGetStateFlags(voice, &flags) != 0, "a voice outlived its rack");
 
     const Ngs2BufferAllocator allocator{Allocate, Release, 0};

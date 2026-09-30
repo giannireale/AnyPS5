@@ -87,8 +87,6 @@ int APS5_VABI sceNgs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamHe
 
 
 
-APS5_EXPORT("M4LYATRhRUE", sceNgs2Stub_M4LYATRhRUE);
-int APS5_VABI sceNgs2Stub_M4LYATRhRUE() { NotImplemented_nid_no_patch(__func__); return 0; }
 APS5_EXPORT("WCayTgob7-o", sceNgs2Stub_WCayTgob7_o);
 int APS5_VABI sceNgs2Stub_WCayTgob7_o() { NotImplemented_nid_no_patch(__func__); return 0; }
 APS5_EXPORT("9eic4AmjGVI", sceNgs2Stub_9eic4AmjGVI);

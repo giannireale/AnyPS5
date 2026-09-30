@@ -552,6 +552,35 @@ struct Ngs2SystemInfo {
     std::uint32_t num_grain_samples;
 };
 
+// Known legacy NGS2 rack info layout from https://raw.githubusercontent.com/shadps4-emu/shadPS4/main/src/core/libraries/ngs2/ngs2_impl.h.
+struct Ngs2RackInfo {
+    char name[16];
+    Ngs2Handle rack_handle;
+    Ngs2ContextBufferInfo buffer_info;
+    Ngs2Handle owner_system_handle;
+    std::uint32_t type;
+    std::uint32_t rack_id;
+    std::uint32_t uid;
+    std::uint32_t min_grain_samples;
+    std::uint32_t max_grain_samples;
+    std::uint32_t max_voices;
+    std::uint32_t max_channel_works;
+    std::uint32_t max_inputs;
+    std::uint32_t max_matrices;
+    std::uint32_t max_ports;
+    std::uint32_t state_flags;
+    float last_process_ratio;
+    std::uint64_t last_process_tick;
+    std::uint64_t render_count;
+    std::uint32_t active_voice_count;
+    std::uint32_t active_channel_work_count;
+};
+
+static_assert(sizeof(Ngs2RackInfo) == 168);
+static_assert(offsetof(Ngs2RackInfo, owner_system_handle) == 88);
+static_assert(offsetof(Ngs2RackInfo, max_voices) == 116);
+static_assert(offsetof(Ngs2RackInfo, render_count) == 152);
+
 struct Ngs2RackOption {
     std::size_t size;
     char name[16];
