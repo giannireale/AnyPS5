@@ -133,6 +133,20 @@ static int mprotect(void* addr, size_t len, int prot) {
 namespace {
 
 constexpr int GuestMapFixedFlag = 0x10;
+constexpr int GuestMapNoOverwriteFlag = 0x80;
+constexpr int GuestMapNoCoalesceFlag = 0x400000;
+
+constexpr int SupportedMapFlags() {
+#if defined(__linux__)
+    return GuestMapFixedFlag | GuestMapNoOverwriteFlag | GuestMapNoCoalesceFlag;
+#else
+    return GuestMapFixedFlag | GuestMapNoCoalesceFlag;
+#endif
+}
+
+bool HasUnsupportedMapFlags(int flags) {
+    return (flags & ~SupportedMapFlags()) != 0;
+}
 
 #if defined(__linux__)
 void* MapAtOrAbove(std::uintptr_t start, size_t len, int prot, size_t alignment) {
@@ -243,23 +257,15 @@ void Unmap(void* addr, size_t len) {
 void* MapAligned(void* addr, size_t len, int prot, int flags, size_t alignment) {
     ValidateLength(len);
     alignment = ValidateAlignment(alignment);
-    constexpr int GuestMapFixed = 0x10;
-    constexpr int GuestMapNoOverwrite = 0x80;
-    constexpr int GuestMapNoCoalesce = 0x400000;
-#if defined(__linux__)
-    constexpr int SupportedFlags = GuestMapFixed | GuestMapNoOverwrite | GuestMapNoCoalesce;
-#else
-    constexpr int SupportedFlags = GuestMapFixed | GuestMapNoCoalesce;
-#endif
-    if ((flags & ~SupportedFlags) != 0) {
+    if (HasUnsupportedMapFlags(flags)) {
         char message[64];
         std::snprintf(message, sizeof(message), "Unsupported memory mapping flags 0x%x", flags);
         throw std::invalid_argument(message);
     }
-    if ((flags & GuestMapFixed) != 0) {
+    if ((flags & GuestMapFixedFlag) != 0) {
         ValidateRange(addr, len, alignment);
 #if defined(__linux__)
-        const int placement = (flags & GuestMapNoOverwrite) != 0 ? MAP_FIXED_NOREPLACE : MAP_FIXED;
+        const int placement = (flags & GuestMapNoOverwriteFlag) != 0 ? MAP_FIXED_NOREPLACE : MAP_FIXED;
 #else
         const int placement = MAP_FIXED;
 #endif
@@ -318,6 +324,7 @@ void ValidateOutput(void** addr) {
 int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart, size_t alignment) {
     ValidateOutput(addr);
     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
+    if (HasUnsupportedMapFlags(flags)) return SCE_KERNEL_ERROR_EINVAL;
     if (physStart < 0 || (static_cast<std::uint64_t>(physStart) & (PS5_PAGE_SIZE - 1)) != 0 || static_cast<std::uint64_t>(physStart) >= DIRECT_MEMORY_SIZE || len > DIRECT_MEMORY_SIZE - static_cast<std::uint64_t>(physStart)) {
         return SCE_KERNEL_ERROR_EINVAL;
     }
@@ -339,6 +346,7 @@ int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart,
 int DoMapAnon(void** addr, size_t len, int prot, int flags) {
     ValidateOutput(addr);
     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
+    if (HasUnsupportedMapFlags(flags)) return SCE_KERNEL_ERROR_EINVAL;
     GuestAllocations::Mutation mutation;
     if (RemapFixedIntoRegistered(mutation, *addr, len, prot, flags)) return 0;
     if (*addr != nullptr && (flags & GuestMapFixedFlag) != 0) mutation.RequireAvailable(*addr, len);

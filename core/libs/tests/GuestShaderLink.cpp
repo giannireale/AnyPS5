@@ -6,6 +6,7 @@
 #include <cstring>
 #include <stdexcept>
 extern "C" int APS5_VABI sceAgcLinkShaders(ShaderRegister*, ShaderRegister*, const void*, const Shader*, const Shader*, std::uint32_t);
+extern "C" int APS5_VABI sceAgcCreateInterpolantMappingSdk(ShaderRegister*, const Shader*, const Shader*);
 extern "C" void* APS5_VABI sceAgcGetRegisterDefaults();
 extern "C" void* APS5_VABI sceAgcGetRegisterDefaults2(std::uint32_t);
 static void Require(bool value) { if (!value) std::abort(); }
@@ -83,4 +84,38 @@ int main() {
     input.default_value = 2;
     Require(sceAgcLinkShaders(context.data(), primitive.data(), nullptr, &vertex, &pixel, 4) == 0);
     Require(context[2].value == 0x220);
+
+    std::array<ShaderRegister, 33> sdkMapping{};
+    sdkMapping.back() = {0xdeadbeef, 0xcafebabe};
+    output.semantic = 9;
+    output.hardware_mapping = 5;
+    input.semantic = 9;
+    input.default_value = 0;
+    input.is_flat_shaded = 1;
+    vertex.output_semantics = &output;
+    vertex.num_output_semantics = 1;
+    pixel.input_semantics = &input;
+    pixel.num_input_semantics = 1;
+    Require(sceAgcCreateInterpolantMappingSdk(sdkMapping.data(), &vertex, &pixel) == 0);
+    Require(sdkMapping[0].offset == SPI_PS_INPUT_CNTL_0 && sdkMapping[0].value == (5 | 0x400));
+    for (unsigned i = 1; i < 32; ++i)
+        Require(sdkMapping[i].offset == SPI_PS_INPUT_CNTL_0 + i && sdkMapping[i].value == 0);
+    Require(sdkMapping.back().offset == 0xdeadbeef && sdkMapping.back().value == 0xcafebabe);
+
+    input.semantic = 10;
+    input.default_value = 2;
+    Require(sceAgcCreateInterpolantMappingSdk(sdkMapping.data(), &vertex, &pixel) == 0);
+    Require(sdkMapping[0].value == 0x220);
+
+    sdkMapping.fill({0xdeadbeef, 0xcafebabe});
+    Require(sceAgcCreateInterpolantMappingSdk(sdkMapping.data(), nullptr, nullptr) == 0);
+    for (unsigned i = 0; i < 32; ++i)
+        Require(sdkMapping[i].offset == SPI_PS_INPUT_CNTL_0 + i && sdkMapping[i].value == 0);
+    Require(sdkMapping.back().offset == 0xdeadbeef && sdkMapping.back().value == 0xcafebabe);
+
+    sdkMapping.fill({0xdeadbeef, 0xcafebabe});
+    const auto savedSdkMapping = sdkMapping;
+    pixel.num_input_semantics = 33;
+    Require(sceAgcCreateInterpolantMappingSdk(sdkMapping.data(), &vertex, &pixel) == GRAPHICS5_ERROR_INVALID_SHADER_PROGRAM);
+    Require(std::memcmp(sdkMapping.data(), savedSdkMapping.data(), sizeof(sdkMapping)) == 0);
 }

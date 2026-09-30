@@ -1,9 +1,17 @@
 #include <cstdint>
 #include <cstddef>
+#include <cstdio>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
 extern "C" {
+
+// Exception payloads belong to the guest C++ runtime. Keep the diagnostic
+// useful without interpreting a host-incompatible exception object layout.
+int APS5_VABI sceKernelDebugWriteCppExceptionInfo(const void* info) {
+ std::fprintf(stderr, "[exception] guest C++ exception info: %p\n", info);
+ return 0;
+}
 
 int APS5_VABI sceKernelInstallExceptionHandler(int signum, void* handler) {
  (void)signum;

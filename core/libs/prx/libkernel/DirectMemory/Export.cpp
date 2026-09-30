@@ -178,6 +178,7 @@ int APS5_VABI sceKernelMapNamedDirectMemory(void** addr, size_t len, int prot, i
  return result;
 }
 
+APS5_EXPORT("4h6F1LLbTiw", sceKernelMapNamedFlexibleMemory);
 int32_t APS5_VABI sceKernelMapNamedFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags, const char* name) {
  const int result = _mapFlexible(addr_in_out, len, prot, flags);
  if (result == 0 && name) sceKernelSetVirtualRangeName(*addr_in_out, len, name);

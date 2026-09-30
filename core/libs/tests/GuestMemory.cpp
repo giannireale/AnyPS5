@@ -1,6 +1,7 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "SceTypes.hpp"
+#include "prx/libkernel/KernelErrors.hpp"
 #include <cstring>
 #include <exception>
 #include <cstdint>
@@ -14,6 +15,7 @@ int APS5_VABI munmap_nid_postfix(void*, std::size_t) noexcept;
 int* APS5_VABI __error_nid_postfix();
 int APS5_VABI sceKernelMapNamedFlexibleMemory(void**, std::size_t, int, int, const char*);
 int APS5_VABI sceKernelMapFlexibleMemory(void**, std::size_t, int, int);
+int APS5_VABI sceKernelMapDirectMemory(void**, std::size_t, int, int, std::int64_t, std::size_t);
 int APS5_VABI sceKernelMunmap(void*, std::size_t);
 int APS5_VABI sceKernelVirtualQuery(const void*, int, VirtualQueryInfo*, std::uint64_t);
 int APS5_VABI sceKernelSetVirtualRangeName(const void*, std::uint64_t, const char*);
@@ -58,8 +60,20 @@ static void CheckNamedAndHintedMappings() {
     Require(sceKernelMunmap(first, length) == 0);
 }
 
+static void CheckUnsupportedMappingFlags() {
+    constexpr std::size_t length = 0x4000;
+    void* flexible = reinterpret_cast<void*>(static_cast<std::uintptr_t>(0x12345000));
+    Require(sceKernelMapFlexibleMemory(&flexible, length, 3, 0x8000) == SCE_KERNEL_ERROR_EINVAL);
+    Require(flexible == reinterpret_cast<void*>(static_cast<std::uintptr_t>(0x12345000)));
+
+    void* direct = reinterpret_cast<void*>(static_cast<std::uintptr_t>(0x12345000));
+    Require(sceKernelMapDirectMemory(&direct, length, 3, 0x8000, 0, 0x4000) == SCE_KERNEL_ERROR_EINVAL);
+    Require(direct == reinterpret_cast<void*>(static_cast<std::uintptr_t>(0x12345000)));
+}
+
 int main() {
     CheckNamedAndHintedMappings();
+    CheckUnsupportedMappingFlags();
     constexpr std::size_t page = 0x4000;
     const auto failed = reinterpret_cast<void*>(static_cast<std::uintptr_t>(-1));
     const auto reject = [&](std::size_t length, int protection, int flags, int fd,
