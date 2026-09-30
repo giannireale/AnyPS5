@@ -213,13 +213,31 @@ std::vector<std::uint8_t> ElfReader::ReadSegment(const ProgramHeader& header) co
 std::vector<ProgramHeader> ElfReader::ReadCodeSegments() const {
     static constexpr std::uint32_t kPtLoad = 1;
     static constexpr std::uint32_t kPfX = 0x1;
-    std::vector<ProgramHeader> result;
+    static constexpr std::uint64_t kShfExecInstr = 0x4;
+    static constexpr std::uint32_t kShtNoBits = 8;
+    std::vector<ProgramHeader> segments;
     for (const auto& ph : ReadProgramHeaders()) {
         if (ph.Type == kPtLoad && (ph.Flags & kPfX)) {
-            result.push_back(ph);
+            segments.push_back(ph);
         }
     }
-    return result;
+    if (ReadHeader().SectionHeaderCount == 0)
+        return segments;
+    std::vector<ProgramHeader> executable;
+    for (const auto& section : ReadSectionHeaders()) {
+        if ((section.Flags & kShfExecInstr) == 0 || section.Type == kShtNoBits || section.SectionSize == 0)
+            continue;
+        for (const auto& segment : segments) {
+            if (section.Offset < segment.Offset || section.Offset - segment.Offset >= segment.FileSize)
+                continue;
+            if (section.SectionSize > segment.FileSize - (section.Offset - segment.Offset))
+                continue;
+            executable.push_back({segment.Type, segment.Flags, section.Offset, section.MappedAddress,
+                                  section.MappedAddress, section.SectionSize, section.SectionSize, segment.Alignment});
+            break;
+        }
+    }
+    return executable.empty() ? segments : executable;
 }
 
 std::uint64_t ElfReader::GetFileSize() const {
