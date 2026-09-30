@@ -24,6 +24,8 @@ int APS5_VABI sceNgs2RackLock(Ngs2Handle rack_handle);
 int APS5_VABI sceNgs2RackUnlock(Ngs2Handle rack_handle);
 int APS5_VABI sceNgs2VoiceGetState(Ngs2Handle voice_handle, Ngs2VoiceState* state, std::size_t state_size);
 int APS5_VABI sceNgs2VoiceGetStateFlags(Ngs2Handle voice_handle, std::uint32_t* state_flags);
+int APS5_VABI sceNgs2VoiceControl(Ngs2Handle voice_handle, const Ngs2VoiceParamHeader* param_list);
+int APS5_VABI sceNgs2VoiceRunCommands(Ngs2Handle voice_handle, const void* commands, std::uint32_t num_commands);
 }
 
 namespace {
@@ -174,6 +176,21 @@ int main() {
     Require(sceNgs2VoiceGetStateFlags(voice, &flags) == 0 && flags == 0, "a fresh voice is not idle");
     Require(sceNgs2VoiceGetStateFlags(0, &flags) != 0, "an invalid voice handle was accepted");
 
+    alignas(8) const std::array<std::uint32_t, 4> observedEventParam{16, 0x20000000, 2, 0};
+    const auto* observedParam = reinterpret_cast<const Ngs2VoiceParamHeader*>(observedEventParam.data());
+    Require(sceNgs2VoiceControl(0, observedParam) == static_cast<int>(0x804A0202), "voice control accepted an invalid handle");
+    Require(sceNgs2VoiceControl(voice, nullptr) < 0, "null voice parameters reported success");
+    Require(sceNgs2VoiceControl(voice, observedParam) < 0, "unsupported PS5 voice parameters reported success");
+
+    const std::array<std::uint32_t, 4> observedCommand{2, 0x400, 1, 0};
+    Require(sceNgs2VoiceRunCommands(0, observedCommand.data(), 1) == static_cast<int>(0x804A0202), "voice commands accepted an invalid handle");
+    Require(sceNgs2VoiceRunCommands(voice, nullptr, 0) == 0, "an empty voice command batch failed");
+    Require(sceNgs2VoiceRunCommands(voice, nullptr, 1) < 0, "a null nonempty voice command batch reported success");
+    Require(sceNgs2VoiceRunCommands(voice, observedCommand.data(), 1) < 0, "an unsupported SDK command reported success");
+    Require(sceNgs2VoiceRunCommands(voice, observedCommand.data(), UINT32_MAX) < 0, "an oversized unsupported batch reported success");
+    flags = 0xFFFFFFFFu;
+    Require(sceNgs2VoiceGetStateFlags(voice, &flags) == 0 && flags == 0, "rejected commands changed the voice state");
+
     Require(sceNgs2RackLock(rack) == 0 && sceNgs2RackUnlock(rack) == 0, "the rack cannot be locked");
     Require(sceNgs2RackLock(0) != 0, "an invalid rack handle was locked");
 
@@ -184,6 +201,8 @@ int main() {
     Require(sceNgs2RackGetInfo(rack, &unchangedInfo, sizeof(unchangedInfo)) != 0, "a destroyed rack info handle was accepted");
     Require(std::memcmp(&unchangedInfo, &originalInfo, sizeof(unchangedInfo)) == 0, "a destroyed rack info handle changed its output");
     Require(sceNgs2VoiceGetStateFlags(voice, &flags) != 0, "a voice outlived its rack");
+    Require(sceNgs2VoiceControl(voice, observedParam) == static_cast<int>(0x804A0202), "voice control accepted a destroyed voice");
+    Require(sceNgs2VoiceRunCommands(voice, nullptr, 0) == static_cast<int>(0x804A0202), "an empty batch accepted a destroyed voice");
 
     alignas(8) std::array<std::uint8_t, 200> ps5OptionBytes{};
     WritePs5RackOption(ps5OptionBytes, 512, 5);

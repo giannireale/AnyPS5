@@ -424,6 +424,25 @@ int APS5_VABI sceNgs2RackUnlock(Ngs2Handle rack_handle) {
     return 0;
 }
 
+int APS5_VABI sceNgs2VoiceControl(Ngs2Handle voice_handle, const Ngs2VoiceParamHeader* param_list) {
+    std::lock_guard lock(g_lock);
+    if (findVoice(voice_handle) == nullptr) return SCE_NGS2_ERROR_INVALID_VOICE_HANDLE;
+    // PS5 parameter blocks differ from Ngs2VoiceParamHeader. Until their
+    // semantics are implemented, reject them without reading or applying them.
+    (void)param_list;
+    return SCE_NGS2_ERROR_FAIL;
+}
+
+int APS5_VABI sceNgs2VoiceRunCommands(Ngs2Handle voice_handle, const void* commands, std::uint32_t num_commands) {
+    std::lock_guard lock(g_lock);
+    if (findVoice(voice_handle) == nullptr) return SCE_NGS2_ERROR_INVALID_VOICE_HANDLE;
+    if (num_commands == 0) return 0;
+    // Observed SDK commands are not VoiceControl parameter blocks. Never
+    // reinterpret them as such or report that an unsupported batch ran.
+    (void)commands;
+    return SCE_NGS2_ERROR_FAIL;
+}
+
 int APS5_VABI sceNgs2VoiceGetState(Ngs2Handle voice_handle, Ngs2VoiceState* state, std::size_t state_size) {
     if (state == nullptr) return SCE_NGS2_ERROR_INVALID_OUT_ADDRESS;
     if (state_size < sizeof(Ngs2VoiceState)) return SCE_NGS2_ERROR_INVALID_OUT_SIZE;

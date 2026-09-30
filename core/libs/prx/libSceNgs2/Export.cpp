@@ -78,12 +78,6 @@ int APS5_VABI sceNgs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuffe
  return 0;
 }
 
-int APS5_VABI sceNgs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamHeader* param_list) {
- (void)voice_handle;
- (void)param_list;
- NotImplemented_nid_no_patch(__func__);
- return 0;
-}
 
 
 
