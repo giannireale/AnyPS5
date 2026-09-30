@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Acb.hpp"
 #include "prx/libSceAgcDriver/Eq/include/Query.hpp"
+#include "prx/libSceAgcDriver/Resource/include/Lifecycle.hpp"
 #include <array>
 #include <cstdio>
 #include <limits>
@@ -49,6 +50,18 @@ void testEvents() {
     expectFailure([&] { sceAgcDriverGetEqEventType(&event); });
     expectFailure([] { sceAgcDriverGetEqEventType(nullptr); });
     expectFailure([&] { sceAgcDriverGetEqEventType(reinterpret_cast<const KernelEvent*>(reinterpret_cast<const std::byte*>(&event) + 1)); });
+}
+
+void testResourceRegistrationRequirements() {
+    constexpr std::uint32_t unavailable = 0x8A6C9018;
+    std::uint64_t size_in_bytes = 0xA5A5A5A5A5A5A5A5ull;
+    check(sceAgcDriverQueryResourceRegistrationUserMemoryRequirements(&size_in_bytes, 128, 64) == unavailable, "resource registration query returned unexpected status");
+    check(size_in_bytes == 0xA5A5A5A5A5A5A5A5ull, "resource registration query changed output on unavailable status");
+    check(sceAgcDriverQueryResourceRegistrationUserMemoryRequirements(nullptr, 128, 64) == unavailable, "resource registration query rejected null output");
+    check(sceAgcDriverQueryResourceRegistrationUserMemoryRequirements(&size_in_bytes, 0, 0) == unavailable, "resource registration query changed status for zero counts");
+    check(size_in_bytes == 0xA5A5A5A5A5A5A5A5ull, "resource registration query changed output for zero counts");
+    check(sceAgcDriverQueryResourceRegistrationUserMemoryRequirements(&size_in_bytes, 1, 1) == unavailable, "resource registration query changed status for small counts");
+    check(size_in_bytes == 0xA5A5A5A5A5A5A5A5ull, "resource registration query changed output for small counts");
 }
 
 void testValidation() {
@@ -165,6 +178,7 @@ void testWorkerFailure() {
 int main() {
     try {
         testEvents();
+        testResourceRegistrationRequirements();
         testValidation();
         testClearState();
         testSubmissions();
