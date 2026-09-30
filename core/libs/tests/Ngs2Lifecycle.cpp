@@ -76,7 +76,8 @@ Ngs2RackOption MakeRackOption(const std::uint32_t voices) {
     return option;
 }
 
-void WritePs5RackOption(std::array<std::uint8_t, 200>& bytes, const std::uint32_t grain, const std::uint32_t voices) {
+template <std::size_t Size>
+void WritePs5RackOption(std::array<std::uint8_t, Size>& bytes, const std::uint32_t grain, const std::uint32_t voices) {
     bytes.fill(0);
     const std::size_t size = bytes.size();
     std::memcpy(bytes.data(), &size, sizeof(size));
@@ -306,6 +307,70 @@ int main() {
                               &ps5RackBuffer, &unchangedRack) != 0 && unchangedRack == 0x5678,
             "an unsupported PS5 rack option size changed the create output");
     Require(sceNgs2RackDestroy(ps5Rack, nullptr) == 0, "the PS5 rack was not destroyed");
+
+    alignas(8) std::array<std::uint8_t, 184> masteringOptionBytes{};
+    WritePs5RackOption(masteringOptionBytes, 512, 3);
+    const auto* masteringOption = reinterpret_cast<const Ngs2RackOption*>(masteringOptionBytes.data());
+    Ngs2ContextBufferInfo masteringBuffer{};
+    Require(sceNgs2RackQueryBufferSize(0x3000, masteringOption, &masteringBuffer) == 0,
+            "the PS5 mastering rack buffer size was refused");
+    Require(masteringBuffer.host_buffer_size == 1024 + 3 * 512,
+            "the PS5 mastering rack option lost its voice count");
+    std::vector<std::uint8_t> masteringStorage(masteringBuffer.host_buffer_size);
+    masteringBuffer.host_buffer = masteringStorage.data();
+    Ngs2Handle masteringRack = 0;
+    Require(sceNgs2RackCreate(system, 0x3000, masteringOption, &masteringBuffer, &masteringRack) == 0 &&
+                masteringRack != 0,
+            "the PS5 mastering rack was not created");
+    std::array<Ngs2Handle, 3> masteringVoices{};
+    for (std::uint32_t index = 0; index < masteringVoices.size(); ++index) {
+        Require(sceNgs2RackGetVoiceHandle(masteringRack, index, &masteringVoices[index]) == 0 &&
+                    masteringVoices[index] != 0,
+                "a PS5 mastering rack voice is missing");
+        for (std::uint32_t previous = 0; previous < index; ++previous) {
+            Require(masteringVoices[index] != masteringVoices[previous],
+                    "PS5 mastering rack voices share a handle");
+        }
+    }
+    Ngs2Handle masteringPastEnd = 0x5678;
+    Require(sceNgs2RackGetVoiceHandle(masteringRack, 3, &masteringPastEnd) != 0 && masteringPastEnd == 0x5678,
+            "a voice past the PS5 mastering rack size changed the output");
+    Ngs2RackInfo masteringInfo{};
+    Require(sceNgs2RackGetInfo(masteringRack, &masteringInfo, sizeof(masteringInfo)) == 0,
+            "the PS5 mastering rack info was refused");
+    Require(masteringInfo.max_grain_samples == 512 && masteringInfo.max_voices == 3,
+            "the PS5 mastering rack limits were not normalized");
+
+    Ngs2ContextBufferInfo unchangedMasteringBuffer{};
+    std::memset(&unchangedMasteringBuffer, 0x6B, sizeof(unchangedMasteringBuffer));
+    const Ngs2ContextBufferInfo originalMasteringBuffer = unchangedMasteringBuffer;
+    auto invalidMasteringOption = masteringOptionBytes;
+    const std::uint32_t invalidMasteringGrain = 2048;
+    std::memcpy(invalidMasteringOption.data() + 76, &invalidMasteringGrain, sizeof(invalidMasteringGrain));
+    Require(sceNgs2RackQueryBufferSize(0x3000,
+                reinterpret_cast<const Ngs2RackOption*>(invalidMasteringOption.data()), &unchangedMasteringBuffer) != 0,
+            "an invalid PS5 mastering rack grain was accepted");
+    Require(std::memcmp(&unchangedMasteringBuffer, &originalMasteringBuffer, sizeof(unchangedMasteringBuffer)) == 0,
+            "an invalid PS5 mastering rack grain changed its query output");
+    invalidMasteringOption = masteringOptionBytes;
+    const std::uint32_t invalidMasteringVoices = 513;
+    std::memcpy(invalidMasteringOption.data() + 80, &invalidMasteringVoices, sizeof(invalidMasteringVoices));
+    Require(sceNgs2RackQueryBufferSize(0x3000,
+                reinterpret_cast<const Ngs2RackOption*>(invalidMasteringOption.data()), &unchangedMasteringBuffer) != 0,
+            "an invalid PS5 mastering rack voice count was accepted");
+    Require(std::memcmp(&unchangedMasteringBuffer, &originalMasteringBuffer, sizeof(unchangedMasteringBuffer)) == 0,
+            "an invalid PS5 mastering rack voice count changed its query output");
+    invalidMasteringOption = masteringOptionBytes;
+    const std::size_t unsupportedMasteringSize = 183;
+    std::memcpy(invalidMasteringOption.data(), &unsupportedMasteringSize, sizeof(unsupportedMasteringSize));
+    Require(sceNgs2RackQueryBufferSize(0x3000,
+                reinterpret_cast<const Ngs2RackOption*>(invalidMasteringOption.data()), &unchangedMasteringBuffer) != 0,
+            "an unsupported PS5 mastering rack option size was accepted");
+    Require(std::memcmp(&unchangedMasteringBuffer, &originalMasteringBuffer, sizeof(unchangedMasteringBuffer)) == 0,
+            "an unsupported PS5 mastering rack option size changed its query output");
+    Require(sceNgs2RackDestroy(masteringRack, nullptr) == 0, "the PS5 mastering rack was not destroyed");
+    Require(sceNgs2VoiceGetStateFlags(masteringVoices[0], &flags) != 0,
+            "a voice outlived its PS5 mastering rack");
 
     const Ngs2BufferAllocator allocator{Allocate, Release, 0};
     Ngs2Handle allocated = 0;

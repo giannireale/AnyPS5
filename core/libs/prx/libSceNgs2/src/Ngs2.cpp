@@ -123,6 +123,7 @@ int validateSystemOption(const Ngs2SystemOption* option, std::uint32_t* outGrain
 }
 
 constexpr std::size_t Ps5RackOptionSize = 200;
+constexpr std::size_t Ps5MasteringRackOptionSize = 184;
 constexpr std::size_t Ps5RackOptionFlagsOffset = 72;
 constexpr std::size_t Ps5RackOptionMaxGrainOffset = 76;
 constexpr std::size_t Ps5RackOptionMaxVoicesOffset = 80;
@@ -135,8 +136,8 @@ int normalizeRackOption(const Ngs2RackOption* option, Ngs2RackOption* normalized
         std::memcpy(&optionSize, option, sizeof(optionSize));
         if (optionSize == sizeof(Ngs2RackOption)) {
             value = *option;
-        } else if (optionSize == Ps5RackOptionSize) {
-            // Observed SDK compatibility fields; the remaining bytes are opaque.
+        } else if (optionSize == Ps5RackOptionSize || optionSize == Ps5MasteringRackOptionSize) {
+            // The observed SDK layouts share these fields; their remaining bytes are opaque.
             value.size = sizeof(Ngs2RackOption);
             std::memcpy(value.name, reinterpret_cast<const std::uint8_t*>(option) + 8, sizeof(value.name));
             std::memcpy(&value.flags, reinterpret_cast<const std::uint8_t*>(option) + Ps5RackOptionFlagsOffset, sizeof(value.flags));
