@@ -167,8 +167,11 @@ fallisce. Quelle marcate "massima" usano un oracolo indipendente (hardware o alt
 
 ### Fuori dalla portata di questo ambiente
 - **prx al 73%** e **shader al 52%**: servono reverse engineering e una GPU. Il vero collo di
-  bottiglia per far partire un gioco è `libSceAjm`/`libSceAudiodec` (0%) e `libSceAvPlayer`
-  (assente), non il traduttore.
+  bottiglia per far partire un gioco non è il traduttore. **Attenzione a leggere i badge**: le
+  percentuali per libreria contano le directory `libSceX` e `libSceX.native` separatamente, e
+  spesso l'implementazione vera sta nella `.native`. Esempio: `libSceAjm` risulta 0/13 ma
+  `libSceAjm.native` ha 33 funzioni e decodifica ATRAC9 con LibAtrac9; `libSceAvPlayer.native`
+  ha 631 righe. Genuinamente a zero sono `libSceAudiodec` e `libSceAudiodec.native` (AAC/MP3).
 
 ---
 
