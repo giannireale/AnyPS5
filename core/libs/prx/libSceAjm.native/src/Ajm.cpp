@@ -417,45 +417,45 @@ void Execute(const JobHeader& job, const AjmBuffer* inputs, const AjmBuffer* out
 
 extern "C" {
 
-int APS5_VABI sceAjmInitialize(int64_t reserved, uint32_t* context) {
+int APS5_VABI AjmNativeInitialize(int64_t reserved, uint32_t* context) {
     (void)reserved;
     if (!context) return SCE_AJM_ERROR_INVALID_PARAMETER;
     *context = g_nextContext.fetch_add(1, std::memory_order_relaxed);
     return 0;
 }
 
-int APS5_VABI sceAjmFinalize(uint32_t context) {
+int APS5_VABI AjmNativeFinalize(uint32_t context) {
     (void)context;
     return 0;
 }
 
-int APS5_VABI sceAjmModuleRegister(uint32_t context, uint32_t codec, int64_t reserved) {
+int APS5_VABI AjmNativeModuleRegister(uint32_t context, uint32_t codec, int64_t reserved) {
     (void)context;
     (void)codec;
     (void)reserved;
     return 0;
 }
 
-int APS5_VABI sceAjmModuleUnregister(uint32_t context, uint32_t codec) {
+int APS5_VABI AjmNativeModuleUnregister(uint32_t context, uint32_t codec) {
     (void)context;
     (void)codec;
     return 0;
 }
 
-int APS5_VABI sceAjmMemoryRegister(uint32_t context, void* ptr, size_t pages) {
+int APS5_VABI AjmNativeMemoryRegister(uint32_t context, void* ptr, size_t pages) {
     (void)context;
     (void)ptr;
     (void)pages;
     return 0;
 }
 
-int APS5_VABI sceAjmMemoryUnregister(uint32_t context, void* ptr) {
+int APS5_VABI AjmNativeMemoryUnregister(uint32_t context, void* ptr) {
     (void)context;
     (void)ptr;
     return 0;
 }
 
-int APS5_VABI sceAjmInstanceCreate(uint32_t context, uint32_t codec, uint64_t flags, uint32_t* instance) {
+int APS5_VABI AjmNativeInstanceCreate(uint32_t context, uint32_t codec, uint64_t flags, uint32_t* instance) {
     (void)context;
     if (!instance) return SCE_AJM_ERROR_INVALID_PARAMETER;
     static std::atomic<std::uint32_t> reportedCodecs{0};
@@ -472,14 +472,14 @@ int APS5_VABI sceAjmInstanceCreate(uint32_t context, uint32_t codec, uint64_t fl
     return 0;
 }
 
-int APS5_VABI sceAjmInstanceDestroy(uint32_t context, uint32_t instance) {
+int APS5_VABI AjmNativeInstanceDestroy(uint32_t context, uint32_t instance) {
     (void)context;
     AJM_TRACE("[ajm] instance %u destroy\n", instance);
     std::lock_guard lock(g_lock);
     return g_instances.erase(instance) ? 0 : SCE_AJM_ERROR_INVALID_INSTANCE;
 }
 
-int APS5_VABI sceAjmDecAt9ParseConfigData(const void* config_data, AjmDecAt9ConfigDataInfo* config_info) {
+int APS5_VABI AjmNativeDecAt9ParseConfigData(const void* config_data, AjmDecAt9ConfigDataInfo* config_info) {
     if (!config_data || !config_info) return SCE_AJM_ERROR_INVALID_PARAMETER;
     void* decoder = Atrac9GetHandle();
     unsigned char config[ATRAC9_CONFIG_DATA_SIZE];
@@ -556,7 +556,7 @@ int APS5_VABI sceAjmBatchStart(uint32_t context, const AjmBatchInfo* info, int p
     return 0;
 }
 
-int APS5_VABI sceAjmBatchWait(uint32_t context, uint32_t batch, uint32_t timeout, AjmBatchError* error) {
+int APS5_VABI AjmNativeBatchWait(uint32_t context, uint32_t batch, uint32_t timeout, AjmBatchError* error) {
     (void)context;
     (void)batch;
     (void)timeout;
@@ -564,10 +564,54 @@ int APS5_VABI sceAjmBatchWait(uint32_t context, uint32_t batch, uint32_t timeout
     return 0;
 }
 
-int APS5_VABI sceAjmBatchErrorDump(const AjmBatchInfo* info, AjmBatchError* error) {
+int APS5_VABI AjmNativeBatchErrorDump(const AjmBatchInfo* info, AjmBatchError* error) {
     (void)info;
     if (error) std::memset(error, 0, sizeof(*error));
     return 0;
 }
 
+
+int APS5_VABI sceAjmInitialize(int64_t reserved, uint32_t* context) {
+    return AjmNativeInitialize(reserved, context);
+}
+
+int APS5_VABI sceAjmFinalize(uint32_t context) {
+    return AjmNativeFinalize(context);
+}
+
+int APS5_VABI sceAjmInstanceCreate(uint32_t context, uint32_t codec, uint64_t flags, uint32_t* instance) {
+    return AjmNativeInstanceCreate(context, codec, flags, instance);
+}
+
+int APS5_VABI sceAjmInstanceDestroy(uint32_t context, uint32_t instance) {
+    return AjmNativeInstanceDestroy(context, instance);
+}
+
+int APS5_VABI sceAjmModuleRegister(uint32_t context, uint32_t codec, int64_t reserved) {
+    return AjmNativeModuleRegister(context, codec, reserved);
+}
+
+int APS5_VABI sceAjmModuleUnregister(uint32_t context, uint32_t codec) {
+    return AjmNativeModuleUnregister(context, codec);
+}
+
+int APS5_VABI sceAjmMemoryRegister(uint32_t context, void* ptr, size_t pages) {
+    return AjmNativeMemoryRegister(context, ptr, pages);
+}
+
+int APS5_VABI sceAjmMemoryUnregister(uint32_t context, void* ptr) {
+    return AjmNativeMemoryUnregister(context, ptr);
+}
+
+int APS5_VABI sceAjmBatchWait(uint32_t context, uint32_t batch, uint32_t timeout, AjmBatchError* error) {
+    return AjmNativeBatchWait(context, batch, timeout, error);
+}
+
+int APS5_VABI sceAjmBatchErrorDump(const AjmBatchInfo* info, AjmBatchError* error) {
+    return AjmNativeBatchErrorDump(info, error);
+}
+
+int APS5_VABI sceAjmDecAt9ParseConfigData(const void* config_data, AjmDecAt9ConfigDataInfo* config_info) {
+    return AjmNativeDecAt9ParseConfigData(config_data, config_info);
+}
 }

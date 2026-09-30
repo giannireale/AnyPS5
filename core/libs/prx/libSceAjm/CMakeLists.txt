@@ -1,0 +1,5 @@
+add_library(libSceAjm SHARED EXCLUDE_FROM_ALL ${CMAKE_CURRENT_SOURCE_DIR}/Export.cpp)
+target_include_directories(libSceAjm PRIVATE ${LIBS_INCLUDE_DIR})
+set_target_properties(libSceAjm PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(libSceAjm)
+target_link_libraries(libSceAjm PRIVATE libSceAjm.native libc libkernel)
