@@ -10,11 +10,6 @@ int APS5_VABI sceAgcDriverFindResourcesPublic() {
  return 0;
 }
 
-int APS5_VABI sceAgcDriverGetDefaultOwner() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
-}
-
 int APS5_VABI sceAgcDriverGetOwnerName() {
  NotImplemented_nid_no_patch(__func__);
  return 0;
@@ -26,11 +21,6 @@ int APS5_VABI sceAgcDriverGetResourceBaseAddressAndSizeInBytes() {
 }
 
 int APS5_VABI sceAgcDriverGetResourceName() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
-}
-
-int APS5_VABI sceAgcDriverGetResourceRegistrationMaxNameLength() {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }

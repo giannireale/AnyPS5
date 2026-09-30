@@ -10,6 +10,16 @@ static constexpr int SCE_AGC_ERROR_RESOURCE_REGISTRATION_UNAVAILABLE = static_ca
 
 extern "C" {
 
+int APS5_VABI sceAgcDriverGetDefaultOwner(uint32_t* owner_handle) {
+    (void)owner_handle;
+    return SCE_AGC_ERROR_RESOURCE_REGISTRATION_UNAVAILABLE;
+}
+
+int APS5_VABI sceAgcDriverGetResourceRegistrationMaxNameLength(uint32_t* max_name_length) {
+    (void)max_name_length;
+    return SCE_AGC_ERROR_RESOURCE_REGISTRATION_UNAVAILABLE;
+}
+
 int APS5_VABI sceAgcDriverRegisterOwner(uint32_t* owner_handle, const char* name) {
     (void)owner_handle;
     (void)name;
