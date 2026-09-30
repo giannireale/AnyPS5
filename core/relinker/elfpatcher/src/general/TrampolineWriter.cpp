@@ -40,6 +40,15 @@ void AppendTrampoline(std::vector<std::uint8_t>& bytes, const Codegen::Trampolin
         Io::WriteU32(bytes, static_cast<std::size_t>(bodyOffset + fixup.BodyOffset), static_cast<std::uint32_t>(relocated));
     }
 
+    for (const auto& branch : site.Incoming) {
+        if (branch.DisplacementOffset + 4 > bytes.size())
+            throw Domain::RelinkerException("Incoming branch is outside the image", branch.DisplacementOffset);
+        const auto entry = static_cast<std::int64_t>(bodyAddress + branch.BodyOffset) - static_cast<std::int64_t>(branch.BranchEnd);
+        if (!inRange(entry))
+            throw Domain::RelinkerException("Incoming branch cannot reach the stub", branch.DisplacementOffset);
+        Io::WriteU32(bytes, static_cast<std::size_t>(branch.DisplacementOffset), static_cast<std::uint32_t>(entry));
+    }
+
     std::fill_n(bytes.begin() + static_cast<std::ptrdiff_t>(site.Offset), site.Length, kNop1.Bytes[0]);
     bytes[static_cast<std::size_t>(site.Offset)] = kJmpRel32.Bytes[0];
     Io::WriteU32(bytes, static_cast<std::size_t>(site.Offset + 1), static_cast<std::uint32_t>(jumpDisplacement));

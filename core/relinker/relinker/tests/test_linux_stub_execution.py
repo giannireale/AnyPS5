@@ -17,7 +17,7 @@ EXPECTED = 42
 ADDEND = 2
 
 
-def payload(relocated, branch=False, shani=False, counted=False):
+def payload(relocated, branch=False, shani=False, counted=False, incoming=False):
     """Produce an exit code through an AMD-only instruction, optionally followed by a site that
     the converter has to move into the stub and relocate."""
     dead = b"\xbf\x63\x00\x00\x00"          # mov edi, 99: only runs if a relocation is wrong
@@ -46,19 +46,27 @@ def payload(relocated, branch=False, shani=False, counted=False):
         code += b"\xeb" + bytes([len(dead)]) + dead
     if counted:
         code += b"\xe3" + bytes([len(dead)]) + dead
+    if incoming:
+        code += b"\xf3\x0f\x6f\x56\x20"      # movdqu xmm2, [rsi+32]  (the addend)
+        skipped = b"\xbf\x63\x00\x00\x00"    # mov edi, 99
+        site = b"\x66\x0f\x79\xd9"           # extrq xmm3, xmm1: a four byte site, harmless
+        absorbed = b"\x66\x0f\xfe\xc2"       # paddd xmm0, xmm2: absorbed, and the jump target
+        target = CODE_VADDR + len(code) + 5 + len(skipped) + len(site)
+        code += b"\xe9" + struct.pack("<i", target - (CODE_VADDR + len(code) + 5))
+        code += skipped + site + absorbed
     code += b"\x66\x48\x0f\x7e\xc7"          # movq rdi, xmm0
     code += b"\xb8\xe7\x00\x00\x00"          # mov  eax, 231
     code += b"\x0f\x05"                      # syscall
     return code
 
 
-def source(relocated=False, branch=False, shani=False, counted=False):
+def source(relocated=False, branch=False, shani=False, counted=False, incoming=False):
     image = fixture()
     struct.pack_into("<Q", image, 24, CODE_VADDR)
-    code = payload(relocated, branch, shani, counted)
+    code = payload(relocated, branch, shani, counted, incoming)
     image[CODE_OFFSET:CODE_OFFSET + len(code)] = code
     # The field sits in bits 15:8, so a length of 8 and an index of 8 extract it.
-    extracted = EXPECTED - ADDEND if relocated else EXPECTED
+    extracted = EXPECTED - ADDEND if (relocated or incoming) else EXPECTED
     struct.pack_into("<QQ", image, DATA_OFFSET, extracted << 8, 0)
     struct.pack_into("<QQ", image, DATA_OFFSET + 16, 8 | (8 << 8), 0)
     struct.pack_into("<QQ", image, DATA_OFFSET + 32, ADDEND, 0)
@@ -80,10 +88,10 @@ def read_vaddr(elf, vaddr, size):
     raise AssertionError(f"virtual address {vaddr:#x} is not mapped")
 
 
-def relink(relinker, work, name, relocated, branch=False, shani=False, expect="EXTRQ register form", counted=False):
+def relink(relinker, work, name, relocated, branch=False, shani=False, expect="EXTRQ register form", counted=False, incoming=False):
     elf = work / (name + ".elf")
     output = work / (name + ".out")
-    elf.write_bytes(source(relocated, branch, shani, counted))
+    elf.write_bytes(source(relocated, branch, shani, counted, incoming))
     result = subprocess.run([str(relinker), "--skip-sce-module", "--skip-syscall-check", "--to-intel",
                              str(elf), str(output)], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, (name, result.stdout, result.stderr)
@@ -133,12 +141,17 @@ def main():
             counted.chmod(0o755)
             run = subprocess.run([str(counted)], capture_output=True, timeout=60)
             assert run.returncode == EXPECTED, f"the relocated JRCXZ returned {run.returncode}"
-            print("Linux stub execution tests passed (executed: operand, branch, SHA-NI and JRCXZ)")
+            incoming = relink(relinker, work, "incoming", False, False, False, "EXTRQ register form", False, True)
+            incoming.chmod(0o755)
+            run = subprocess.run([str(incoming)], capture_output=True, timeout=60)
+            assert run.returncode == EXPECTED, f"the branch redirected into the stub returned {run.returncode}"
+            print("Linux stub execution tests passed (five scenarios executed)")
             return
         relink(relinker, work, "relocated", True)
         relink(relinker, work, "branched", False, True)
         relink(relinker, work, "shani", False, False, True, "SHA1NEXTE")
         relink(relinker, work, "counted", False, False, False, "EXTRQ register form", True)
+        relink(relinker, work, "incoming", False, False, False, "EXTRQ register form", False, True)
     print("Linux stub execution tests passed (inspection only)")
 
 

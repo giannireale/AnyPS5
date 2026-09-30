@@ -55,6 +55,15 @@ void WindowsTrampolineBuilder::Build(const std::vector<Codegen::TrampolineSite>&
                 throw Domain::RelinkerException("Relocated operand exceeds rel32 range", siteRva);
             Io::WriteU32(bytes, bodyOffset + fixup.BodyOffset, static_cast<std::uint32_t>(relocated));
         }
+        for (const auto& branch : site.Incoming) {
+            const auto displacementRva = image.GetRva(branch.DisplacementAddress, 4);
+            auto& target = findSection(sections, displacementRva, 4);
+            const auto entryRva = static_cast<std::int64_t>(stubRva) + static_cast<std::int64_t>(branch.BodyOffset);
+            const auto relative = entryRva - static_cast<std::int64_t>(image.GetRva(branch.BranchEnd));
+            if (relative < std::numeric_limits<std::int32_t>::min() || relative > std::numeric_limits<std::int32_t>::max())
+                throw Domain::RelinkerException("Incoming branch cannot reach the stub", displacementRva);
+            Io::WriteU32(target.Data, displacementRva - target.Rva, static_cast<std::uint32_t>(relative));
+        }
         WindowsStubEmitter jump(siteRva);
         jump.Rip({0xe9}, stubRva);
         const auto jumpBytes = jump.TakeBytes();

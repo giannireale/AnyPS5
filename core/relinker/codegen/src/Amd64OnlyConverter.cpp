@@ -80,29 +80,44 @@ private:
         ConvertResult& result
     ) const;
 
-    [[nodiscard]] static std::map<std::uint64_t, std::uint64_t> _collectBranchTargets(
+    struct Branch {
+        std::uint64_t Source;
+        std::uint64_t End;
+        std::uint64_t Target;
+        Domain::FileByteOffset DisplacementOffset;
+        Domain::VirtualAddress DisplacementAddress;
+        std::size_t DisplacementSize;
+    };
+
+    [[nodiscard]] static std::vector<Branch> _collectBranches(
         const std::vector<std::uint8_t>& seg,
         const std::vector<InstructionMatch>& matches,
         const Domain::ProgramHeader& ph
     );
 };
 
-std::map<std::uint64_t, std::uint64_t> Amd64OnlyConverter::_collectBranchTargets(
+std::vector<Amd64OnlyConverter::Branch> Amd64OnlyConverter::_collectBranches(
     const std::vector<std::uint8_t>& seg,
     const std::vector<InstructionMatch>& matches,
     const Domain::ProgramHeader& ph
 ) {
     const X64InstructionDecoder decoder;
-    std::map<std::uint64_t, std::uint64_t> targets;
+    std::vector<Branch> branches;
     for (const auto& match : matches) {
         const auto info = decoder.DecodeInstruction(seg.data() + match.Offset, match.Length);
         if (!info.HasBranchTarget || info.HasRipRelativeDisp)
             continue;
-        const auto target = static_cast<std::int64_t>(ph.MappedAddress + match.Offset + info.Length) + info.BranchDisp;
-        if (target >= 0)
-            targets.emplace(static_cast<std::uint64_t>(target), ph.MappedAddress + match.Offset);
+        const auto end = ph.MappedAddress + match.Offset + info.Length;
+        const auto target = static_cast<std::int64_t>(end) + info.BranchDisp;
+        if (target < 0)
+            continue;
+        const bool wide = info.IsTwoByteOpcode || info.Opcode == 0xE8 || info.Opcode == 0xE9;
+        const std::size_t size = wide ? 4 : 1;
+        branches.push_back({ph.MappedAddress + match.Offset, end, static_cast<std::uint64_t>(target),
+                            ph.Offset + match.Offset + info.Length - size,
+                            end - size, size});
     }
-    return targets;
+    return branches;
 }
 
 void Amd64OnlyConverter::_convertSegment(
@@ -135,7 +150,7 @@ void Amd64OnlyConverter::_convertSegment(
     const bool needsBranchTargets = std::any_of(pending.begin(), pending.end(), [](const Pending& item) {
         return item.Substitution.Lowering == Amd64OnlyLowering::Trampoline;
     });
-    const auto branchTargets = needsBranchTargets ? _collectBranchTargets(seg, matches, ph) : std::map<std::uint64_t, std::uint64_t>{};
+    const auto branches = needsBranchTargets ? _collectBranches(seg, matches, ph) : std::vector<Branch>{};
 
     std::set<std::size_t> consumed;
     for (const auto& item : pending) {
@@ -160,6 +175,7 @@ void Amd64OnlyConverter::_convertSegment(
             std::size_t siteLength = match.Length;
             auto stub = substitution;
             std::vector<TrampolineFixup> fixups;
+            std::map<std::uint64_t, std::size_t> absorbed;
             if (siteLength < Amd64OnlySubstitutionTable::kJmpRel32.Size) {
                 const X64InstructionDecoder decoder;
                 std::vector<std::span<const std::uint8_t>> sequence{std::span<const std::uint8_t>(seg.data() + match.Offset, match.Length)};
@@ -172,6 +188,8 @@ void Amd64OnlyConverter::_convertSegment(
                     const auto info = decoder.DecodeInstruction(bytes.data(), bytes.size());
                     const bool amdOnly = _matcher->Match(bytes.data(), bytes.size()).has_value();
                     const auto followingAddress = static_cast<Domain::VirtualAddress>(ph.MappedAddress + following.Offset);
+                    if (!amdOnly)
+                        absorbed.emplace(followingAddress, trailingBytes.size());
                     if (amdOnly && trailingBytes.empty()) {
                         sequence.push_back(bytes);
                         consumed.insert(next);
@@ -208,12 +226,23 @@ void Amd64OnlyConverter::_convertSegment(
             }
             for (const auto& pending : stub.RipFixups)
                 fixups.push_back({pending.BodyOffset, static_cast<Domain::VirtualAddress>(address + pending.InstructionEnd + pending.OriginalDisplacement)});
-            const auto hit = branchTargets.upper_bound(address);
-            if (hit != branchTargets.end() && hit->first < address + siteLength) {
+            std::vector<TrampolineIncomingBranch> incoming;
+            for (const auto& branch : branches) {
+                if (branch.Target <= address || branch.Target >= address + siteLength)
+                    continue;
+                const auto entry = absorbed.find(branch.Target);
                 std::ostringstream message;
-                message << "Branch at 0x" << std::hex << hit->second << " enters the AMD-only site at 0x" << address
-                        << " (target 0x" << hit->first << "), so the site cannot be replaced by a jump";
-                throw CodegenException(message.str(), ph.Offset + (hit->first - ph.MappedAddress));
+                if (entry == absorbed.end()) {
+                    message << "Branch at 0x" << std::hex << branch.Source << " enters the AMD-only site at 0x" << address
+                            << " (target 0x" << branch.Target << "), which is not an instruction boundary the stub keeps";
+                    throw CodegenException(message.str(), ph.Offset + (branch.Target - ph.MappedAddress));
+                }
+                if (branch.DisplacementSize != 4) {
+                    message << "Branch at 0x" << std::hex << branch.Source << " enters the AMD-only site at 0x" << address
+                            << " with an eight bit displacement that cannot reach the stub";
+                    throw CodegenException(message.str(), ph.Offset + (branch.Source - ph.MappedAddress));
+                }
+                incoming.push_back({branch.DisplacementOffset, branch.DisplacementAddress, branch.End, stub.TrailingOffset + entry->second});
             }
             const auto begin = seg.begin() + static_cast<std::ptrdiff_t>(match.Offset);
             result.Trampolines.push_back({
@@ -223,7 +252,8 @@ void Amd64OnlyConverter::_convertSegment(
                 std::vector<std::uint8_t>(begin, begin + static_cast<std::ptrdiff_t>(siteLength)),
                 stub.StubBody,
                 stub.ReturnBranchOffset,
-                std::move(fixups)
+                std::move(fixups),
+                std::move(incoming)
             });
             replacementLength = stub.StubBody.size();
             break;

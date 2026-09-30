@@ -34,6 +34,13 @@ struct TrampolineFixup {
     Domain::VirtualAddress Target;
 };
 
+struct TrampolineIncomingBranch {
+    Domain::FileByteOffset DisplacementOffset;
+    Domain::VirtualAddress DisplacementAddress;
+    Domain::VirtualAddress BranchEnd;
+    std::size_t BodyOffset;
+};
+
 struct TrampolineSite {
     Domain::FileByteOffset Offset;
     Domain::VirtualAddress Address;
@@ -42,6 +49,7 @@ struct TrampolineSite {
     std::vector<std::uint8_t> Body;
     std::size_t ReturnBranchOffset;
     std::vector<TrampolineFixup> Fixups;
+    std::vector<TrampolineIncomingBranch> Incoming;
 };
 
 struct ConvertResult {
