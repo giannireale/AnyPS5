@@ -14,6 +14,7 @@ int APS5_VABI sceNgs2SystemCreateWithAllocator(const Ngs2SystemOption* option, c
 int APS5_VABI sceNgs2SystemDestroy(Ngs2Handle system_handle, Ngs2ContextBufferInfo* buffer_info);
 int APS5_VABI sceNgs2SystemGetInfo(Ngs2Handle system_handle, Ngs2SystemInfo* info, std::size_t info_size);
 int APS5_VABI sceNgs2SystemSetGrainSamples(Ngs2Handle system_handle, std::uint32_t num_samples);
+int APS5_VABI sceNgs2SystemRender(Ngs2Handle system_handle, const Ngs2RenderBufferInfo* buffer_info, std::uint32_t num_buffer_info);
 int APS5_VABI sceNgs2RackQueryBufferSize(std::uint32_t rack_id, const Ngs2RackOption* option, Ngs2ContextBufferInfo* buffer_info);
 int APS5_VABI sceNgs2RackCreate(Ngs2Handle system_handle, std::uint32_t rack_id, const Ngs2RackOption* option, const Ngs2ContextBufferInfo* buffer_info, Ngs2Handle* handle);
 int APS5_VABI sceNgs2RackCreateWithAllocator(Ngs2Handle system_handle, std::uint32_t rack_id, const Ngs2RackOption* option, const Ngs2BufferAllocator* allocator, Ngs2Handle* handle);
@@ -124,6 +125,38 @@ int main() {
     Require(sceNgs2SystemSetGrainSamples(system, 128) == 0, "a valid grain count was refused");
     Require(sceNgs2SystemSetGrainSamples(system, 7) != 0, "a too small grain count was accepted");
     Require(sceNgs2SystemGetInfo(system, &info, sizeof(info)) == 0 && info.num_grain_samples == 128, "the grain count did not change");
+
+    std::array<std::uint8_t, 1026> renderA;
+    std::array<std::uint8_t, 514> renderB;
+    std::array<std::uint8_t, 1026> renderC;
+    renderA.fill(0xA5);
+    renderB.fill(0xA5);
+    renderC.fill(0xA5);
+    std::array<Ngs2RenderBufferInfo, 3> renderBuffers{{
+        {renderA.data() + 1, 1024, 0x12, 2},
+        {renderB.data() + 1, 512, 0x12, 1},
+        {renderC.data() + 1, 1024, 0x12, 2},
+    }};
+    const auto renderBuffersBefore = renderBuffers;
+    const auto renderABefore = renderA;
+    const auto renderBBefore = renderB;
+    const auto renderCBefore = renderC;
+    Require(sceNgs2SystemRender(system, renderBuffers.data(), renderBuffers.size()) == static_cast<int>(0x804A0001),
+            "a render request was reported successful without a mixer");
+    Require(std::memcmp(renderBuffers.data(), renderBuffersBefore.data(), sizeof(renderBuffers)) == 0,
+            "a rejected render modified descriptors");
+    Require(renderA == renderABefore && renderB == renderBBefore && renderC == renderCBefore,
+            "a rejected render modified buffer data or canaries");
+    Require(sceNgs2SystemGetInfo(system, &info, sizeof(info)) == 0 && info.render_count == 0,
+            "a rejected render changed the render count");
+    Require(sceNgs2SystemRender(system, nullptr, 0) == static_cast<int>(0x804A0001),
+            "an empty render was reported successful without a mixer");
+    Require(sceNgs2SystemRender(system, nullptr, 3) == static_cast<int>(0x804A0001),
+            "a null render descriptor list was rejected differently");
+    Require(sceNgs2SystemRender(system, renderBuffers.data(), UINT32_MAX) == static_cast<int>(0x804A0001),
+            "an unvalidated descriptor count changed the failure result");
+    Require(sceNgs2SystemRender(0, renderBuffers.data(), renderBuffers.size()) == static_cast<int>(0x804A0200),
+            "an invalid system render handle was accepted");
 
     const auto rackOption = MakeRackOption(4);
     Ngs2ContextBufferInfo rackBuffer{};
@@ -294,6 +327,8 @@ int main() {
     Require(sceNgs2SystemDestroy(system, &returned) == 0, "the system was not destroyed");
     Require(returned.host_buffer == storage.data(), "the system did not return its buffer");
     Require(sceNgs2SystemDestroy(system, &returned) != 0, "the system was destroyed twice");
+    Require(sceNgs2SystemRender(system, renderBuffers.data(), renderBuffers.size()) == static_cast<int>(0x804A0200),
+            "a destroyed system render handle was accepted");
 
     if (failures != 0) return 1;
     std::printf("Ngs2 lifecycle tests passed\n");

@@ -324,6 +324,16 @@ int APS5_VABI sceNgs2SystemSetGrainSamples(Ngs2Handle system_handle, std::uint32
     return 0;
 }
 
+int APS5_VABI sceNgs2SystemRender(Ngs2Handle system_handle, const Ngs2RenderBufferInfo* buffer_info,
+                                 std::uint32_t num_buffer_info) {
+    (void)buffer_info;
+    (void)num_buffer_info;
+    std::lock_guard lock(g_lock);
+    if (findSystem(system_handle) == nullptr) return SCE_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
+    // The mixer and render-buffer formats are not implemented.
+    return SCE_NGS2_ERROR_FAIL;
+}
+
 int APS5_VABI sceNgs2RackQueryBufferSize(std::uint32_t rack_id, const Ngs2RackOption* option, Ngs2ContextBufferInfo* buffer_info) {
     (void)rack_id;
     if (buffer_info == nullptr) return SCE_NGS2_ERROR_INVALID_OUT_ADDRESS;
