@@ -17,7 +17,7 @@ EXPECTED = 42
 ADDEND = 2
 
 
-def payload(relocated):
+def payload(relocated, branch=False):
     """Extract a byte field with the register form of EXTRQ and exit with it.
 
     With relocated set, the instruction that follows the four byte site is RIP-relative, so the
@@ -33,16 +33,22 @@ def payload(relocated):
         addend = b"\x66\x0f\xfe\x05"      # paddd  xmm0, [rip+addend]
         addend_end = CODE_VADDR + len(code) + len(addend) + 4
         code += addend + struct.pack("<i", DATA_VADDR + 32 - addend_end)
+    if branch:
+        # A two byte jump over dead code: the converter has to move it into the stub and
+        # recompute its target from there.
+        dead = b"\xbf\x63\x00\x00\x00"    # mov edi, 99  (never runs if the jump survives)
+        code += b"\xeb" + bytes([len(dead)])
+        code += dead
     code += b"\x66\x48\x0f\x7e\xc7"      # movq   rdi, xmm0
     code += b"\xb8\xe7\x00\x00\x00"      # mov    eax, 231     (exit_group)
     code += b"\x0f\x05"                  # syscall
     return code
 
 
-def source(relocated=False):
+def source(relocated=False, branch=False):
     image = fixture()
     struct.pack_into("<Q", image, 24, CODE_VADDR)
-    code = payload(relocated)
+    code = payload(relocated, branch)
     image[CODE_OFFSET:CODE_OFFSET + len(code)] = code
     # The field sits in bits 15:8, so a length of 8 and an index of 8 extract it.
     extracted = EXPECTED - ADDEND if relocated else EXPECTED
@@ -66,10 +72,10 @@ def read_vaddr(elf, vaddr, size):
     raise AssertionError(f"virtual address {vaddr:#x} is not mapped")
 
 
-def relink(relinker, work, name, relocated):
+def relink(relinker, work, name, relocated, branch=False):
     elf = work / (name + ".elf")
     output = work / (name + ".out")
-    elf.write_bytes(source(relocated))
+    elf.write_bytes(source(relocated, branch))
     result = subprocess.run([str(relinker), "--skip-sce-module", "--skip-syscall-check", "--to-intel",
                              str(elf), str(output)], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, (name, result.stdout, result.stderr)
@@ -107,9 +113,14 @@ def main():
             relocated.chmod(0o755)
             run = subprocess.run([str(relocated)], capture_output=True, timeout=60)
             assert run.returncode == EXPECTED, f"the relocated RIP-relative operand returned {run.returncode}"
-            print("Linux stub execution tests passed (executed, including a relocated operand)")
+            branched = relink(relinker, work, "branched", False, True)
+            branched.chmod(0o755)
+            run = subprocess.run([str(branched)], capture_output=True, timeout=60)
+            assert run.returncode == EXPECTED, f"the relocated branch returned {run.returncode}"
+            print("Linux stub execution tests passed (executed, with a relocated operand and branch)")
             return
         relink(relinker, work, "relocated", True)
+        relink(relinker, work, "branched", False, True)
     print("Linux stub execution tests passed (inspection only)")
 
 

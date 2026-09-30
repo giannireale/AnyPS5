@@ -263,7 +263,10 @@ void converterSegment() {
     auto registerForm = file;
     const Bytes extrqRegister = {0x66, 0x0F, 0x79, 0xCA};
     std::copy(extrqRegister.begin(), extrqRegister.end(), registerForm.begin() + 0x20F);
-    requireFailure([&] { (void)converter->Convert(registerForm, {segmentHeader(20)}); }, "Short EXTRQ followed by a return was relocated");
+    const auto absorbedReturn = converter->Convert(registerForm, {segmentHeader(20)});
+    require(absorbedReturn.Trampolines.size() == 2 && absorbedReturn.Trampolines[1].Length == 5, "Short EXTRQ did not absorb the following return");
+    require(absorbedReturn.Trampolines[1].Body[absorbedReturn.Trampolines[1].ReturnBranchOffset - 1] == 0xC3, "The absorbed return is missing from the stub");
+    require(absorbedReturn.Trampolines[1].Fixups.empty(), "A return does not need a relocation");
     registerForm[0x213] = 0x90;
     const auto relocated = converter->Convert(registerForm, {segmentHeader(20)});
     require(relocated.Trampolines.size() == 2, "Short EXTRQ register form was not lowered through a stub");
@@ -271,6 +274,15 @@ void converterSegment() {
     const Bytes shortOriginal = {0x66, 0x0F, 0x79, 0xCA, 0x90};
     require(shortSite.Offset == 0x20F && shortSite.Length == 5 && shortSite.OriginalBytes == shortOriginal, "Short EXTRQ site did not absorb the following instruction");
     require(shortSite.Body[shortSite.ReturnBranchOffset - 1] == 0x90 && shortSite.Body[shortSite.ReturnBranchOffset] == 0xE9, "Absorbed instruction does not run before the return jump");
+    auto branched = file;
+    std::copy(extrqRegister.begin(), extrqRegister.end(), branched.begin() + 0x20F);
+    branched[0x213] = 0xEB;
+    branched[0x214] = 0x00;
+    const auto absorbedBranch = converter->Convert(branched, {segmentHeader(22)});
+    const auto& branchSite = absorbedBranch.Trampolines[1];
+    require(branchSite.Length == 6 && branchSite.Fixups.size() == 1, "Short EXTRQ did not absorb and relocate the following branch");
+    require(branchSite.Body[branchSite.Fixups[0].BodyOffset - 1] == 0xE9, "The absorbed short jump was not widened to a 32 bit jump");
+    require(branchSite.Fixups[0].Target == 0x1015, "The relocated branch does not keep its original target");
     requireFailure([&] { (void)converter->Convert(file, {segmentHeader(0x200)}); }, "Segment exceeding the file was accepted");
 }
 
