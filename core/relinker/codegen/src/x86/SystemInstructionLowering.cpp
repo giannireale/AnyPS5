@@ -86,10 +86,11 @@ LoweredBody SystemInstructionLowering::LowerOutOfLine(const std::span<const Syst
     std::vector<std::uint8_t> bytes;
     for (const auto instruction : sequence)
         _emitRelocated(bytes, instruction);
+    const auto trailingOffset = bytes.size();
     _append(bytes, trailing);
     const auto returnBranchOffset = bytes.size();
     _append(bytes, {kJmpRel32.Bytes, kJmpRel32.Size});
-    return {std::move(bytes), returnBranchOffset};
+    return {std::move(bytes), returnBranchOffset, trailingOffset};
 }
 
 }

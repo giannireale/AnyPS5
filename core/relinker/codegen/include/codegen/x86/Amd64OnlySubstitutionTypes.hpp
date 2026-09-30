@@ -21,6 +21,7 @@ struct Amd64OnlyMatch {
     std::vector<std::uint8_t> ReplacementBytes;
     std::vector<std::uint8_t> StubBody;
     std::size_t ReturnBranchOffset;
+    std::size_t TrailingOffset = 0;
 };
 
 struct Amd64OnlySubstitutionReport {

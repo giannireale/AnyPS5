@@ -444,8 +444,11 @@ LoweredBody ShaNiLowering::LowerOutOfLine(const std::span<const ShaNiOperands> s
         else
             _emitOperation(body, operands);
     }
+    const auto trailingOffset = body.Size();
     body.Raw(trailing);
-    return body.Finish();
+    auto result = body.Finish();
+    result.TrailingOffset = trailingOffset;
+    return result;
 }
 
 }

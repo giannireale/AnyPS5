@@ -203,8 +203,11 @@ LoweredBody Sse4aLowering::LowerOutOfLine(std::span<const Sse4aOperands> sequenc
     BodyBuilder body;
     for (const auto& operands : sequence)
         _emitOutOfLine(body, operands);
+    const auto trailingOffset = body.Size();
     body.Raw(trailing);
-    return body.Finish();
+    auto result = body.Finish();
+    result.TrailingOffset = trailingOffset;
+    return result;
 }
 
 }

@@ -30,6 +30,16 @@ void AppendTrampoline(std::vector<std::uint8_t>& bytes, const Codegen::Trampolin
         throw Domain::RelinkerException("AMD-only stub exceeds rel32 range", site.Offset);
     Io::WriteU32(bytes, static_cast<std::size_t>(bodyOffset + site.ReturnBranchOffset + 1), static_cast<std::uint32_t>(returnDisplacement));
 
+    for (const auto& fixup : site.Fixups) {
+        if (fixup.BodyOffset + 4 > site.Body.size())
+            throw Domain::RelinkerException("Relocated operand is outside the stub body", site.Offset);
+        const auto operandAddress = bodyAddress + fixup.BodyOffset + 4;
+        const auto relocated = static_cast<std::int64_t>(fixup.Target) - static_cast<std::int64_t>(operandAddress);
+        if (!inRange(relocated))
+            throw Domain::RelinkerException("Relocated operand exceeds rel32 range", site.Offset);
+        Io::WriteU32(bytes, static_cast<std::size_t>(bodyOffset + fixup.BodyOffset), static_cast<std::uint32_t>(relocated));
+    }
+
     std::fill_n(bytes.begin() + static_cast<std::ptrdiff_t>(site.Offset), site.Length, kNop1.Bytes[0]);
     bytes[static_cast<std::size_t>(site.Offset)] = kJmpRel32.Bytes[0];
     Io::WriteU32(bytes, static_cast<std::size_t>(site.Offset + 1), static_cast<std::uint32_t>(jumpDisplacement));

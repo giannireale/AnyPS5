@@ -79,6 +79,10 @@ void StubBodyBuilder::Restore(const std::uint8_t reg) {
     _bytes.insert(_bytes.end(), kLeaRspRestore.Bytes, kLeaRspRestore.Bytes + kLeaRspRestore.Size);
 }
 
+std::size_t StubBodyBuilder::Size() const {
+    return _bytes.size();
+}
+
 void StubBodyBuilder::Raw(const std::span<const std::uint8_t> bytes) {
     _bytes.insert(_bytes.end(), bytes.begin(), bytes.end());
 }

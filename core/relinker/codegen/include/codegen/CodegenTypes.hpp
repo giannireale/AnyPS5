@@ -29,6 +29,11 @@ struct RewriteResult {
     std::vector<AddressAdjustment> Adjustments;
 };
 
+struct TrampolineFixup {
+    std::size_t BodyOffset;
+    Domain::VirtualAddress Target;
+};
+
 struct TrampolineSite {
     Domain::FileByteOffset Offset;
     Domain::VirtualAddress Address;
@@ -36,6 +41,7 @@ struct TrampolineSite {
     std::vector<std::uint8_t> OriginalBytes;
     std::vector<std::uint8_t> Body;
     std::size_t ReturnBranchOffset;
+    std::vector<TrampolineFixup> Fixups;
 };
 
 struct ConvertResult {

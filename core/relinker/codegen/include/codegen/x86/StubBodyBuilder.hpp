@@ -13,6 +13,7 @@ namespace Codegen {
 struct LoweredBody {
     std::vector<std::uint8_t> Bytes;
     std::size_t ReturnBranchOffset;
+    std::size_t TrailingOffset = 0;
 };
 
 using StubConstant = std::array<std::uint8_t, 16>;
@@ -34,6 +35,7 @@ public:
     void Spill(std::uint8_t reg);
     void Restore(std::uint8_t reg);
     void Raw(std::span<const std::uint8_t> bytes);
+    [[nodiscard]] std::size_t Size() const;
     void AdjustStack(std::int32_t delta);
     void PushFlags();
     void PopFlags();

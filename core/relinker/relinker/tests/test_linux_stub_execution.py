@@ -14,30 +14,41 @@ DATA_VADDR = 0x100
 CODE_OFFSET = 0x4000 + CODE_VADDR
 DATA_OFFSET = 0x4000 + DATA_VADDR
 EXPECTED = 42
+ADDEND = 2
 
 
-def payload():
-    """Extract a byte field with the register form of EXTRQ and exit with it."""
+def payload(relocated):
+    """Extract a byte field with the register form of EXTRQ and exit with it.
+
+    With relocated set, the instruction that follows the four byte site is RIP-relative, so the
+    converter has to move it into the stub and recompute its displacement from there.
+    """
     lea = b"\x48\x8d\x35"
     lea_end = CODE_VADDR + len(lea) + 4
     code = lea + struct.pack("<i", DATA_VADDR - lea_end)
     code += b"\xf3\x0f\x6f\x06"          # movdqu xmm0, [rsi]
     code += b"\xf3\x0f\x6f\x4e\x10"      # movdqu xmm1, [rsi+16]
     code += b"\x66\x0f\x79\xc1"          # extrq  xmm0, xmm1   (AMD only, register form)
+    if relocated:
+        addend = b"\x66\x0f\xfe\x05"      # paddd  xmm0, [rip+addend]
+        addend_end = CODE_VADDR + len(code) + len(addend) + 4
+        code += addend + struct.pack("<i", DATA_VADDR + 32 - addend_end)
     code += b"\x66\x48\x0f\x7e\xc7"      # movq   rdi, xmm0
     code += b"\xb8\xe7\x00\x00\x00"      # mov    eax, 231     (exit_group)
     code += b"\x0f\x05"                  # syscall
     return code
 
 
-def source():
+def source(relocated=False):
     image = fixture()
     struct.pack_into("<Q", image, 24, CODE_VADDR)
-    code = payload()
+    code = payload(relocated)
     image[CODE_OFFSET:CODE_OFFSET + len(code)] = code
     # The field sits in bits 15:8, so a length of 8 and an index of 8 extract it.
-    struct.pack_into("<QQ", image, DATA_OFFSET, EXPECTED << 8, 0)
+    extracted = EXPECTED - ADDEND if relocated else EXPECTED
+    struct.pack_into("<QQ", image, DATA_OFFSET, extracted << 8, 0)
     struct.pack_into("<QQ", image, DATA_OFFSET + 16, 8 | (8 << 8), 0)
+    struct.pack_into("<QQ", image, DATA_OFFSET + 32, ADDEND, 0)
     return image
 
 
@@ -53,6 +64,17 @@ def read_vaddr(elf, vaddr, size):
             start = offset + vaddr - segment
             return elf[start:start + size]
     raise AssertionError(f"virtual address {vaddr:#x} is not mapped")
+
+
+def relink(relinker, work, name, relocated):
+    elf = work / (name + ".elf")
+    output = work / (name + ".out")
+    elf.write_bytes(source(relocated))
+    result = subprocess.run([str(relinker), "--skip-sce-module", "--skip-syscall-check", "--to-intel",
+                             str(elf), str(output)], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, (name, result.stdout, result.stderr)
+    assert "EXTRQ register form" in result.stdout, result.stdout
+    return output
 
 
 def main():
@@ -81,8 +103,13 @@ def main():
             output.chmod(0o755)
             run = subprocess.run([str(output)], capture_output=True, timeout=60)
             assert run.returncode == EXPECTED, f"the relinked executable returned {run.returncode}"
-            print("Linux stub execution tests passed (executed)")
+            relocated = relink(relinker, work, "relocated", True)
+            relocated.chmod(0o755)
+            run = subprocess.run([str(relocated)], capture_output=True, timeout=60)
+            assert run.returncode == EXPECTED, f"the relocated RIP-relative operand returned {run.returncode}"
+            print("Linux stub execution tests passed (executed, including a relocated operand)")
             return
+        relink(relinker, work, "relocated", True)
     print("Linux stub execution tests passed (inspection only)")
 
 

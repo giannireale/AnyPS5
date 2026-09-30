@@ -45,6 +45,16 @@ void WindowsTrampolineBuilder::Build(const std::vector<Codegen::TrampolineSite>&
         if (displacement < std::numeric_limits<std::int32_t>::min() || displacement > std::numeric_limits<std::int32_t>::max())
             throw Domain::RelinkerException("AMD-only stub return exceeds rel32 range", returnRva);
         Io::WriteU32(bytes, bodyOffset + site.ReturnBranchOffset + 1, static_cast<std::uint32_t>(displacement));
+        for (const auto& fixup : site.Fixups) {
+            if (fixup.BodyOffset + 4 > site.Body.size())
+                throw Domain::RelinkerException("Relocated operand is outside the stub body", siteRva);
+            const auto targetRva = image.GetRva(fixup.Target);
+            const auto operandRva = static_cast<std::int64_t>(stubRva) + static_cast<std::int64_t>(fixup.BodyOffset) + 4;
+            const auto relocated = static_cast<std::int64_t>(targetRva) - operandRva;
+            if (relocated < std::numeric_limits<std::int32_t>::min() || relocated > std::numeric_limits<std::int32_t>::max())
+                throw Domain::RelinkerException("Relocated operand exceeds rel32 range", siteRva);
+            Io::WriteU32(bytes, bodyOffset + fixup.BodyOffset, static_cast<std::uint32_t>(relocated));
+        }
         WindowsStubEmitter jump(siteRva);
         jump.Rip({0xe9}, stubRva);
         const auto jumpBytes = jump.TakeBytes();

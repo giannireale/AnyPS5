@@ -87,7 +87,7 @@ Amd64OnlyMatch Amd64OnlyInstructionMatcher::_matchShaNi(const DecodedInstruction
     if (!_shaLowering.CanLower(operands))
         return _unsupported(entry, instr.Length);
     auto body = _shaLowering.LowerOutOfLine(std::span<const ShaNiOperands>(&operands, 1), trailing);
-    return Amd64OnlyMatch{entry.Name, instr.Length, Amd64OnlyLowering::Trampoline, {}, std::move(body.Bytes), body.ReturnBranchOffset};
+    return Amd64OnlyMatch{entry.Name, instr.Length, Amd64OnlyLowering::Trampoline, {}, std::move(body.Bytes), body.ReturnBranchOffset, body.TrailingOffset};
 }
 
 std::optional<SystemInstruction> Amd64OnlyInstructionMatcher::_systemInstruction(const DecodedInstruction& instr) {
@@ -106,7 +106,7 @@ Amd64OnlyMatch Amd64OnlyInstructionMatcher::_matchSystem(const DecodedInstructio
     if (instruction != SystemInstruction::Clzero && trailing.empty())
         return Amd64OnlyMatch{entry.Name, instr.Length, Amd64OnlyLowering::InPlace, _systemLowering.LowerInPlace(instruction, instr.Length), {}, 0};
     auto body = _systemLowering.LowerOutOfLine(std::span<const SystemInstruction>(&instruction, 1), trailing);
-    return Amd64OnlyMatch{entry.Name, instr.Length, Amd64OnlyLowering::Trampoline, {}, std::move(body.Bytes), body.ReturnBranchOffset};
+    return Amd64OnlyMatch{entry.Name, instr.Length, Amd64OnlyLowering::Trampoline, {}, std::move(body.Bytes), body.ReturnBranchOffset, body.TrailingOffset};
 }
 
 Amd64OnlyMatch Amd64OnlyInstructionMatcher::_matchSse4a(const DecodedInstruction& instr, const Entry& entry, const Entry& registerFormEntry, std::span<const std::uint8_t> trailing) const {
@@ -117,7 +117,7 @@ Amd64OnlyMatch Amd64OnlyInstructionMatcher::_matchSse4a(const DecodedInstruction
     }
     auto body = _lowering.LowerOutOfLine(operands, trailing);
     const auto& name = operands.RegisterForm ? registerFormEntry.Name : entry.Name;
-    return Amd64OnlyMatch{name, instr.Length, Amd64OnlyLowering::Trampoline, {}, std::move(body.Bytes), body.ReturnBranchOffset};
+    return Amd64OnlyMatch{name, instr.Length, Amd64OnlyLowering::Trampoline, {}, std::move(body.Bytes), body.ReturnBranchOffset, body.TrailingOffset};
 }
 
 std::optional<Amd64OnlyMatch> Amd64OnlyInstructionMatcher::MatchSequence(
@@ -140,7 +140,7 @@ std::optional<Amd64OnlyMatch> Amd64OnlyInstructionMatcher::MatchSequence(
     }
     if (!shaSequence.empty()) {
         auto shaBody = _shaLowering.LowerOutOfLine(shaSequence, trailing);
-        return Amd64OnlyMatch{_shaEntry(shaSequence.front()).Name, instructions.front().size(), Amd64OnlyLowering::Trampoline, {}, std::move(shaBody.Bytes), shaBody.ReturnBranchOffset};
+        return Amd64OnlyMatch{_shaEntry(shaSequence.front()).Name, instructions.front().size(), Amd64OnlyLowering::Trampoline, {}, std::move(shaBody.Bytes), shaBody.ReturnBranchOffset, shaBody.TrailingOffset};
     }
     std::vector<SystemInstruction> systemSequence;
     for (const auto& instruction : instructions) {
@@ -155,7 +155,7 @@ std::optional<Amd64OnlyMatch> Amd64OnlyInstructionMatcher::MatchSequence(
     if (!systemSequence.empty()) {
         const auto& entry = systemSequence.front() == SystemInstruction::Clzero ? kClzero : (systemSequence.front() == SystemInstruction::Monitorx ? kMonitorx : (systemSequence.front() == SystemInstruction::Mwaitx ? kMwaitx : kMcommit));
         auto systemBody = _systemLowering.LowerOutOfLine(systemSequence, trailing);
-        return Amd64OnlyMatch{entry.Name, instructions.front().size(), Amd64OnlyLowering::Trampoline, {}, std::move(systemBody.Bytes), systemBody.ReturnBranchOffset};
+        return Amd64OnlyMatch{entry.Name, instructions.front().size(), Amd64OnlyLowering::Trampoline, {}, std::move(systemBody.Bytes), systemBody.ReturnBranchOffset, systemBody.TrailingOffset};
     }
     std::vector<Sse4aOperands> sequence;
     for (const auto& instruction : instructions) {
@@ -167,7 +167,7 @@ std::optional<Amd64OnlyMatch> Amd64OnlyInstructionMatcher::MatchSequence(
     const auto& first = sequence.front();
     const auto& name = first.RegisterForm ? (first.Insertq ? kInsertqRegisterForm.Name : kExtrqRegisterForm.Name) : (first.Insertq ? kInsertq.Name : kExtrq.Name);
     auto body = _lowering.LowerOutOfLine(std::span<const Sse4aOperands>(sequence), trailing);
-    return Amd64OnlyMatch{name, instructions.front().size(), Amd64OnlyLowering::Trampoline, {}, std::move(body.Bytes), body.ReturnBranchOffset};
+    return Amd64OnlyMatch{name, instructions.front().size(), Amd64OnlyLowering::Trampoline, {}, std::move(body.Bytes), body.ReturnBranchOffset, body.TrailingOffset};
 }
 
 std::optional<Amd64OnlyMatch> Amd64OnlyInstructionMatcher::Match(

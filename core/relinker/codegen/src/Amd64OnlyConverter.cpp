@@ -1,6 +1,7 @@
 #include <codegen/IAmd64OnlyConverter.hpp>
 #include <codegen/IInstructionScanner.hpp>
 #include <codegen/CodegenException.hpp>
+#include <cstring>
 #include <codegen/x86/Amd64OnlySubstitutionTable.hpp>
 #include <codegen/x86/X64InstructionDecoder.hpp>
 #include <codegen/x86/X64InstructionRewriter.hpp>
@@ -128,6 +129,7 @@ void Amd64OnlyConverter::_convertSegment(
         case Amd64OnlyLowering::Trampoline: {
             std::size_t siteLength = match.Length;
             auto stub = substitution;
+            std::vector<TrampolineFixup> fixups;
             if (siteLength < Amd64OnlySubstitutionTable::kJmpRel32.Size) {
                 const X64InstructionDecoder decoder;
                 std::vector<std::span<const std::uint8_t>> sequence{std::span<const std::uint8_t>(seg.data() + match.Offset, match.Length)};
@@ -142,9 +144,17 @@ void Amd64OnlyConverter::_convertSegment(
                     if (amdOnly && trailingBytes == 0) {
                         sequence.push_back(bytes);
                         consumed.insert(next);
-                    } else if (amdOnly || info.FlowKind != ControlFlowKind::Sequential || info.HasRipRelativeDisp || info.HasBranchTarget) {
+                    } else if (amdOnly || info.FlowKind != ControlFlowKind::Sequential || info.HasBranchTarget) {
                         throw CodegenException("AMD-only instruction too short for a jump is followed by an instruction that cannot move", ph.Offset + following.Offset);
                     } else {
+                        if (info.HasRipRelativeDisp) {
+                            if (info.RipRelativeDispOffset + 4 > following.Length)
+                                throw CodegenException("Relocated instruction has a truncated RIP-relative displacement", ph.Offset + following.Offset);
+                            std::int32_t displacement = 0;
+                            std::memcpy(&displacement, bytes.data() + info.RipRelativeDispOffset, sizeof(displacement));
+                            const auto followingAddress = static_cast<Domain::VirtualAddress>(ph.MappedAddress + following.Offset);
+                            fixups.push_back({trailingBytes + info.RipRelativeDispOffset, static_cast<Domain::VirtualAddress>(followingAddress + following.Length + displacement)});
+                        }
                         trailingBytes += following.Length;
                     }
                     siteLength += following.Length;
@@ -154,6 +164,8 @@ void Amd64OnlyConverter::_convertSegment(
                 if (!relocated.has_value() || relocated->Lowering != Amd64OnlyLowering::Trampoline)
                     throw CodegenException("AMD-only instruction sequence has no out-of-line lowering", fileOffset);
                 stub = std::move(*relocated);
+                for (auto& fixup : fixups)
+                    fixup.BodyOffset += stub.TrailingOffset;
             }
             const auto hit = branchTargets.upper_bound(address);
             if (hit != branchTargets.end() && *hit < address + siteLength)
@@ -165,7 +177,8 @@ void Amd64OnlyConverter::_convertSegment(
                 siteLength,
                 std::vector<std::uint8_t>(begin, begin + static_cast<std::ptrdiff_t>(siteLength)),
                 stub.StubBody,
-                stub.ReturnBranchOffset
+                stub.ReturnBranchOffset,
+                std::move(fixups)
             });
             replacementLength = stub.StubBody.size();
             break;
