@@ -79,6 +79,10 @@ void StubBodyBuilder::Restore(const std::uint8_t reg) {
     _bytes.insert(_bytes.end(), kLeaRspRestore.Bytes, kLeaRspRestore.Bytes + kLeaRspRestore.Size);
 }
 
+void StubBodyBuilder::AddRipFixup(const std::size_t bodyOffset, const std::int32_t originalDisplacement, const std::size_t instructionEnd) {
+    _ripFixups.push_back({bodyOffset, originalDisplacement, instructionEnd});
+}
+
 std::size_t StubBodyBuilder::Size() const {
     return _bytes.size();
 }
@@ -220,7 +224,7 @@ LoweredBody StubBodyBuilder::Finish() {
         for (std::size_t index = 0; index < 4; ++index)
             _bytes[fixup.DisplacementOffset + index] = static_cast<std::uint8_t>(value >> (index * 8));
     }
-    return {std::move(_bytes), returnBranchOffset};
+    return {std::move(_bytes), returnBranchOffset, 0, std::move(_ripFixups)};
 }
 
 }

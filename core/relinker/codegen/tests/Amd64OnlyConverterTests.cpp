@@ -160,7 +160,9 @@ void matcherSubstitutions() {
     require(sha1rnds4 && sha1rnds4->Lowering == Codegen::Amd64OnlyLowering::Trampoline && sha1rnds4->InstructionName == "SHA1RNDS4", "SHA1RNDS4 was not lowered through a stub");
     const auto shaMemory = match({0x0F, 0x38, 0xC8, 0x18});
     require(shaMemory && shaMemory->Lowering == Codegen::Amd64OnlyLowering::Trampoline, "SHA1NEXTE with a memory operand was not lowered through a stub");
-    requireFailure([&] { (void)match({0x0F, 0x38, 0xC8, 0x1D, 0x00, 0x00, 0x00, 0x00}); }, "SHA1NEXTE with a RIP-relative operand was accepted");
+    const auto shaRip = match({0x0F, 0x38, 0xC8, 0x1D, 0x00, 0x00, 0x00, 0x00});
+    require(shaRip && shaRip->Lowering == Codegen::Amd64OnlyLowering::Trampoline && shaRip->RipFixups.size() == 1, "SHA1NEXTE with a RIP-relative operand was not lowered with a relocation");
+    require(shaRip->RipFixups[0].InstructionEnd == 8 && shaRip->RipFixups[0].OriginalDisplacement == 0, "The SHA-NI relocation does not describe the original operand");
     const auto rdpru = match({0x0F, 0x01, 0xFD});
     require(rdpru && rdpru->Lowering == Codegen::Amd64OnlyLowering::Unsupported && rdpru->InstructionName == "RDPRU", "RDPRU was not reported as unsupported");
     const auto registerForm = match({0x66, 0x0F, 0x79, 0xCA});

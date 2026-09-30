@@ -17,44 +17,52 @@ EXPECTED = 42
 ADDEND = 2
 
 
-def payload(relocated, branch=False):
-    """Extract a byte field with the register form of EXTRQ and exit with it.
+def payload(relocated, branch=False, shani=False, counted=False):
+    """Produce an exit code through an AMD-only instruction, optionally followed by a site that
+    the converter has to move into the stub and relocate."""
+    dead = b"\xbf\x63\x00\x00\x00"          # mov edi, 99: only runs if a relocation is wrong
+    code = b""
 
-    With relocated set, the instruction that follows the four byte site is RIP-relative, so the
-    converter has to move it into the stub and recompute its displacement from there.
-    """
-    lea = b"\x48\x8d\x35"
-    lea_end = CODE_VADDR + len(lea) + 4
-    code = lea + struct.pack("<i", DATA_VADDR - lea_end)
-    code += b"\xf3\x0f\x6f\x06"          # movdqu xmm0, [rsi]
-    code += b"\xf3\x0f\x6f\x4e\x10"      # movdqu xmm1, [rsi+16]
-    code += b"\x66\x0f\x79\xc1"          # extrq  xmm0, xmm1   (AMD only, register form)
+    def rip(opcode, target):
+        return opcode + struct.pack("<i", target - (CODE_VADDR + len(code) + len(opcode) + 4))
+
+    if shani:
+        code += b"\x66\x0f\xef\xc0"          # pxor xmm0, xmm0
+        code += rip(b"\x0f\x38\xc8\x05", DATA_VADDR + 48)
+        code += b"\x66\x48\x0f\x7e\xc7"      # movq rdi, xmm0
+        code += b"\xb8\xe7\x00\x00\x00"      # mov  eax, 231
+        code += b"\x0f\x05"                  # syscall
+        return code
+
+    if counted:
+        code += b"\x31\xc9"                  # xor ecx, ecx
+    code += rip(b"\x48\x8d\x35", DATA_VADDR)  # lea rsi, [rip+data]
+    code += b"\xf3\x0f\x6f\x06"              # movdqu xmm0, [rsi]
+    code += b"\xf3\x0f\x6f\x4e\x10"          # movdqu xmm1, [rsi+16]
+    code += b"\x66\x0f\x79\xc1"              # extrq  xmm0, xmm1
     if relocated:
-        addend = b"\x66\x0f\xfe\x05"      # paddd  xmm0, [rip+addend]
-        addend_end = CODE_VADDR + len(code) + len(addend) + 4
-        code += addend + struct.pack("<i", DATA_VADDR + 32 - addend_end)
+        code += rip(b"\x66\x0f\xfe\x05", DATA_VADDR + 32)
     if branch:
-        # A two byte jump over dead code: the converter has to move it into the stub and
-        # recompute its target from there.
-        dead = b"\xbf\x63\x00\x00\x00"    # mov edi, 99  (never runs if the jump survives)
-        code += b"\xeb" + bytes([len(dead)])
-        code += dead
-    code += b"\x66\x48\x0f\x7e\xc7"      # movq   rdi, xmm0
-    code += b"\xb8\xe7\x00\x00\x00"      # mov    eax, 231     (exit_group)
-    code += b"\x0f\x05"                  # syscall
+        code += b"\xeb" + bytes([len(dead)]) + dead
+    if counted:
+        code += b"\xe3" + bytes([len(dead)]) + dead
+    code += b"\x66\x48\x0f\x7e\xc7"          # movq rdi, xmm0
+    code += b"\xb8\xe7\x00\x00\x00"          # mov  eax, 231
+    code += b"\x0f\x05"                      # syscall
     return code
 
 
-def source(relocated=False, branch=False):
+def source(relocated=False, branch=False, shani=False, counted=False):
     image = fixture()
     struct.pack_into("<Q", image, 24, CODE_VADDR)
-    code = payload(relocated, branch)
+    code = payload(relocated, branch, shani, counted)
     image[CODE_OFFSET:CODE_OFFSET + len(code)] = code
     # The field sits in bits 15:8, so a length of 8 and an index of 8 extract it.
     extracted = EXPECTED - ADDEND if relocated else EXPECTED
     struct.pack_into("<QQ", image, DATA_OFFSET, extracted << 8, 0)
     struct.pack_into("<QQ", image, DATA_OFFSET + 16, 8 | (8 << 8), 0)
     struct.pack_into("<QQ", image, DATA_OFFSET + 32, ADDEND, 0)
+    struct.pack_into("<QQ", image, DATA_OFFSET + 48, EXPECTED, 0)
     return image
 
 
@@ -72,14 +80,14 @@ def read_vaddr(elf, vaddr, size):
     raise AssertionError(f"virtual address {vaddr:#x} is not mapped")
 
 
-def relink(relinker, work, name, relocated, branch=False):
+def relink(relinker, work, name, relocated, branch=False, shani=False, expect="EXTRQ register form", counted=False):
     elf = work / (name + ".elf")
     output = work / (name + ".out")
-    elf.write_bytes(source(relocated, branch))
+    elf.write_bytes(source(relocated, branch, shani, counted))
     result = subprocess.run([str(relinker), "--skip-sce-module", "--skip-syscall-check", "--to-intel",
                              str(elf), str(output)], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, (name, result.stdout, result.stderr)
-    assert "EXTRQ register form" in result.stdout, result.stdout
+    assert expect in result.stdout, result.stdout
     return output
 
 
@@ -117,10 +125,20 @@ def main():
             branched.chmod(0o755)
             run = subprocess.run([str(branched)], capture_output=True, timeout=60)
             assert run.returncode == EXPECTED, f"the relocated branch returned {run.returncode}"
-            print("Linux stub execution tests passed (executed, with a relocated operand and branch)")
+            shani = relink(relinker, work, "shani", False, False, True, "SHA1NEXTE")
+            shani.chmod(0o755)
+            run = subprocess.run([str(shani)], capture_output=True, timeout=60)
+            assert run.returncode == EXPECTED, f"the RIP-relative SHA-NI operand returned {run.returncode}"
+            counted = relink(relinker, work, "counted", False, False, False, "EXTRQ register form", True)
+            counted.chmod(0o755)
+            run = subprocess.run([str(counted)], capture_output=True, timeout=60)
+            assert run.returncode == EXPECTED, f"the relocated JRCXZ returned {run.returncode}"
+            print("Linux stub execution tests passed (executed: operand, branch, SHA-NI and JRCXZ)")
             return
         relink(relinker, work, "relocated", True)
         relink(relinker, work, "branched", False, True)
+        relink(relinker, work, "shani", False, False, True, "SHA1NEXTE")
+        relink(relinker, work, "counted", False, False, False, "EXTRQ register form", True)
     print("Linux stub execution tests passed (inspection only)")
 
 

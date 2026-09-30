@@ -330,8 +330,7 @@ ShaNiOperands DecodeShaNi(const std::uint8_t* data, const std::size_t length) {
     } else {
         operands.MemoryForm = true;
         const auto rm = static_cast<std::uint8_t>(modrm & 7);
-        if (mod == 0 && rm == kModRmRipBase)
-            throw CodegenException("SHA-NI instruction with a RIP-relative operand has no Intel lowering");
+        operands.RipRelative = mod == 0 && rm == kModRmRipBase;
         std::size_t cursor = position + 4;
         std::uint8_t sib = 0;
         const bool hasSib = rm == kModRmSibBase;
@@ -344,6 +343,7 @@ ShaNiOperands DecodeShaNi(const std::uint8_t* data, const std::size_t length) {
         if (mod == 1) displacementSize = 1;
         else if (mod == 2) displacementSize = 4;
         else if (hasSib && (sib & 7) == kModRmRipBase) displacementSize = 4;
+        else if (!hasSib && rm == kModRmRipBase) displacementSize = 4;
         if (cursor + displacementSize > length)
             throw CodegenException("SHA-NI instruction truncated before its displacement");
         std::int32_t displacement = 0;
@@ -360,14 +360,18 @@ ShaNiOperands DecodeShaNi(const std::uint8_t* data, const std::size_t length) {
             operands.StackRelative = true;
         operands.Displacement = displacement;
         operands.Address.assign(data + position + 3, data + cursor + displacementSize);
+        operands.Length = cursor + displacementSize - 0;
         if (hasSib)
             operands.Source = sib;
     }
+    if (!operands.MemoryForm)
+        operands.Length = position + 4;
     if (operands.ThreeByte3A) {
         const auto immediateOffset = position + 3 + (operands.MemoryForm ? operands.Address.size() : 1);
         if (immediateOffset >= length)
             throw CodegenException("SHA1RNDS4 truncated before its immediate");
         operands.Immediate = data[immediateOffset];
+        ++operands.Length;
     }
     return operands;
 }
@@ -415,7 +419,7 @@ void _emitOperation(StubBodyBuilder& body, const ShaNiOperands& operands) {
     }
 }
 
-void _emitMemoryForm(StubBodyBuilder& body, const ShaNiOperands& operands) {
+void _emitMemoryForm(StubBodyBuilder& body, const ShaNiOperands& operands, const std::size_t instructionEnd) {
     std::uint8_t loaded = 0;
     while (loaded == operands.Destination || (operands.Opcode == kShaOpSha256Rnds2 && !operands.ThreeByte3A && loaded == 0))
         ++loaded;
@@ -425,10 +429,13 @@ void _emitMemoryForm(StubBodyBuilder& body, const ShaNiOperands& operands) {
     registerForm.Address.clear();
     body.AdjustStack(-kMemoryFrame);
     body.StoreXmm(loaded, 0);
-    if (operands.StackRelative)
+    if (operands.StackRelative) {
         body.LoadXmmStackRelative(loaded, operands.RexExtension, operands.Source, operands.Displacement + kMemoryFrame);
-    else
+    } else {
         body.LoadXmmIndirect(loaded, operands.RexExtension, operands.Address);
+        if (operands.RipRelative)
+            body.AddRipFixup(body.Size() - 4, operands.Displacement, instructionEnd);
+    }
     _emitOperation(body, registerForm);
     body.LoadXmm(loaded, 0);
     body.AdjustStack(kMemoryFrame);
@@ -436,11 +443,13 @@ void _emitMemoryForm(StubBodyBuilder& body, const ShaNiOperands& operands) {
 
 LoweredBody ShaNiLowering::LowerOutOfLine(const std::span<const ShaNiOperands> sequence, const std::span<const std::uint8_t> trailing) const {
     StubBodyBuilder body;
+    std::size_t consumed = 0;
     for (const auto& operands : sequence) {
         if (!CanLower(operands))
             throw CodegenException("SHA-NI opcode has no Intel lowering");
+        consumed += operands.Length;
         if (operands.MemoryForm)
-            _emitMemoryForm(body, operands);
+            _emitMemoryForm(body, operands, consumed);
         else
             _emitOperation(body, operands);
     }

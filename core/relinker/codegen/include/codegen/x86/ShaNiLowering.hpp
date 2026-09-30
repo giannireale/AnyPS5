@@ -25,6 +25,8 @@ struct ShaNiOperands {
     bool ThreeByte3A = false;
     bool MemoryForm = false;
     bool StackRelative = false;
+    bool RipRelative = false;
+    std::size_t Length = 0;
     std::uint8_t RexExtension = 0;
     std::int32_t Displacement = 0;
     std::vector<std::uint8_t> Address;

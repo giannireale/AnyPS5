@@ -1,6 +1,7 @@
 #ifndef CODEGEN_X86_AMD64ONLYSUBSTITUTIONTYPES_HPP
 #define CODEGEN_X86_AMD64ONLYSUBSTITUTIONTYPES_HPP
 
+#include <codegen/x86/StubBodyBuilder.hpp>
 #include <domain/Types.hpp>
 #include <cstdint>
 #include <string>
@@ -22,6 +23,7 @@ struct Amd64OnlyMatch {
     std::vector<std::uint8_t> StubBody;
     std::size_t ReturnBranchOffset;
     std::size_t TrailingOffset = 0;
+    std::vector<PendingRipFixup> RipFixups;
 };
 
 struct Amd64OnlySubstitutionReport {

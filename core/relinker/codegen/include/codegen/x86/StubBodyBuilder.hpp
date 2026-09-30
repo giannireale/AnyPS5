@@ -10,10 +10,17 @@
 
 namespace Codegen {
 
+struct PendingRipFixup {
+    std::size_t BodyOffset;
+    std::int32_t OriginalDisplacement;
+    std::size_t InstructionEnd;
+};
+
 struct LoweredBody {
     std::vector<std::uint8_t> Bytes;
     std::size_t ReturnBranchOffset;
     std::size_t TrailingOffset = 0;
+    std::vector<PendingRipFixup> RipFixups;
 };
 
 using StubConstant = std::array<std::uint8_t, 16>;
@@ -36,6 +43,7 @@ public:
     void Restore(std::uint8_t reg);
     void Raw(std::span<const std::uint8_t> bytes);
     [[nodiscard]] std::size_t Size() const;
+    void AddRipFixup(std::size_t bodyOffset, std::int32_t originalDisplacement, std::size_t instructionEnd);
     void AdjustStack(std::int32_t delta);
     void PushFlags();
     void PopFlags();
@@ -66,6 +74,7 @@ private:
     std::vector<std::uint8_t> _bytes;
     std::vector<Fixup> _fixups;
     std::vector<StubConstant> _constants;
+    std::vector<PendingRipFixup> _ripFixups;
 };
 
 void EmitSse(std::vector<std::uint8_t>& out, std::uint8_t prefix, std::initializer_list<std::uint8_t> opcode, std::uint8_t dst, std::uint8_t src);
