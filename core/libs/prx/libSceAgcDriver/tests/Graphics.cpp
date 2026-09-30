@@ -84,6 +84,9 @@ void stateTests() {
     Require(state.color.address == reinterpret_cast<std::uintptr_t>(colorMemory.data()) && state.color.bytes == colorMemory.size(), "render-target address or size changed");
     Require(state.viewport.y == 4 && state.viewport.height == -4, "negative viewport height was lost");
     Require(state.color.format == VK_FORMAT_R8G8B8A8_UNORM, "RGBA format changed");
+    queue.userConfig[0x242] = 3;
+    Require(AgcDriver::Graphics::DecodeState(queue).topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP, "line-strip topology was not translated");
+    queue.userConfig[0x242] = 4;
     queue.userConfig[0x24b] = 1;
     queue.context[0x1b3] = 2;
     queue.context[0x1b4] = 2;
@@ -100,7 +103,12 @@ void stateTests() {
     state = AgcDriver::Graphics::DecodeState(queue);
     Require(state.scissor.offset.x == 3 && state.scissor.offset.y == 1 && state.scissor.extent.width == 29 && state.scissor.extent.height == 2, "scissor intersection changed");
     queue.context[0x31c] |= 0x10000000;
-    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "DCC");
+    const auto dccAddress = reinterpret_cast<std::uintptr_t>(colorMemory.data());
+    queue.context[0x325] = static_cast<std::uint32_t>(dccAddress >> 8u);
+    queue.context[0x3a8] = static_cast<std::uint32_t>(dccAddress >> 40u);
+    state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.color.dccAddress == dccAddress, "DCC metadata address changed");
+    Require(state.color.dccAlphaOnMsb, "DCC alpha mode changed");
     queue = makeState();
     queue.context.erase(0x3b8);
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "missing register");
@@ -111,8 +119,9 @@ void stateTests() {
     queue.context[0x3b0] = (62u << 14u) | 3u;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "pitch");
     queue = makeState();
-    queue.context[0x8e] = 0xff;
-    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "target zero");
+    queue.context[0x8e] = 0x0f0f;
+    queue.context[0x8f] = 0x0f0f;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "color targets with gaps");
     queue = makeState();
     queue.context[0x200] = 2;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "depth");
@@ -183,6 +192,23 @@ void ShaderStageTests() {
     queue.shader[0x8b] = 3u << 16u;
     auto stages = AgcDriver::Graphics::DecodeState(queue).stages;
     Require(stages.path == AgcDriver::Graphics::ShaderPath::Geometry && stages.mesh && stages.mesh->primitivesPerGroup == 21 && stages.mesh->verticesPerGroup == 63, "geometry assembly changed");
+    queue.userConfig[0x25b] = (64u << 9u) | 511u;
+    stages = AgcDriver::Graphics::DecodeState(queue).stages;
+    Require(stages.mesh->primitivesPerGroup == 21 && stages.mesh->maxPrimitives == 21, "mesh output primitive limit ignored the clamped subgroup");
+    queue.context[0x2ce] = 4;
+    stages = AgcDriver::Graphics::DecodeState(queue).stages;
+    Require(stages.mesh->primitivesPerGroup == 16 && stages.mesh->verticesPerGroup == 48 && stages.mesh->maxPrimitives == 32, "mesh amplification exceeded subgroup output limits");
+    queue.context[0x2ce] = 3;
+    queue.userConfig[0x242] = 3;
+    queue.userConfig[0x25b] = (8u << 9u) | 511u;
+    auto lineState = AgcDriver::Graphics::DecodeState(queue);
+    Require(lineState.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP && lineState.stages.mesh->primitivesPerGroup == 7 && lineState.stages.mesh->verticesPerGroup == 8 && lineState.stages.mesh->maxPrimitives == 7, "geometry line strip did not share its input vertices");
+    queue.userConfig[0x242] = 6;
+    stages = AgcDriver::Graphics::DecodeState(queue).stages;
+    Require(stages.mesh->primitivesPerGroup == 6 && stages.mesh->verticesPerGroup == 8 && stages.mesh->maxPrimitives == 6, "geometry triangle strip did not share its input vertices");
+    queue.userConfig[0x242] = 5;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "unsupported geometry input");
+    queue.userConfig[0x242] = 4;
     queue.userConfig[0x25b] = 0;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "invalid geometry subgroup");
     queue = makeState();
@@ -261,10 +287,22 @@ void DepthClipTests() {
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "inverted viewport depth clamp");
     queue.context[0xb4] = 0;
     for (std::uint32_t bit = 0; bit < 32; ++bit) {
-        if (bit == 19) continue;
+        if (bit == 19 || bit == 26 || bit == 27) continue;
         queue.context[0x204] = 1u << bit;
         expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "PA_CL_CLIP_CNTL");
     }
+    queue.context[0x204] = 1u << 19;
+    const auto zeroToOne = AgcDriver::Graphics::DecodeState(queue);
+    Require(!zeroToOne.negativeOneToOne && !zeroToOne.depthClamp, "zero-to-one clip control changed");
+    queue.context[0x204] = 1u << 26;
+    const auto nearClamp = AgcDriver::Graphics::DecodeState(queue);
+    Require(nearClamp.negativeOneToOne && nearClamp.depthClamp, "near depth clamp was not enabled");
+    queue.context[0x204] = 1u << 27;
+    const auto farClamp = AgcDriver::Graphics::DecodeState(queue);
+    Require(farClamp.negativeOneToOne && farClamp.depthClamp, "far depth clamp was not enabled");
+    queue.context[0x204] = (1u << 26) | (1u << 27);
+    const auto fullClamp = AgcDriver::Graphics::DecodeState(queue);
+    Require(fullClamp.depthClamp, "near and far depth clamp were not enabled");
 }
 
 void InitialContextTests() {
@@ -1142,8 +1180,15 @@ void validationTests() {
 
 }
 
-int main() {
+int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--primitives") {
+            stateTests();
+            ShaderStageTests();
+            MeshShaderTranslationTests();
+            std::cout << "AGC primitive translation tests passed\n";
+            return 0;
+        }
         {
             const AgcDriver::Graphics::Context context{};
             const AgcDriver::Graphics::State state{};
@@ -1170,6 +1215,7 @@ int main() {
         DepthClipTests();
         DisabledColorTests();
         ShaderStageTests();
+        MeshShaderTranslationTests();
         InitialContextTests();
         pushConstantTests();
         resourceTests();

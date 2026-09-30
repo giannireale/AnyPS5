@@ -210,6 +210,7 @@ configure_windows_unwind(agc_driver_pm4_tests)
 
 add_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         tests/Graphics.cpp
+        tests/MeshShader.cpp
         tests/ColorTargetLayout.cpp
         tests/BdaResources.cpp
         tests/GuestAllocations.cpp
@@ -224,6 +225,7 @@ add_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         Graphics/src/ColorTargetLayout.cpp
         Graphics/src/ColorTargetTransfer.cpp
         Graphics/src/Resources.cpp
+        Graphics/src/ShaderInputState.cpp
         Graphics/src/ShaderResources.cpp
         Graphics/src/ShaderAddressResources.cpp
         Graphics/src/GuestBufferMemory.cpp
@@ -239,6 +241,8 @@ add_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         Graphics/src/Texture.cpp
         Graphics/src/UnitShadow.cpp
         Graphics/src/Sampler.cpp
+        Graphics/src/Recorder.cpp
+        Execution/src/Pm4.cpp
         ${agcTextureDetileShaderHeader}
         Execution/src/GuestMemory.cpp
 )
@@ -261,6 +265,10 @@ target_link_libraries(agc_driver_graphics_tests PRIVATE
 
 set_target_properties(agc_driver_graphics_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_graphics_tests)
+
+if(BUILD_TESTING)
+    add_test(NAME agc_primitive_translation COMMAND agc_driver_graphics_tests --primitives)
+endif()
 
 add_executable(agc_driver_bda_device_tests EXCLUDE_FROM_ALL
         tests/BdaDevice.cpp

@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/General.hpp"
+#include "Optimization/include/Optimization/ShaderStageInputInfo.hpp"
 #include <algorithm>
 #include <bit>
 #include <bitset>
@@ -258,15 +259,16 @@ ShaderStages DecodeShaderStages(const QueueState& queue) {
         const auto primitives = group & 0x1ffu;
         const auto maxVertices = read(queue.context, 0x1ff);
         const auto verticesPerPrimitive = read(queue.context, 0x2ce);
-        validate((primitive == 1 || primitive == 2 || primitive == 4 || primitive == 6) && read(queue.context, 0x29b) == 2 && verticesPerPrimitive >= 3, "unsupported geometry input or output assembly");
-        const auto inputSize = primitive == 1 ? 1u : primitive == 2 ? 2u : 3u;
+        validate((primitive == 1 || primitive == 2 || primitive == 3 || primitive == 4 || primitive == 6) && read(queue.context, 0x29b) == 2 && verticesPerPrimitive >= 3, "unsupported geometry input or output assembly");
+        ShaderRecompiler::ShaderMeshInputInfo input;
+        input.inputPrimitive = primitive;
+        const auto inputSize = input.InputPrimitiveSize();
         validate(vertices >= inputSize && maxVertices != 0 && maxVertices <= 256 && verticesPerPrimitive <= 256, "invalid geometry subgroup output");
-        const auto inputStep = primitive == 6 ? 1u : inputSize;
-        const auto groupPrimitives = std::min({primitives, (vertices - inputSize) / inputStep + 1u, maxVertices / verticesPerPrimitive});
+        const auto groupPrimitives = std::min({primitives, input.InputPrimitiveCount(vertices), maxVertices / verticesPerPrimitive});
         validate(groupPrimitives != 0, "geometry subgroup contains no primitives");
         const auto resources = read(queue.shader, 0x8b, RegisterBank::Shader);
         validate(((read(queue.shader, 0x8a, RegisterBank::Shader) >> 29u) & 3u) == 3 && ((resources >> 16u) & 3u) == 3, "unsupported geometry VGPR allocation");
-        result.mesh = ShaderRecompiler::MeshConfiguration{primitive, groupPrimitives, (groupPrimitives - 1u) * inputStep + inputSize, maxVertices, primitives * (verticesPerPrimitive - 2u), ((maxVertices + result.vertexWaveSize - 1u) / result.vertexWaveSize) * result.vertexWaveSize, ((resources >> 19u) & 0xffu) * 128u, 0};
+        result.mesh = ShaderRecompiler::MeshConfiguration{primitive, groupPrimitives, input.InputVertexCount(groupPrimitives), maxVertices, groupPrimitives * (verticesPerPrimitive - 2u), ((maxVertices + result.vertexWaveSize - 1u) / result.vertexWaveSize) * result.vertexWaveSize, ((resources >> 19u) & 0xffu) * 128u, 0};
     }
     return result;
 }
@@ -280,6 +282,7 @@ State DecodeState(const QueueState& queue) {
     switch (primitive) {
         case 1: Require(result.stages.mesh.has_value(), "point-list vertex rendering requires point-size output support"); result.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST; break;
         case 2: result.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST; break;
+        case 3: result.topology = VK_PRIMITIVE_TOPOLOGY_LINE_STRIP; break;
         case 7:
         case 17:
             Require(result.stages.path == ShaderPath::Vertex, "rect-list requires vertex routing");

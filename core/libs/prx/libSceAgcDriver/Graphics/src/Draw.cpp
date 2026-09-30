@@ -656,10 +656,10 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
         APS5_LOG_CHARS_OUT_DEBUG("Mesh path");
         Require(context.meshShader, "device does not support mesh shaders");
         const auto& mesh = *state.stages.mesh;
-        const auto inputSize = mesh.inputPrimitive == 1 ? 1u : mesh.inputPrimitive == 2 ? 2u : 3u;
-        Require(draw.indexCount >= inputSize && mesh.primitivesPerGroup != 0, "mesh draw contains no complete primitive");
-        const auto step = mesh.inputPrimitive == 6 ? 1u : inputSize;
-        const auto primitives = (draw.indexCount - inputSize) / step + 1u;
+        ShaderRecompiler::ShaderMeshInputInfo input;
+        input.inputPrimitive = mesh.inputPrimitive;
+        const auto primitives = input.InputPrimitiveCount(draw.indexCount);
+        Require(primitives != 0 && mesh.primitivesPerGroup != 0, "mesh draw contains no complete primitive");
         inputs.meshGroups = (primitives - 1u) / mesh.primitivesPerGroup + 1u;
         APS5_LOG_OUT_DEBUG("Mesh primitives=%u groups=%u", primitives, inputs.meshGroups);
         Require(inputs.meshGroups <= context.meshLimits.maxMeshWorkGroupCount[0] && draw.instanceCount <= context.meshLimits.maxMeshWorkGroupCount[1] && static_cast<std::uint64_t>(inputs.meshGroups) * draw.instanceCount <= context.meshLimits.maxMeshWorkGroupTotalCount, "mesh draw exceeds workgroup count limits");

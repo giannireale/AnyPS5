@@ -171,6 +171,16 @@ function(add_shader_recompiler target runtimeTarget)
 endfunction()
 
 if(BUILD_TESTING)
+    add_executable(shader_mesh_input_tests ${CMAKE_CURRENT_LIST_DIR}/tests/ShaderMeshInputTests.cpp)
+    target_include_directories(shader_mesh_input_tests PRIVATE
+            ${CMAKE_CURRENT_LIST_DIR}/Optimization/include
+            ${CMAKE_CURRENT_LIST_DIR}/IntermediateRepresentation/include
+            ${CMAKE_CURRENT_LIST_DIR}/RdnaDecoder/include
+            ${CMAKE_CURRENT_LIST_DIR}/ControlFlow/include
+    )
+    target_compile_features(shader_mesh_input_tests PRIVATE cxx_std_20)
+    add_test(NAME shader_mesh_input COMMAND shader_mesh_input_tests)
+
     add_executable(rdna_image_decoder_tests
             ${CMAKE_CURRENT_LIST_DIR}/tests/RdnaImageDecoderTests.cpp
             ${CMAKE_CURRENT_LIST_DIR}/RdnaDecoder/src/RdnaImageOpDecoder.cpp

@@ -10,6 +10,7 @@
 #include <elfpatcher/general/SegmentFilter.hpp>
 #include <elfpatcher/linux/LinuxElfPatcher.hpp>
 #include <io/ByteWriter.hpp>
+#include <algorithm>
 #include <cstring>
 #include <cstdint>
 #ifdef __linux__
@@ -101,7 +102,16 @@ void decoderLengths() {
         {0xF3, 0x0F, 0xB8, 0xC0}, {0xCD, 0x41}, {0x0F, 0x0D, 0x08}, {0x0F, 0xC0, 0xC1}, {0x0F, 0xC3, 0x07},
         {0x66, 0x0F, 0xC4, 0xC0, 0x01}, {0xC2, 0x08, 0x00}, {0xC8, 0x10, 0x00, 0x00}, {0xF3, 0x0F, 0x2B, 0x07},
         {0xF2, 0x44, 0x0F, 0x2B, 0x4C, 0x24, 0x10}, {0x0F, 0x01, 0xFA}, {0x0F, 0xB9, 0x00},
-        {0x41, 0x0F, 0xBB, 0xF7}, {0x0F, 0xBB, 0x47, 0x08}};
+        {0x41, 0x0F, 0xBB, 0xF7}, {0x0F, 0xBB, 0x47, 0x08},
+        {0x66, 0x48, 0x81, 0xC0, 0x11, 0x22, 0x33, 0x44},
+        {0x66, 0x48, 0xC7, 0xC0, 0x11, 0x22, 0x33, 0x44},
+        {0x66, 0x48, 0x69, 0xC0, 0x11, 0x22, 0x33, 0x44},
+        {0x66, 0x48, 0x05, 0x11, 0x22, 0x33, 0x44},
+        {0x66, 0x48, 0xA9, 0x11, 0x22, 0x33, 0x44},
+        {0x66, 0x48, 0xF7, 0xC0, 0x11, 0x22, 0x33, 0x44},
+        {0x66, 0x81, 0xC0, 0x11, 0x22}, {0x66, 0xF7, 0xC0, 0x11, 0x22},
+        {0x66, 0x48, 0x68, 0x11, 0x22},
+        {0x66, 0x48, 0xB8, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88}};
     Bytes padded;
     for (const auto& instruction : instructions) {
         padded = instruction;
@@ -109,6 +119,15 @@ void decoderLengths() {
         require(decoder.Decode(padded.data(), padded.size()) == instruction.size(), "AMD-only or repaired two-byte opcode was decoded with the wrong length");
     }
     requireFailure([&] { const Bytes bare = {0x0F, 0x78, 0xC3, 0x08, 0x28}; (void)decoder.Decode(bare.data(), bare.size()); }, "0F 78 without an SSE4a prefix was accepted");
+    for (const std::uint8_t opcode : {0xA0, 0xA1, 0xA2, 0xA3}) {
+        for (const Bytes prefix : {Bytes{}, Bytes{0x66}, Bytes{0x48}, Bytes{0x66, 0x48}, Bytes{0x67}, Bytes{0x66, 0x67, 0x48}}) {
+            Bytes instruction = prefix;
+            instruction.push_back(opcode);
+            instruction.insert(instruction.end(), std::find(prefix.begin(), prefix.end(), 0x67) == prefix.end() ? 8 : 4, 0x90);
+            require(decoder.Decode(instruction.data(), instruction.size()) == instruction.size(), "MOFFS address width was decoded incorrectly");
+            requireFailure([&] { (void)decoder.Decode(instruction.data(), instruction.size() - 1); }, "Truncated MOFFS address was accepted");
+        }
+    }
 }
 
 void sse4aOperands() {
@@ -240,6 +259,13 @@ void converterSegment() {
     require(result.Bytes == expected, "Converter changed bytes other than the MOVNTSS opcode");
     const auto untouched = converter->Convert(Bytes(0x300, 0x90), {segmentHeader(0x100)});
     require(untouched.ReplacedCount == 0 && untouched.Trampolines.empty() && untouched.Reports.empty() && untouched.Bytes == Bytes(0x300, 0x90), "Segment without AMD-only instructions was changed");
+    Bytes addressFixture(0x300, 0x90);
+    const Bytes addressText = {0xA1, 0xF3, 0x0F, 0x2B, 0x07, 0x90, 0x90, 0x90, 0x90, 0xF3, 0x0F, 0x2B, 0x07, 0xC3};
+    std::copy(addressText.begin(), addressText.end(), addressFixture.begin() + 0x200);
+    const auto addressResult = converter->Convert(addressFixture, {segmentHeader(addressText.size())});
+    auto expectedAddress = addressFixture;
+    expectedAddress[0x20B] = 0x11;
+    require(addressResult.Reports.size() == 1 && addressResult.Reports[0].Offset == 0x209 && addressResult.Bytes == expectedAddress, "Converter rewrote instruction-like bytes inside a MOFFS address");
     auto branchInside = file;
     branchInside[0x207] = 0x02;
     requireFailure([&] { (void)converter->Convert(branchInside, {segmentHeader(20)}); }, "Branch into an AMD-only instruction was accepted");
@@ -878,8 +904,6 @@ void registerFormExecution() {
         require(runExtrqStub(same, control, control) == extrqReference(control, control), "EXTRQ register form stub with equal operands computed the wrong field");
     }
 }
-#else
-void registerFormExecution() {}
 std::uint32_t sha1nexteLane(const std::uint32_t value) {
     return (value << 30) | (value >> 2);
 }
@@ -950,47 +974,14 @@ void sha1nexteExecution() {
     munmap(code, 4096);
 }
 
-void clzeroExecution() {
-    const auto matcher = Codegen::MakeAmd64OnlyInstructionMatcher();
-    const Bytes site = {0x0F, 0x01, 0xFC};
-    const auto match = matcher->Match(site.data(), site.size());
-    require(match && match->Lowering == Codegen::Amd64OnlyLowering::Trampoline, "CLZERO stub was not produced");
-    auto body = match->StubBody;
-    const auto ret = body.size();
-    body.push_back(0xC3);
-    const auto displacement = static_cast<std::int32_t>(ret - (match->ReturnBranchOffset + 5));
-    std::memcpy(body.data() + match->ReturnBranchOffset + 1, &displacement, sizeof(displacement));
-    void* code = mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    require(code != MAP_FAILED, "cannot map executable memory for the stub");
-    std::memcpy(code, body.data(), body.size());
-    alignas(64) std::uint8_t buffer[192];
-    std::memset(buffer, 0xAA, sizeof(buffer));
-    std::uint8_t* const target = buffer + 70;
-    std::uint64_t returnedRax = 0;
-    std::uint64_t returnedFlags = 0;
-    asm volatile(
-        "movq %[target], %%rax\n\t"
-        "lea -128(%%rsp), %%rsp\n\t"
-        "stc\n\t"
-        "call *%[code]\n\t"
-        "pushfq\n\t"
-        "popq %%rdx\n\t"
-        "lea 128(%%rsp), %%rsp\n\t"
-        "movq %%rax, %[rax]\n\t"
-        "movq %%rdx, %[flags]"
-        : [rax] "=m"(returnedRax), [flags] "=m"(returnedFlags)
-        : [target] "r"(target), [code] "r"(code)
-        : "rax", "rdx", "memory", "cc");
-    munmap(code, 4096);
-    require(returnedRax == reinterpret_cast<std::uint64_t>(target), "CLZERO stub did not preserve RAX");
-    require((returnedFlags & 1u) == 1u, "CLZERO stub did not preserve the flags");
-    for (std::size_t index = 0; index < sizeof(buffer); ++index) {
-        const bool inLine = index >= 64 && index < 128;
-        require(buffer[index] == (inLine ? 0x00 : 0xAA), "CLZERO stub zeroed the wrong bytes");
-    }
-}
-
+#else
+void registerFormExecution() {}
 void insertqRegisterFormExecution() {}
+void sha1nexteExecution() {}
+void clzeroExecution() {}
+void shaNiExecution() {}
+void shaRoundExecution() {}
+void shaMemoryExecution() {}
 #endif
 
 int main() {
