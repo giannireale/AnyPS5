@@ -63,12 +63,24 @@ static void CheckNamedAndHintedMappings() {
 static void CheckUnsupportedMappingFlags() {
     constexpr std::size_t length = 0x4000;
     void* flexible = reinterpret_cast<void*>(static_cast<std::uintptr_t>(0x12345000));
-    Require(sceKernelMapFlexibleMemory(&flexible, length, 3, 0x8000) == SCE_KERNEL_ERROR_EINVAL);
+    Require(sceKernelMapFlexibleMemory(&flexible, length, 3, 0x200000) == SCE_KERNEL_ERROR_EINVAL);
     Require(flexible == reinterpret_cast<void*>(static_cast<std::uintptr_t>(0x12345000)));
 
     void* direct = reinterpret_cast<void*>(static_cast<std::uintptr_t>(0x12345000));
     Require(sceKernelMapDirectMemory(&direct, length, 3, 0x8000, 0, 0x4000) == SCE_KERNEL_ERROR_EINVAL);
     Require(direct == reinterpret_cast<void*>(static_cast<std::uintptr_t>(0x12345000)));
+
+    constexpr std::size_t heapLength = 0x10000;
+    void* heap = nullptr;
+    Require(sceKernelMapNamedFlexibleMemory(&heap, heapLength, 3, 0x8000, "SceLibcHeap") == 0);
+    Require(heap != nullptr && (reinterpret_cast<std::uintptr_t>(heap) & 0x3fff) == 0);
+    auto* heapBytes = static_cast<unsigned char*>(heap);
+    for (std::size_t index = 0; index < heapLength; ++index) Require(heapBytes[index] == 0);
+    heapBytes[0] = 0x5A;
+    heapBytes[heapLength - 1] = 0xA5;
+    Require(heapBytes[0] == 0x5A && heapBytes[heapLength - 1] == 0xA5);
+    Require(std::strcmp(NameAt(heap), "SceLibcHeap") == 0);
+    Require(sceKernelMunmap(heap, heapLength) == 0);
 }
 
 int main() {

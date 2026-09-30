@@ -135,6 +135,7 @@ namespace {
 constexpr int GuestMapFixedFlag = 0x10;
 constexpr int GuestMapNoOverwriteFlag = 0x80;
 constexpr int GuestMapNoCoalesceFlag = 0x400000;
+constexpr int ObservedFlexibleMappingFlag = 0x8000;
 
 constexpr int SupportedMapFlags() {
 #if defined(__linux__)
@@ -144,8 +145,8 @@ constexpr int SupportedMapFlags() {
 #endif
 }
 
-bool HasUnsupportedMapFlags(int flags) {
-    return (flags & ~SupportedMapFlags()) != 0;
+bool HasUnsupportedMapFlags(int flags, int additionalSupportedFlags = 0) {
+    return (flags & ~(SupportedMapFlags() | additionalSupportedFlags)) != 0;
 }
 
 #if defined(__linux__)
@@ -254,14 +255,15 @@ void Unmap(void* addr, size_t len) {
 #endif
 }
 
-void* MapAligned(void* addr, size_t len, int prot, int flags, size_t alignment) {
+void* MapAligned(void* addr, size_t len, int prot, int flags, size_t alignment, int additionalSupportedFlags = 0) {
     ValidateLength(len);
     alignment = ValidateAlignment(alignment);
-    if (HasUnsupportedMapFlags(flags)) {
+    if (HasUnsupportedMapFlags(flags, additionalSupportedFlags)) {
         char message[64];
         std::snprintf(message, sizeof(message), "Unsupported memory mapping flags 0x%x", flags);
         throw std::invalid_argument(message);
     }
+    flags &= ~additionalSupportedFlags;
     if ((flags & GuestMapFixedFlag) != 0) {
         ValidateRange(addr, len, alignment);
 #if defined(__linux__)
@@ -346,11 +348,12 @@ int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart,
 int DoMapAnon(void** addr, size_t len, int prot, int flags) {
     ValidateOutput(addr);
     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
-    if (HasUnsupportedMapFlags(flags)) return SCE_KERNEL_ERROR_EINVAL;
+    // Observed on the game's SceLibcHeap flexible mapping; its native meaning is unknown, so it is placement-neutral here.
+    if (HasUnsupportedMapFlags(flags, ObservedFlexibleMappingFlag)) return SCE_KERNEL_ERROR_EINVAL;
     GuestAllocations::Mutation mutation;
     if (RemapFixedIntoRegistered(mutation, *addr, len, prot, flags)) return 0;
     if (*addr != nullptr && (flags & GuestMapFixedFlag) != 0) mutation.RequireAvailable(*addr, len);
-    void* mapped = MapAligned(*addr, len, LinuxProtFromSce(prot), flags, PS5_PAGE_SIZE);
+    void* mapped = MapAligned(*addr, len, LinuxProtFromSce(prot), flags, PS5_PAGE_SIZE, ObservedFlexibleMappingFlag);
     try {
         mutation.Add(mapped, len, (prot & 3) != 0, (prot & 2) != 0);
     } catch (...) {
