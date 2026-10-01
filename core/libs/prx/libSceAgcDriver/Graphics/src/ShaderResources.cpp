@@ -2347,10 +2347,24 @@ void ShaderResources::resolveImageBinding(const ShaderRecompiler::DescriptorBind
     if (binding.kind == ShaderRecompiler::DescriptorKind::SampledImage) {
         const auto elementWords = binding.guestDescriptor.size() / binding.count;
         for (std::uint32_t element = 0; element < binding.count; ++element) {
-            const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * elementWords, elementWords);
+            auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * elementWords, elementWords);
             const auto* record = nextRecord();
-            const auto resource = record != nullptr && record->decoded ? record->resource : DecodeTextureResource(words);
-            Require(MatchesGuestDimension(*binding.imageShape, resource.dimension), "guest texture dimension disagrees with the shader's declared image shape");
+            auto resource = record != nullptr && record->decoded ? record->resource : DecodeTextureResource(words);
+            // A 2D sample of a one-slice 2D array (slice 0) reads that slice on the hardware; the title
+            // binds such views to 2D shaders. The descriptor is retyped 2D so the view (and its cache
+            // key) is a 2D one; the stage-A record holds the array view, so it is not reused.
+            std::array<std::uint32_t, 8> retyped{};
+            if (*binding.imageShape == ShaderRecompiler::DescriptorImageShape::Image2D && resource.dimension == TextureDimension::k2DArray &&
+                resource.baseArray == 0 && resource.depthOrLastArray == 0 && words.size() == retyped.size()) {
+                std::copy(words.begin(), words.end(), retyped.begin());
+                retyped[3] = (retyped[3] & 0x0fffffffu) | (9u << 28u);
+                words = retyped;
+                resource = DecodeTextureResource(words);
+                record = nullptr;
+            }
+            Require(MatchesGuestDimension(*binding.imageShape, resource.dimension),
+                    "guest texture dimension " + std::to_string(static_cast<int>(resource.dimension)) + " (layers " + std::to_string(resource.baseArray) + ".." + std::to_string(resource.depthOrLastArray) +
+                        ") disagrees with the shader's declared image shape " + std::to_string(static_cast<int>(*binding.imageShape)));
             const VkComponentMapping components{ComponentSwizzleFor(resource.dstSelX), ComponentSwizzleFor(resource.dstSelY), ComponentSwizzleFor(resource.dstSelZ), ComponentSwizzleFor(resource.dstSelW)};
             const auto guestBytes = record != nullptr && record->decoded ? record->guestBytes : DescribeSurface(resource).guestBytes;
             std::shared_ptr<Texture> texture;
