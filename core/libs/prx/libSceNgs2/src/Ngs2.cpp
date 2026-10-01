@@ -500,4 +500,17 @@ int APS5_VABI sceNgs2VoiceGetPortInfo(Ngs2Handle voice_handle, std::uint32_t por
     return 0;
 }
 
+// sceNgs2VoiceQueryInfo (9eic4AmjGVI). ANIMAL WELL's wrapper (eboot 0x18990) passes
+// (voice, 0x4001, out, 8) and reads the first u32 as the channel count of the voice's waveform
+// (1 or 2) to pick its pan matrix; it ignores the result. Waveforms are not tracked (VoiceControl
+// is not implemented), so no info is known: validate, leave the output untouched and fail.
+int APS5_VABI sceNgs2VoiceQueryInfo(Ngs2Handle voice_handle, std::uint32_t info_id, void* info, std::size_t info_size) {
+    (void)info_id;
+    std::lock_guard lock(g_lock);
+    if (findVoice(voice_handle) == nullptr) return SCE_NGS2_ERROR_INVALID_VOICE_HANDLE;
+    if (info == nullptr) return SCE_NGS2_ERROR_INVALID_OUT_ADDRESS;
+    if (info_size == 0) return SCE_NGS2_ERROR_INVALID_OUT_SIZE;
+    return SCE_NGS2_ERROR_FAIL;
+}
+
 }

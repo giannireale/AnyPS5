@@ -28,6 +28,7 @@ int APS5_VABI sceNgs2VoiceGetStateFlags(Ngs2Handle voice_handle, std::uint32_t* 
 int APS5_VABI sceNgs2VoiceControl(Ngs2Handle voice_handle, const Ngs2VoiceParamHeader* param_list);
 int APS5_VABI sceNgs2VoiceRunCommands(Ngs2Handle voice_handle, const void* commands, std::uint32_t num_commands);
 int APS5_VABI sceNgs2VoiceGetPortInfo(Ngs2Handle voice_handle, std::uint32_t port, void* info, std::size_t info_size);
+int APS5_VABI sceNgs2VoiceQueryInfo(Ngs2Handle voice_handle, std::uint32_t info_id, void* info, std::size_t info_size);
 }
 
 namespace {
@@ -222,6 +223,13 @@ int main() {
     Require(std::memcmp(&port, &untouched, sizeof(port)) == 0, "a rejected port info query changed its output");
     Require(sceNgs2VoiceGetPortInfo(voice, 2, &port, sizeof(port)) == 0, "port info of the last port failed");
     Require(port.matrix == -1 && port.destination == 0 && port.delay == 0 && port.input == 0, "an unpatched port reported a connection");
+
+    // The title's channel-count query (info 0x4001, 8 bytes): no waveform state, so it fails untouched.
+    std::array<std::uint32_t, 2> channels{0xAAAAAAAAu, 0xAAAAAAAAu};
+    Require(sceNgs2VoiceQueryInfo(0, 0x4001, channels.data(), sizeof(channels)) == static_cast<int>(0x804A0202), "voice info accepted an invalid voice");
+    Require(sceNgs2VoiceQueryInfo(voice, 0x4001, nullptr, sizeof(channels)) < 0, "voice info accepted a null output");
+    Require(sceNgs2VoiceQueryInfo(voice, 0x4001, channels.data(), sizeof(channels)) < 0, "unknown voice info reported success");
+    Require(channels[0] == 0xAAAAAAAAu && channels[1] == 0xAAAAAAAAu, "a failed voice info query changed its output");
 
     alignas(8) const std::array<std::uint32_t, 4> observedEventParam{16, 0x20000000, 2, 0};
     const auto* observedParam = reinterpret_cast<const Ngs2VoiceParamHeader*>(observedEventParam.data());
