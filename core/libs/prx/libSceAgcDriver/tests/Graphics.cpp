@@ -102,6 +102,18 @@ void stateTests() {
     queue.context[0x91] = 0x30020;
     state = AgcDriver::Graphics::DecodeState(queue);
     Require(state.scissor.offset.x == 3 && state.scissor.offset.y == 1 && state.scissor.extent.width == 29 && state.scissor.extent.height == 2, "scissor intersection changed");
+    {
+        // WINDOW_OFFSET_DISABLE clear (ANIMAL WELL's scissors) with a zero window offset: unchanged.
+        auto windowed = queue;
+        windowed.context[0x90] = 0x00010003;
+        const auto same = AgcDriver::Graphics::DecodeState(windowed).scissor;
+        Require(same.offset.x == 3 && same.offset.y == 1 && same.extent.width == 29 && same.extent.height == 2, "a windowed scissor with a zero offset moved");
+        windowed.context[0x80] = 0x00010002;
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(windowed); }, "window offset");
+        windowed = queue;
+        windowed.context[0x90] = 0x80018003;
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(windowed); }, "scissor reserved bits");
+    }
     queue.context[0x31c] |= 0x10000000;
     const auto dccAddress = reinterpret_cast<std::uintptr_t>(colorMemory.data());
     queue.context[0x325] = static_cast<std::uint32_t>(dccAddress >> 8u);

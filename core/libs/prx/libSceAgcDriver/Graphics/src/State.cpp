@@ -203,11 +203,14 @@ DecodedColorFormat DecodeColorFormat(std::uint32_t format, std::uint32_t number,
     }
 }
 
+// The scissors other than the screen one carry WINDOW_OFFSET_DISABLE (TL bit 31). Clear, the CP
+// adds PA_SC_WINDOW_OFFSET to the corners; DecodeState only accepts a zero window offset (the
+// vertex shift is not modelled), so either setting yields the same rectangle here.
 void intersect(VkRect2D& result, const Registers& registers, std::uint32_t offset, bool screen) {
     const auto tl = read(registers, offset);
     const auto br = read(registers, offset + 1);
-    if (!screen) Require((tl & 0x80008000u) == 0x80000000u && (br & 0x80008000u) == 0, "scissor window offsets or reserved bits are unsupported");
-    const auto x = tl & 0xffffu;
+    if (!screen) Require((tl & 0x00008000u) == 0 && (br & 0x80008000u) == 0, "scissor reserved bits are set");
+    const auto x = tl & (screen ? 0xffffu : 0x7fffu);
     const auto y = (tl >> 16u) & (screen ? 0xffffu : 0x7fffu);
     const auto right = br & 0xffffu;
     const auto bottom = br >> 16u;
