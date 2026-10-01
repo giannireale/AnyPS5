@@ -2,6 +2,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -112,6 +114,30 @@ std::map<Ngs2Handle, Rack*> g_racks;
 std::map<Ngs2Handle, Voice*> g_voices;
 Ngs2Handle g_nextHandle = 0x4E470001;
 std::uint32_t g_nextUid = 1;
+
+// Debug aid: APS5_TRACE_NGS2=1 logs voice parameter chains, command batches and render requests.
+bool TraceNgs2() {
+    static const bool value = std::getenv("APS5_TRACE_NGS2") != nullptr;
+    return value;
+}
+
+void traceParamChain(Ngs2Handle voice, const Ngs2VoiceParamHeader* param) {
+    const auto* cursor = reinterpret_cast<const std::uint8_t*>(param);
+    for (int index = 0; index < 32 && cursor != nullptr; ++index) {
+        Ngs2VoiceParamHeader head{};
+        std::memcpy(&head, cursor, sizeof(head));
+        std::fprintf(stderr, "[ngs2] control voice 0x%llx param %d size 0x%x next %d id 0x%08x:", static_cast<unsigned long long>(voice), index, head.size, head.next, head.id);
+        const std::size_t words = head.size >= 8 && head.size <= 0x100 ? (head.size - 8) / 4 : 0;
+        for (std::size_t word = 0; word < words; ++word) {
+            std::uint32_t value = 0;
+            std::memcpy(&value, cursor + 8 + word * 4, sizeof(value));
+            std::fprintf(stderr, " %08x", value);
+        }
+        std::fprintf(stderr, "\n");
+        if (head.next == 0 || head.size < 8 || head.size > 0x400) break;
+        cursor += head.next;
+    }
+}
 
 Ngs2Handle nextHandle() {
     return g_nextHandle += 4;
@@ -359,8 +385,11 @@ int APS5_VABI sceNgs2SystemSetGrainSamples(Ngs2Handle system_handle, std::uint32
 
 int APS5_VABI sceNgs2SystemRender(Ngs2Handle system_handle, const Ngs2RenderBufferInfo* buffer_info,
                                  std::uint32_t num_buffer_info) {
-    (void)buffer_info;
-    (void)num_buffer_info;
+    if (TraceNgs2() && buffer_info != nullptr) {
+        static int traced = 0;
+        for (std::uint32_t index = 0; index < num_buffer_info && traced < 16; ++index, ++traced)
+            std::fprintf(stderr, "[ngs2] render buffer %u: %p size 0x%zx type 0x%x channels %u\n", index, buffer_info[index].buffer, buffer_info[index].buffer_size, buffer_info[index].waveform_type, buffer_info[index].num_channels);
+    }
     std::lock_guard lock(g_lock);
     if (findSystem(system_handle) == nullptr) return SCE_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
     // The mixer and render-buffer formats are not implemented.
@@ -470,6 +499,7 @@ int APS5_VABI sceNgs2RackUnlock(Ngs2Handle rack_handle) {
 int APS5_VABI sceNgs2VoiceControl(Ngs2Handle voice_handle, const Ngs2VoiceParamHeader* param_list) {
     std::lock_guard lock(g_lock);
     if (findVoice(voice_handle) == nullptr) return SCE_NGS2_ERROR_INVALID_VOICE_HANDLE;
+    if (TraceNgs2() && param_list != nullptr) traceParamChain(voice_handle, param_list);
     // PS5 parameter blocks differ from Ngs2VoiceParamHeader. Until their
     // semantics are implemented, reject them without reading or applying them.
     (void)param_list;
@@ -480,6 +510,10 @@ int APS5_VABI sceNgs2VoiceRunCommands(Ngs2Handle voice_handle, const void* comma
     std::lock_guard lock(g_lock);
     if (findVoice(voice_handle) == nullptr) return SCE_NGS2_ERROR_INVALID_VOICE_HANDLE;
     if (num_commands == 0) return 0;
+    if (TraceNgs2() && commands != nullptr) {
+        const auto* words = static_cast<const std::uint32_t*>(commands);
+        std::fprintf(stderr, "[ngs2] commands voice 0x%llx count %u: %08x %08x %08x %08x %08x %08x %08x %08x\n", static_cast<unsigned long long>(voice_handle), num_commands, words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7]);
+    }
     // Observed SDK commands are not VoiceControl parameter blocks. Never
     // reinterpret them as such or report that an unsupported batch ran.
     (void)commands;
