@@ -1747,7 +1747,12 @@ bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
     }
     auto& dumps = Dumps();
     bool dumpFrame = false;
-    if (dumps.dumped < dumps.limit) {
+    // APS5_DUMP_FRAMES_SKIP / APS5_DUMP_FRAMES_EVERY choose which game presents are dumped (see PresentPixels).
+    static const int dumpSkip = [] { const char* value = std::getenv("APS5_DUMP_FRAMES_SKIP"); return value ? std::atoi(value) : 0; }();
+    static const int dumpEvery = [] { const char* value = std::getenv("APS5_DUMP_FRAMES_EVERY"); return value ? std::max(1, std::atoi(value)) : 1; }();
+    static int gamePresents = 0;
+    const int presentIndex = gamePresents++;
+    if (dumps.dumped < dumps.limit && presentIndex >= dumpSkip && (presentIndex - dumpSkip) % dumpEvery == 0) {
         if (dumps.cpu) {
             const auto full = ReadDisplayBuffer(buffer);
             WriteFrameBmp(dumps.dumped++, buffer.width, buffer.height, full, DumpScale());
