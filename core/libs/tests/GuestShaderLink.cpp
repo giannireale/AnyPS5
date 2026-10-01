@@ -113,6 +113,18 @@ int main() {
         Require(sdkMapping[i].offset == SPI_PS_INPUT_CNTL_0 + i && sdkMapping[i].value == 0);
     Require(sdkMapping.back().offset == 0xdeadbeef && sdkMapping.back().value == 0xcafebabe);
 
+    // ANIMAL WELL's first pipeline links a GS with no PS: every interpolant is written, disabled.
+    sdkMapping.fill({0xdeadbeef, 0xcafebabe});
+    Require(sceAgcCreateInterpolantMappingSdk(sdkMapping.data(), &vertex, nullptr) == 0);
+    for (unsigned i = 0; i < 32; ++i)
+        Require(sdkMapping[i].offset == SPI_PS_INPUT_CNTL_0 + i && sdkMapping[i].value == 0);
+    Require(sdkMapping.back().offset == 0xdeadbeef && sdkMapping.back().value == 0xcafebabe);
+
+    sdkMapping.fill({0xdeadbeef, 0xcafebabe});
+    const auto untouchedSdkMapping = sdkMapping;
+    Require(sceAgcCreateInterpolantMappingSdk(sdkMapping.data(), nullptr, &pixel) == GRAPHICS5_ERROR_INVALID_SHADER_PROGRAM);
+    Require(std::memcmp(sdkMapping.data(), untouchedSdkMapping.data(), sizeof(sdkMapping)) == 0);
+
     sdkMapping.fill({0xdeadbeef, 0xcafebabe});
     const auto savedSdkMapping = sdkMapping;
     pixel.num_input_semantics = 33;

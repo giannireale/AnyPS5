@@ -71,7 +71,9 @@ APS5_EXPORT("dbOlWdppb4o", sceAgcCreateInterpolantMappingSdk);
 APS5_EXPORT("vieBRwlh1Lw", sceAgcCreateInterpolantMappingSdk);
 int APS5_VABI sceAgcCreateInterpolantMappingSdk(ShaderRegister* regs, const Shader* gs, const Shader* ps) {
     using namespace ShaderRegs;
-    if (!regs || (gs == nullptr) != (ps == nullptr) ||
+    // A GS without a PS (the title's first, depth-only pipeline) still gets all 32 interpolants
+    // disabled; leaving them unwritten sent stale stack words to the CP as register offsets.
+    if (!regs || (gs == nullptr && ps != nullptr) ||
         (gs && (gs->type != static_cast<std::uint8_t>(ShaderBinaryType::Gs) ||
                 (gs->num_output_semantics && !gs->output_semantics))) ||
         (ps && (ps->type != static_cast<std::uint8_t>(ShaderBinaryType::Ps) ||
