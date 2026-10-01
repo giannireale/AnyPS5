@@ -25,6 +25,19 @@ constexpr int SCE_NGS2_ERROR_INVALID_RACK_HANDLE = static_cast<int>(0x804A0201);
 constexpr int SCE_NGS2_ERROR_INVALID_VOICE_HANDLE = static_cast<int>(0x804A0202);
 constexpr int SCE_NGS2_ERROR_INVALID_RACK_ID = static_cast<int>(0x804A0210);
 constexpr int SCE_NGS2_ERROR_INVALID_VOICE_ID = static_cast<int>(0x804A0211);
+// Taken from the PS4 NGS2 error table (shadPS4 ngs2_error.h); the PS5 value is unconfirmed.
+constexpr int SCE_NGS2_ERROR_INVALID_VOICE_PORT_INDEX = static_cast<int>(0x804A0304);
+
+// sceNgs2VoiceGetPortInfo output. The title passes a 24-byte buffer (RCX=0x18 at the call),
+// which matches the PS4 layout: matrix id, volume, delay samples, destination input, voice.
+struct Ngs2VoicePortInfo {
+    std::int32_t matrix_id;
+    float volume;
+    std::uint32_t num_delay_samples;
+    std::uint32_t dest_input_id;
+    Ngs2Handle dest_voice_handle;
+};
+static_assert(sizeof(Ngs2VoicePortInfo) == 24 && offsetof(Ngs2VoicePortInfo, dest_voice_handle) == 16);
 
 constexpr std::uint32_t MinGrainSamples = 64;
 constexpr std::uint32_t MaxGrainSamples = 1024;
@@ -470,6 +483,20 @@ int APS5_VABI sceNgs2VoiceGetStateFlags(Ngs2Handle voice_handle, std::uint32_t* 
     const Voice* voice = findVoice(voice_handle);
     if (voice == nullptr) return SCE_NGS2_ERROR_INVALID_VOICE_HANDLE;
     *state_flags = voice->stateFlags;
+    return 0;
+}
+
+// No voice patching exists yet, so every port of a valid voice is unconnected: no matrix, no
+// destination. A rack without an explicit port count has one port per voice.
+int APS5_VABI sceNgs2VoiceGetPortInfo(Ngs2Handle voice_handle, std::uint32_t port, Ngs2VoicePortInfo* info, std::size_t info_size) {
+    std::lock_guard lock(g_lock);
+    const Voice* voice = findVoice(voice_handle);
+    if (voice == nullptr) return SCE_NGS2_ERROR_INVALID_VOICE_HANDLE;
+    if (info == nullptr) return SCE_NGS2_ERROR_INVALID_OUT_ADDRESS;
+    if (info_size < sizeof(Ngs2VoicePortInfo)) return SCE_NGS2_ERROR_INVALID_OUT_SIZE;
+    const std::uint32_t ports = voice->rack->option.max_ports != 0 ? voice->rack->option.max_ports : 1;
+    if (port >= ports) return SCE_NGS2_ERROR_INVALID_VOICE_PORT_INDEX;
+    *info = Ngs2VoicePortInfo{-1, 0.0f, 0, 0, 0};
     return 0;
 }
 

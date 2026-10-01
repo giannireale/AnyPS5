@@ -27,6 +27,7 @@ int APS5_VABI sceNgs2VoiceGetState(Ngs2Handle voice_handle, Ngs2VoiceState* stat
 int APS5_VABI sceNgs2VoiceGetStateFlags(Ngs2Handle voice_handle, std::uint32_t* state_flags);
 int APS5_VABI sceNgs2VoiceControl(Ngs2Handle voice_handle, const Ngs2VoiceParamHeader* param_list);
 int APS5_VABI sceNgs2VoiceRunCommands(Ngs2Handle voice_handle, const void* commands, std::uint32_t num_commands);
+int APS5_VABI sceNgs2VoiceGetPortInfo(Ngs2Handle voice_handle, std::uint32_t port, void* info, std::size_t info_size);
 }
 
 namespace {
@@ -209,6 +210,18 @@ int main() {
     std::uint32_t flags = 0xFFFFFFFFu;
     Require(sceNgs2VoiceGetStateFlags(voice, &flags) == 0 && flags == 0, "a fresh voice is not idle");
     Require(sceNgs2VoiceGetStateFlags(0, &flags) != 0, "an invalid voice handle was accepted");
+
+    struct PortInfo { std::int32_t matrix; float volume; std::uint32_t delay; std::uint32_t input; Ngs2Handle destination; };
+    static_assert(sizeof(PortInfo) == 24);
+    PortInfo port{7, 1.0f, 7, 7, 7};
+    const PortInfo untouched = port;
+    Require(sceNgs2VoiceGetPortInfo(0, 0, &port, sizeof(port)) == static_cast<int>(0x804A0202), "port info accepted an invalid voice");
+    Require(sceNgs2VoiceGetPortInfo(voice, 0, nullptr, sizeof(port)) < 0, "port info accepted a null output");
+    Require(sceNgs2VoiceGetPortInfo(voice, 0, &port, sizeof(port) - 1) < 0, "port info accepted an undersized output");
+    Require(sceNgs2VoiceGetPortInfo(voice, 3, &port, sizeof(port)) < 0, "port info accepted a port past the rack's ports");
+    Require(std::memcmp(&port, &untouched, sizeof(port)) == 0, "a rejected port info query changed its output");
+    Require(sceNgs2VoiceGetPortInfo(voice, 2, &port, sizeof(port)) == 0, "port info of the last port failed");
+    Require(port.matrix == -1 && port.destination == 0 && port.delay == 0 && port.input == 0, "an unpatched port reported a connection");
 
     alignas(8) const std::array<std::uint32_t, 4> observedEventParam{16, 0x20000000, 2, 0};
     const auto* observedParam = reinterpret_cast<const Ngs2VoiceParamHeader*>(observedEventParam.data());

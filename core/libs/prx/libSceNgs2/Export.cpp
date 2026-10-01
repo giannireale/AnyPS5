@@ -70,8 +70,6 @@ int APS5_VABI sceNgs2ParseWaveformData(const void* data, size_t data_size, Ngs2W
  return 0;
 }
 
-APS5_EXPORT("WCayTgob7-o", sceNgs2Stub_WCayTgob7_o);
-int APS5_VABI sceNgs2Stub_WCayTgob7_o() { NotImplemented_nid_no_patch(__func__); return 0; }
 APS5_EXPORT("9eic4AmjGVI", sceNgs2Stub_9eic4AmjGVI);
 int APS5_VABI sceNgs2Stub_9eic4AmjGVI() { NotImplemented_nid_no_patch(__func__); return 0; }
 }
