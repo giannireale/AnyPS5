@@ -1583,8 +1583,13 @@ void VulkanDevice::PresentPixels(std::uint32_t width, std::uint32_t height, std:
         const char* value = std::getenv("APS5_DUMP_FRAMES");
         return value ? std::atoi(value) : 0;
     }();
+    // APS5_DUMP_FRAMES_SKIP=<n> ignores the first n presents; APS5_DUMP_FRAMES_EVERY=<n> keeps one in n.
+    static const int dumpSkip = [] { const char* value = std::getenv("APS5_DUMP_FRAMES_SKIP"); return value ? std::atoi(value) : 0; }();
+    static const int dumpEvery = [] { const char* value = std::getenv("APS5_DUMP_FRAMES_EVERY"); return value ? std::max(1, std::atoi(value)) : 1; }();
     static int dumped = 0;
-    if (dumped < dumpLimit) {
+    static int presented = 0;
+    const int presentIndex = presented++;
+    if (dumped < dumpLimit && presentIndex >= dumpSkip && (presentIndex - dumpSkip) % dumpEvery == 0) {
         char name[32];
         std::snprintf(name, sizeof(name), "frame_%03d.bmp", dumped++);
         if (std::FILE* file = std::fopen(name, "wb")) {

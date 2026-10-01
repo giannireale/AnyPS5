@@ -30,7 +30,7 @@ std::uint64_t address(std::uint32_t low, std::uint32_t high) {
 std::uint32_t registerOffset(std::uint32_t value) {
     require(value != 0xffffffffu, "indirect register sentinel semantics are not implemented");
     const auto offset = value & ~0x70000000u;
-    require(offset <= 0xffffu, "extended register semantics are not implemented");
+    if (offset > 0xffffu) throw std::runtime_error("extended register semantics are not implemented (register dword 0x" + ToHex(value) + ")");
     return offset;
 }
 
@@ -679,7 +679,22 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
             // Named for the [hooksync] attribution (the read goes through the flush hook).
             const GuestMemory::ReadSiteScope site(GuestMemory::ReadSite::Registers);
             GuestMemory::Read(address(packet[1], packet[2]), std::as_writable_bytes(std::span(pairs)), 4);
-            for (std::size_t i = 0; i < pairs.size(); i += 2) registerOffset(pairs[i]);
+            for (std::size_t i = 0; i < pairs.size(); i += 2) {
+                if (pairs[i] == 0xffffffffu || (pairs[i] & ~0x70000000u) <= 0xffffu) {
+                    registerOffset(pairs[i]);
+                    continue;
+                }
+                std::string dump;
+                for (std::size_t j = 0; j < std::min<std::size_t>(pairs.size(), 16); ++j) dump += " " + ToHex(pairs[j]);
+                if (std::getenv("APS5_DUMP_BAD_REGISTER_LOAD") != nullptr) {
+                    if (FILE* file = std::fopen("bad_register_load.bin", "wb")) {
+                        std::fwrite(packet.data(), sizeof(std::uint32_t), packet.size(), file);
+                        std::fwrite(pairs.data(), sizeof(std::uint32_t), pairs.size(), file);
+                        std::fclose(file);
+                    }
+                }
+                throw std::runtime_error("indirect register load 0x" + ToHex(opcode) + " count 0x" + ToHex(packet[4]) + ": pair " + std::to_string(i / 2) + " has register dword 0x" + ToHex(pairs[i]) + "; first dwords:" + dump);
+            }
             for (std::size_t i = 0; i < pairs.size(); i += 2) writeRegister(queue, opcode, registerOffset(pairs[i]), pairs[i + 1]);
             if (queue.savedContext.has_value() && TraceContextState()) {
                 std::fprintf(stderr, "[context]   indirect 0x%x:", opcode);
