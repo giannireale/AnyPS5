@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
@@ -38,6 +40,23 @@ struct Ngs2VoicePortInfo {
     Ngs2Handle dest_voice_handle;
 };
 static_assert(sizeof(Ngs2VoicePortInfo) == 24 && offsetof(Ngs2VoicePortInfo, dest_voice_handle) == 16);
+
+// Pan work and parameters, sized from ANIMAL WELL's frame (eboot 0x17b10: 40 bytes of work right
+// below the stack guard, 16-byte params): speaker angles, the unit of a full turn, the count.
+constexpr std::uint32_t MaxPanSpeakers = 8;
+struct Ngs2PanWorkLayout {
+    float speaker_angles[MaxPanSpeakers];
+    float unit_angle;
+    std::uint32_t num_speakers;
+};
+static_assert(sizeof(Ngs2PanWorkLayout) == 40);
+struct Ngs2PanParamLayout {
+    float angle;
+    float distance;
+    float fbw_level;
+    float lfe_level;
+};
+static_assert(sizeof(Ngs2PanParamLayout) == 16);
 
 constexpr std::uint32_t MinGrainSamples = 64;
 constexpr std::uint32_t MaxGrainSamples = 1024;
@@ -511,6 +530,91 @@ int APS5_VABI sceNgs2VoiceQueryInfo(Ngs2Handle voice_handle, std::uint32_t info_
     if (info == nullptr) return SCE_NGS2_ERROR_INVALID_OUT_ADDRESS;
     if (info_size == 0) return SCE_NGS2_ERROR_INVALID_OUT_SIZE;
     return SCE_NGS2_ERROR_FAIL;
+}
+
+// sceNgs2PanInit(work, speaker_angles, unit_angle, num_speakers). The title passes no angles, a unit
+// of 360 (degrees) and two speakers. Without angles the speakers sit at the usual layout: stereo at
+// -30/+30 degrees, mono in front, more speakers spread evenly from -30 degrees.
+int APS5_VABI sceNgs2PanInit(Ngs2PanWorkLayout* work, const float* speaker_angles, float unit_angle, std::uint32_t num_speakers) {
+    if (work == nullptr) return SCE_NGS2_ERROR_INVALID_OUT_ADDRESS;
+    if (!(unit_angle > 0.0f) || !std::isfinite(unit_angle) || num_speakers == 0 || num_speakers > MaxPanSpeakers) return SCE_NGS2_ERROR_FAIL;
+    Ngs2PanWorkLayout value{};
+    value.unit_angle = unit_angle;
+    value.num_speakers = num_speakers;
+    for (std::uint32_t speaker = 0; speaker < num_speakers; ++speaker) {
+        float degrees = 0.0f;
+        if (speaker_angles != nullptr) degrees = speaker_angles[speaker] * 360.0f / unit_angle;
+        else if (num_speakers == 2) degrees = speaker == 0 ? -30.0f : 30.0f;
+        else if (num_speakers > 2) degrees = -30.0f + 360.0f * static_cast<float>(speaker) / static_cast<float>(num_speakers);
+        value.speaker_angles[speaker] = degrees;
+    }
+    *work = value;
+    return 0;
+}
+
+// sceNgs2PanGetVolumeMatrix(work, params, num_params, matrix_format, out): per parameter, one level
+// per speaker. A constant-power law between the two speakers around the source angle (0 = front,
+// clockwise, in work units); a source beyond the outermost stereo speaker stays on it. The level
+// scales with fbw_level; distance and LFE have no speaker of their own here. The pan law is a
+// standard choice, not one confirmed against the SDK.
+int APS5_VABI sceNgs2PanGetVolumeMatrix(const Ngs2PanWorkLayout* work, const Ngs2PanParamLayout* params, std::uint32_t num_params, std::uint32_t matrix_format, float* out) {
+    (void)matrix_format;
+    if (work == nullptr || params == nullptr || out == nullptr) return SCE_NGS2_ERROR_INVALID_OUT_ADDRESS;
+    const auto speakers = work->num_speakers;
+    if (speakers == 0 || speakers > MaxPanSpeakers || !(work->unit_angle > 0.0f)) return SCE_NGS2_ERROR_FAIL;
+    const auto wrap = [](float degrees) {
+        degrees = std::fmod(degrees, 360.0f);
+        if (degrees < -180.0f) degrees += 360.0f;
+        if (degrees >= 180.0f) degrees -= 360.0f;
+        return degrees;
+    };
+    for (std::uint32_t index = 0; index < num_params; ++index) {
+        const auto& param = params[index];
+        float* levels = out + static_cast<std::size_t>(index) * speakers;
+        std::fill(levels, levels + speakers, 0.0f);
+        const float level = std::isfinite(param.fbw_level) ? param.fbw_level : 0.0f;
+        if (speakers == 1) {
+            levels[0] = level;
+            continue;
+        }
+        const float angle = wrap(param.angle * 360.0f / work->unit_angle);
+        // The pair of speakers (by angle) that brackets the source.
+        std::uint32_t order[MaxPanSpeakers];
+        for (std::uint32_t speaker = 0; speaker < speakers; ++speaker) order[speaker] = speaker;
+        std::sort(order, order + speakers, [&](std::uint32_t a, std::uint32_t b) { return wrap(work->speaker_angles[a]) < wrap(work->speaker_angles[b]); });
+        const float first = wrap(work->speaker_angles[order[0]]);
+        const float last = wrap(work->speaker_angles[order[speakers - 1]]);
+        std::uint32_t left = order[speakers - 1], right = order[0];
+        float position = 0.0f;
+        if (speakers == 2 && angle <= first) { left = right = order[0]; }
+        else if (speakers == 2 && angle >= last) { left = right = order[1]; }
+        else {
+            bool found = false;
+            for (std::uint32_t i = 0; i + 1 < speakers && !found; ++i) {
+                const float a = wrap(work->speaker_angles[order[i]]), b = wrap(work->speaker_angles[order[i + 1]]);
+                if (angle >= a && angle <= b) {
+                    left = order[i];
+                    right = order[i + 1];
+                    position = b > a ? (angle - a) / (b - a) : 0.0f;
+                    found = true;
+                }
+            }
+            if (!found) {
+                // Across the back gap, from the last speaker round to the first.
+                const float span = first + 360.0f - last;
+                const float offset = angle >= last ? angle - last : angle + 360.0f - last;
+                position = span > 0.0f ? offset / span : 0.0f;
+            }
+        }
+        if (left == right) {
+            levels[left] = level;
+        } else {
+            constexpr float HalfPi = 1.57079632679f;
+            levels[left] = level * std::cos(position * HalfPi);
+            levels[right] = level * std::sin(position * HalfPi);
+        }
+    }
+    return 0;
 }
 
 }

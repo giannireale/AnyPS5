@@ -29,6 +29,8 @@ int APS5_VABI sceNgs2VoiceControl(Ngs2Handle voice_handle, const Ngs2VoiceParamH
 int APS5_VABI sceNgs2VoiceRunCommands(Ngs2Handle voice_handle, const void* commands, std::uint32_t num_commands);
 int APS5_VABI sceNgs2VoiceGetPortInfo(Ngs2Handle voice_handle, std::uint32_t port, void* info, std::size_t info_size);
 int APS5_VABI sceNgs2VoiceQueryInfo(Ngs2Handle voice_handle, std::uint32_t info_id, void* info, std::size_t info_size);
+int APS5_VABI sceNgs2PanInit(void* work, const float* speaker_angles, float unit_angle, std::uint32_t num_speakers);
+int APS5_VABI sceNgs2PanGetVolumeMatrix(const void* work, const void* params, std::uint32_t num_params, std::uint32_t matrix_format, float* out);
 }
 
 namespace {
@@ -90,7 +92,33 @@ void WritePs5RackOption(std::array<std::uint8_t, Size>& bytes, const std::uint32
 
 }
 
+void TestPan() {
+    // ANIMAL WELL's call (eboot 0x17b10): no angles, unit 360, two speakers, 40 bytes of work on the stack.
+    std::array<std::uint32_t, 12> work{};
+    work[10] = work[11] = 0xCAFEBABEu;
+    Require(sceNgs2PanInit(work.data(), nullptr, 360.0f, 2) == 0, "pan init failed");
+    Require(work[10] == 0xCAFEBABEu && work[11] == 0xCAFEBABEu, "pan init wrote past its 40-byte work");
+    Require(sceNgs2PanInit(work.data(), nullptr, 360.0f, 9) < 0 && sceNgs2PanInit(nullptr, nullptr, 360.0f, 2) < 0, "invalid pan init was accepted");
+    const auto levels = [&](float angle) {
+        const std::array<float, 4> param{angle, 1.0f, 1.0f, 1.0f};
+        std::array<float, 3> out{-1.0f, -1.0f, 42.0f};
+        Require(sceNgs2PanGetVolumeMatrix(work.data(), param.data(), 1, 2, out.data()) == 0, "pan matrix failed");
+        Require(out[2] == 42.0f, "pan matrix wrote past one level per speaker");
+        return std::array<float, 2>{out[0], out[1]};
+    };
+    const auto near = [](float a, float b) { return a - b < 1e-4f && b - a < 1e-4f; };
+    const auto center = levels(0.0f);
+    Require(near(center[0], 0.70710678f) && near(center[1], 0.70710678f), "a centered source is not at equal power");
+    const auto left = levels(270.0f);
+    Require(near(left[0], 1.0f) && near(left[1], 0.0f), "a hard-left source is not on the left speaker");
+    const auto right = levels(90.0f);
+    Require(near(right[0], 0.0f) && near(right[1], 1.0f), "a hard-right source is not on the right speaker");
+    const auto inside = levels(15.0f);
+    Require(inside[1] > inside[0] && near(inside[0] * inside[0] + inside[1] * inside[1], 1.0f), "pan between the speakers lost constant power");
+}
+
 int main() {
+    TestPan();
     const auto systemOption = MakeSystemOption();
 
     Ngs2ContextBufferInfo systemBuffer{};
