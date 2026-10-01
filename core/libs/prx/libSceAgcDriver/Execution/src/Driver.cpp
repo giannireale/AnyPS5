@@ -12,6 +12,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
+#include "prx/libc/include/HostThreadLocal.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include "prx/libc/include/CpuTopology.hpp"
 #include "ControlFlow/RequestSerializer.hpp"
@@ -377,10 +378,10 @@ struct DeferredLabels {
     // When the first label of the group was queued (the deadline counts from here).
     std::chrono::steady_clock::time_point since;
 };
-DeferredLabels& deferredLabels() {
-    static thread_local DeferredLabels deferred;
-    return deferred;
-}
+// Host FLS, not thread_local: on MinGW the emutls block of a worker is freed before its C++
+// thread_local destructors run (the object held HeapFree's FEEEFEEE fill at the destructor call).
+struct DeferredLabelsTag {};
+DeferredLabels& deferredLabels() { return HostThreadLocal<DeferredLabels, DeferredLabelsTag>(); }
 // APS5_WORKER_AFFINITY=1 sends the queue workers and the presenter to the performance cores of a
 // hybrid CPU (with libkernel's APS5_JOB_AFFINITY=1 for the title's spinning job workers); pinned
 // by default the video stage measured 0 to -9 % (the presenter's GPU wait doubled), so the default
@@ -4974,7 +4975,8 @@ private:
         // The group leaves the queue before it is recorded: a completion store inside the record
         // (queue 0's reap before the first label) can reach the flush hook, whose queued-label
         // callback (recordQueuedLabelsFromHook) must then find nothing to record a second time.
-        static thread_local std::vector<DeferredLabel> labels;
+        struct DrainLabelsTag {};
+        auto& labels = HostThreadLocal<std::vector<DeferredLabel>, DrainLabelsTag>();
         labels.clear();
         labels.swap(deferred.labels);
         struct Clear {
