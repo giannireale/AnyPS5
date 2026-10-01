@@ -239,7 +239,10 @@ std::uint32_t SampledComponentZero(SpirvEmitterState& state, IrTextureNumericCla
 std::uint32_t TableResult(SpirvValueEmitContext& ctx, const ImageEmitAccess& access, std::uint32_t result) {
     if (access.table.mapped == 0) return result;
     auto& state = ctx.state;
-    return Select(state, TypeU32Vector(state, 4), access.table.mapped, result, ConstantU32CompositeZero(state, 4));
+    // Before SPIR-V 1.4 a vector OpSelect needs a vector condition of the same size.
+    const auto mapped = state.module.AllocateId();
+    state.module.AddFunction(spv::OpCompositeConstruct, TypeBoolVector(state, 4), mapped, access.table.mapped, access.table.mapped, access.table.mapped, access.table.mapped);
+    return Select(state, TypeU32Vector(state, 4), mapped, result, ConstantU32CompositeZero(state, 4));
 }
 
 std::uint32_t ResultVector(SpirvValueEmitContext& ctx, const ImageEmitAccess& access, std::uint32_t value, IrTextureNumericClass numericClass, bool dref, bool gather) {
