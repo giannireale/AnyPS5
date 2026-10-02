@@ -3,12 +3,45 @@
 #include "prx/libkernel/Time/include/Time.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <stdexcept>
+#include <vector>
 
 namespace {
     std::mutex stateMutex;
+
+    // Headless test input: APS5_PAD_SCRIPT="start_ms:mask_hex:hold_ms;..." holds the
+    // PadButton mask from start_ms of process time for hold_ms.
+    struct ScriptedPress { std::uint64_t startUs; std::uint64_t endUs; std::uint32_t buttons; };
+
+    const std::vector<ScriptedPress>& scriptedPresses() {
+        static const std::vector<ScriptedPress> presses = [] {
+            std::vector<ScriptedPress> result;
+            const char* text = std::getenv("APS5_PAD_SCRIPT");
+            while (text != nullptr && *text != '\0') {
+                unsigned long long startMs = 0, holdMs = 0;
+                unsigned int mask = 0;
+                int consumed = 0;
+                if (std::sscanf(text, "%llu:%x:%llu%n", &startMs, &mask, &holdMs, &consumed) != 3)
+                    throw std::runtime_error("Pad: malformed APS5_PAD_SCRIPT entry");
+                result.push_back({startMs * 1000, (startMs + holdMs) * 1000, mask});
+                text += consumed;
+                if (*text == ';') ++text;
+            }
+            return result;
+        }();
+        return presses;
+    }
+
+    std::uint32_t scriptedButtons(const std::uint64_t nowUs) {
+        std::uint32_t buttons = 0;
+        for (const ScriptedPress& press : scriptedPresses())
+            if (nowUs >= press.startUs && nowUs < press.endUs) buttons |= press.buttons;
+        return buttons;
+    }
     PadInputState state;
     PadOutputState output;
     std::uint64_t timestamp = 0;
@@ -102,7 +135,7 @@ PadData Pad::ReadState() {
     if (!initialized) throw std::runtime_error("Pad: read before initialization");
     const std::uint64_t now = sceKernelGetProcessTime();
     PadData data{};
-    data.buttons = state.buttons;
+    data.buttons = state.buttons | scriptedButtons(now);
     data.left_stick_x = state.sticks[0];
     data.left_stick_y = state.sticks[1];
     data.right_stick_x = state.sticks[2];
