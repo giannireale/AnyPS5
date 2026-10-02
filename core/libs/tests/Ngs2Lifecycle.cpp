@@ -1,5 +1,6 @@
 #include "SceTypes.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -172,20 +173,23 @@ int main() {
     const auto renderABefore = renderA;
     const auto renderBBefore = renderB;
     const auto renderCBefore = renderC;
-    Require(sceNgs2SystemRender(system, renderBuffers.data(), renderBuffers.size()) == static_cast<int>(0x804A0001),
-            "a render request was reported successful without a mixer");
-    Require(std::memcmp(renderBuffers.data(), renderBuffersBefore.data(), sizeof(renderBuffers)) == 0,
-            "a rejected render modified descriptors");
-    Require(renderA == renderABefore && renderB == renderBBefore && renderC == renderCBefore,
-            "a rejected render modified buffer data or canaries");
-    Require(sceNgs2SystemGetInfo(system, &info, sizeof(info)) == 0 && info.render_count == 0,
-            "a rejected render changed the render count");
-    Require(sceNgs2SystemRender(system, nullptr, 0) == static_cast<int>(0x804A0001),
-            "an empty render was reported successful without a mixer");
-    Require(sceNgs2SystemRender(system, nullptr, 3) == static_cast<int>(0x804A0001),
-            "a null render descriptor list was rejected differently");
-    Require(sceNgs2SystemRender(system, renderBuffers.data(), UINT32_MAX) == static_cast<int>(0x804A0001),
-            "an unvalidated descriptor count changed the failure result");
+    // No voice holds a waveform: the mix is silence, written exactly over each buffer.
+    Require(sceNgs2SystemRender(system, renderBuffers.data(), renderBuffers.size()) == 0, "a render of a silent system failed");
+    Require(std::memcmp(renderBuffers.data(), renderBuffersBefore.data(), sizeof(renderBuffers)) == 0, "a render modified its descriptors");
+    const auto silentWithin = [](const auto& bytes, std::size_t size) {
+        if (bytes.front() != 0xA5 || bytes.back() != 0xA5) return false;
+        return std::all_of(bytes.begin() + 1, bytes.begin() + 1 + size, [](std::uint8_t value) { return value == 0; });
+    };
+    Require(silentWithin(renderA, 1024) && silentWithin(renderB, 512) && silentWithin(renderC, 1024), "a render did not write silence exactly over its buffers");
+    Require(sceNgs2SystemGetInfo(system, &info, sizeof(info)) == 0 && info.render_count == 1, "a render did not advance the render count");
+    renderA = renderABefore;
+    Require(sceNgs2SystemRender(system, nullptr, 0) < 0, "an empty render was accepted");
+    Require(sceNgs2SystemRender(system, nullptr, 3) < 0, "a null render descriptor list was accepted");
+    Require(sceNgs2SystemRender(system, renderBuffers.data(), UINT32_MAX) < 0, "an oversized descriptor count was accepted");
+    auto badBuffers = renderBuffers;
+    badBuffers[1].buffer = nullptr;
+    Require(sceNgs2SystemRender(system, badBuffers.data(), badBuffers.size()) < 0 && renderA == renderABefore, "a render with a null buffer wrote anything");
+    Require(sceNgs2SystemGetInfo(system, &info, sizeof(info)) == 0 && info.render_count == 1, "a rejected render changed the render count");
     Require(sceNgs2SystemRender(0, renderBuffers.data(), renderBuffers.size()) == static_cast<int>(0x804A0200),
             "an invalid system render handle was accepted");
 

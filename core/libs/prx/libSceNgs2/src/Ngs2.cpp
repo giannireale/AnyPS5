@@ -391,9 +391,21 @@ int APS5_VABI sceNgs2SystemRender(Ngs2Handle system_handle, const Ngs2RenderBuff
             std::fprintf(stderr, "[ngs2] render buffer %u: %p size 0x%zx type 0x%x channels %u\n", index, buffer_info[index].buffer, buffer_info[index].buffer_size, buffer_info[index].waveform_type, buffer_info[index].num_channels);
     }
     std::lock_guard lock(g_lock);
-    if (findSystem(system_handle) == nullptr) return SCE_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
-    // The mixer and render-buffer formats are not implemented.
-    return SCE_NGS2_ERROR_FAIL;
+    System* system = findSystem(system_handle);
+    if (system == nullptr) return SCE_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
+    constexpr std::uint32_t MaxRenderBuffers = 16;
+    if (buffer_info == nullptr || num_buffer_info == 0 || num_buffer_info > MaxRenderBuffers) return SCE_NGS2_ERROR_INVALID_BUFFER_ADDRESS;
+    for (std::uint32_t index = 0; index < num_buffer_info; ++index) {
+        if (buffer_info[index].buffer == nullptr) return SCE_NGS2_ERROR_INVALID_BUFFER_ADDRESS;
+        if (buffer_info[index].buffer_size == 0) return SCE_NGS2_ERROR_INVALID_BUFFER_SIZE;
+    }
+    // The mix of this system's voices. No voice holds a waveform (VoiceControl applies no
+    // parameter yet), so every output is silence, all-zero bytes in both S16 and float formats.
+    // Before this the call failed and the title sent its uninitialized render buffers to
+    // AudioOut: a constant full-scale buzz. Voice playback replaces the fill when it exists.
+    for (std::uint32_t index = 0; index < num_buffer_info; ++index) std::memset(buffer_info[index].buffer, 0, buffer_info[index].buffer_size);
+    ++system->renderCount;
+    return 0;
 }
 
 int APS5_VABI sceNgs2RackQueryBufferSize(std::uint32_t rack_id, const Ngs2RackOption* option, Ngs2ContextBufferInfo* buffer_info) {
