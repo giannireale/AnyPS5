@@ -282,7 +282,7 @@ std::uint32_t StateFlags(const VoiceMix& voice) {
     return voice.playing ? StateInUse | StatePlaying : 0;
 }
 
-void Render(const std::vector<VoiceMix*>& voices, const std::function<VoiceMix*(std::uint64_t)>& resolve,
+void Render(const std::vector<VoiceMix*>& allVoices, const std::function<VoiceMix*(std::uint64_t)>& resolve,
             const Ngs2RenderBufferInfo* buffers, const std::uint32_t numBuffers, const std::uint32_t systemRate) {
     std::uint32_t grain = std::numeric_limits<std::uint32_t>::max();
     for (std::uint32_t index = 0; index < numBuffers; ++index) {
@@ -291,6 +291,11 @@ void Render(const std::vector<VoiceMix*>& voices, const std::function<VoiceMix*(
         grain = std::min<std::uint32_t>(grain, static_cast<std::uint32_t>(buffer.buffer_size / (buffer.num_channels * sizeof(std::int16_t))));
     }
     if (grain == std::numeric_limits<std::uint32_t>::max() || grain == 0) return;
+    // An idle voice produces nothing and drops its input, so only playing voices are mixed.
+    // The title owns 256 sampler voices with a handful sounding at once.
+    std::vector<VoiceMix*> voices;
+    for (VoiceMix* voice : allVoices)
+        if (voice->playing) voices.push_back(voice);
     for (VoiceMix* voice : voices) {
         voice->input.assign(static_cast<std::size_t>(grain) * 2, 0.0f);
         voice->output.assign(static_cast<std::size_t>(grain) * 2, 0.0f);
@@ -339,7 +344,7 @@ void Render(const std::vector<VoiceMix*>& voices, const std::function<VoiceMix*(
         if (voice->rackId == RackMastering) writeMastering(*voice, buffers, numBuffers, grain);
         for (const Patch& patch : voice->patches) {
             VoiceMix* destination = resolve(patch.destHandle);
-            if (destination == nullptr || destination == voice) continue;
+            if (destination == nullptr || destination == voice || !destination->playing) continue;
             for (std::size_t index = 0; index < voice->output.size(); ++index) destination->input[index] += voice->output[index];
         }
     }

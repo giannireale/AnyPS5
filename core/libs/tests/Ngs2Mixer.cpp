@@ -204,6 +204,19 @@ int main() {
     Require(early > 0.0, "the reverb produced no tail");
     Require(late < early * 0.05, "the reverb tail does not decay");
 
+    // A sampler rack created without an option holds 256 voices (one per sound, as the title expects).
+    {
+        Ngs2ContextBufferInfo info{};
+        Require(sceNgs2RackQueryBufferSize(0x1000, nullptr, &info) == 0, "sampler buffer size query failed");
+        rackStorage.emplace_back(info.host_buffer_size);
+        info.host_buffer = rackStorage.back().data();
+        Ngs2Handle rack = 0;
+        Ngs2Handle voice = 0;
+        Require(sceNgs2RackCreate(system, 0x1000, nullptr, &info, &rack) == 0, "default sampler rack failed");
+        Require(sceNgs2RackGetVoiceHandle(rack, 255, &voice) == 0 && voice != 0, "the default sampler rack lacks voice 255");
+        Require(sceNgs2RackGetVoiceHandle(rack, 256, &voice) != 0, "the default sampler rack has more than 256 voices");
+    }
+
     Require(sceNgs2SystemDestroy(system, nullptr) == 0, "system destroy failed");
     if (failures != 0) return EXIT_FAILURE;
     std::puts("Ngs2Mixer: ok");

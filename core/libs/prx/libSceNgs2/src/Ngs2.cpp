@@ -187,8 +187,15 @@ constexpr std::size_t Ps5RackOptionFlagsOffset = 72;
 constexpr std::size_t Ps5RackOptionMaxGrainOffset = 76;
 constexpr std::size_t Ps5RackOptionMaxVoicesOffset = 80;
 
-int normalizeRackOption(const Ngs2RackOption* option, Ngs2RackOption* normalized, std::uint32_t* outVoices) {
-    std::uint32_t voices = 1;
+// Voices of a rack created without an option. ANIMAL WELL creates its sampler rack with a null
+// option and then takes a fresh sampler voice per sound (eboot 0x17640: RackGetVoiceHandle with
+// an incrementing index into a 256-entry handle table), so the sampler default holds 256.
+std::uint32_t defaultRackVoices(const std::uint32_t rackId) {
+    return rackId == 0x1000 ? 256 : 1;
+}
+
+int normalizeRackOption(const std::uint32_t rackId, const Ngs2RackOption* option, Ngs2RackOption* normalized, std::uint32_t* outVoices) {
+    std::uint32_t voices = defaultRackVoices(rackId);
     Ngs2RackOption value{};
     if (option != nullptr) {
         std::size_t optionSize = 0;
@@ -263,9 +270,20 @@ int createSystem(const Ngs2SystemOption* option, const Ngs2ContextBufferInfo& bu
 int createRack(System* system, const std::uint32_t rackId, const Ngs2RackOption* option,
                const Ngs2ContextBufferInfo& bufferInfo, const bool ownsBuffer,
                const Ngs2BufferAllocator& allocator, Ngs2Handle* handle) {
+    if (TraceNgs2() && option != nullptr) {
+        std::size_t optionSize = 0;
+        std::memcpy(&optionSize, option, sizeof(optionSize));
+        std::fprintf(stderr, "[ngs2] rack option id 0x%x size %zu:", rackId, optionSize);
+        for (std::size_t word = 0; word < optionSize / 4 && word < 64; ++word) {
+            std::uint32_t value = 0;
+            std::memcpy(&value, reinterpret_cast<const std::uint8_t*>(option) + word * 4, sizeof(value));
+            std::fprintf(stderr, " %08x", value);
+        }
+        std::fputc('\n', stderr);
+    }
     std::uint32_t voices = 0;
     Ngs2RackOption normalizedOption{};
-    const int optionResult = normalizeRackOption(option, &normalizedOption, &voices);
+    const int optionResult = normalizeRackOption(rackId, option, &normalizedOption, &voices);
     if (optionResult != 0) return optionResult;
     if (bufferInfo.host_buffer == nullptr) return SCE_NGS2_ERROR_INVALID_BUFFER_ADDRESS;
     if (bufferInfo.host_buffer_size < rackBufferSize(voices)) return SCE_NGS2_ERROR_INVALID_BUFFER_SIZE;
@@ -419,10 +437,9 @@ int APS5_VABI sceNgs2SystemRender(Ngs2Handle system_handle, const Ngs2RenderBuff
 }
 
 int APS5_VABI sceNgs2RackQueryBufferSize(std::uint32_t rack_id, const Ngs2RackOption* option, Ngs2ContextBufferInfo* buffer_info) {
-    (void)rack_id;
     if (buffer_info == nullptr) return SCE_NGS2_ERROR_INVALID_OUT_ADDRESS;
     std::uint32_t voices = 0;
-    const int optionResult = normalizeRackOption(option, nullptr, &voices);
+    const int optionResult = normalizeRackOption(rack_id, option, nullptr, &voices);
     if (optionResult != 0) return optionResult;
     buffer_info->host_buffer = nullptr;
     buffer_info->host_buffer_size = rackBufferSize(voices);
@@ -443,7 +460,7 @@ int APS5_VABI sceNgs2RackCreateWithAllocator(Ngs2Handle system_handle, std::uint
                                              const Ngs2BufferAllocator* allocator, Ngs2Handle* handle) {
     if (handle == nullptr) return SCE_NGS2_ERROR_INVALID_OUT_ADDRESS;
     std::uint32_t voices = 0;
-    const int optionResult = normalizeRackOption(option, nullptr, &voices);
+    const int optionResult = normalizeRackOption(rack_id, option, nullptr, &voices);
     if (optionResult != 0) return optionResult;
     Ngs2ContextBufferInfo info{};
     const int bufferResult = acquireBuffer(allocator, rackBufferSize(voices), &info);
