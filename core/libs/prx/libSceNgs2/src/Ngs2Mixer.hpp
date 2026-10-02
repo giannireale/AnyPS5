@@ -43,11 +43,26 @@ struct VoiceMix {
     std::uint32_t waveformType = 0;
     std::uint32_t channels = 1;
     std::uint32_t sampleRate = 48000;
+    float pitch = 1.0f;
     const std::uint8_t* data = nullptr;
     std::vector<WaveformBlock> blocks;
     std::size_t blockIndex = 0;
     double position = 0.0;
     std::uint32_t repeatsDone = 0;
+    // Reverb: I3DL2 parameters (param 0x20010001) driving a Schroeder network.
+    bool reverbParamsSet = false;
+    std::int32_t reverbLevelMb = 0;
+    float reverbDecayTime = 1.0f;
+    float reverbDecayHFRatio = 1.0f;
+    bool reverbConfigured = false;
+    float reverbWet = 0.0f;
+    float reverbFeedback[4] = {};
+    float reverbDamp = 0.0f;
+    std::vector<float> combs[2][4];
+    std::size_t combPos[2][4] = {};
+    float combFilter[2][4] = {};
+    std::vector<float> allpasses[2][2];
+    std::size_t allpassPos[2][2] = {};
     // Mastering destination.
     std::int32_t renderBufferIndex = -1;
     // Per-grain interleaved stereo scratch.

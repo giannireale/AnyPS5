@@ -1,6 +1,7 @@
 #include "Ngs2Mixer.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 
@@ -18,9 +19,93 @@ constexpr std::uint32_t MaxRenderChannels = 8;
 constexpr std::uint32_t ParamPatch = 0x00000005;
 constexpr std::uint32_t ParamSamplerSetup = 0x10000000;
 constexpr std::uint32_t ParamSamplerBlocks = 0x10000001;
+// One float sent with every play (1.0 at the intro): the playback rate ratio.
+constexpr std::uint32_t ParamSamplerPitch = 0x10000005;
 constexpr std::uint32_t ParamSubmixerSetup = 0x20000000;
 constexpr std::uint32_t ParamMasteringSetup = 0x30000000;
 constexpr std::uint32_t ParamMasteringOutput = 0x30000005;
+constexpr std::uint32_t ParamReverbSetup = 0x20010000;
+constexpr std::uint32_t ParamReverbI3dl2 = 0x20010001;
+
+// Freeverb tunings at 44.1 kHz, scaled to the system rate; the right channel is offset.
+constexpr std::uint32_t CombTuning[4] = {1116, 1188, 1277, 1356};
+constexpr std::uint32_t AllpassTuning[2] = {556, 441};
+constexpr std::uint32_t StereoSpread = 23;
+constexpr float AllpassFeedback = 0.5f;
+
+// I3DL2 block as the title sends it (eboot 0x17xxx; 88-byte payload): two leading floats,
+// then Room, RoomHF, RoomRolloff, DecayTime, DecayHFRatio, Reflections, ReflectionsDelay,
+// Reverb, ReverbDelay, Diffusion, Density, HFReference.
+struct I3dl2 {
+    float leading[2];
+    std::int32_t room;
+    std::int32_t roomHF;
+    float roomRolloff;
+    float decayTime;
+    float decayHFRatio;
+    std::int32_t reflections;
+    float reflectionsDelay;
+    std::int32_t reverb;
+    float reverbDelay;
+    float diffusion;
+    float density;
+    float hfReference;
+};
+
+void configureReverb(VoiceMix& voice, const std::uint32_t systemRate) {
+    const float rate = static_cast<float>(systemRate);
+    const float decay = std::clamp(voice.reverbDecayTime, 0.1f, 20.0f);
+    // Millibels to linear: wet level combines the room and late reverb attenuation.
+    voice.reverbWet = std::pow(10.0f, static_cast<float>(std::clamp(voice.reverbLevelMb, -10000, 0)) / 2000.0f);
+    // A decay HF ratio below 1 makes highs die faster: more damping in the comb loops.
+    voice.reverbDamp = std::clamp(0.2f + (1.0f - voice.reverbDecayHFRatio) * 0.6f, 0.0f, 0.8f);
+    for (int channel = 0; channel < 2; ++channel) {
+        for (int comb = 0; comb < 4; ++comb) {
+            const auto length = static_cast<std::size_t>((CombTuning[comb] + channel * StereoSpread) * rate / 44100.0f);
+            voice.combs[channel][comb].assign(std::max<std::size_t>(length, 1), 0.0f);
+            voice.combPos[channel][comb] = 0;
+            voice.combFilter[channel][comb] = 0.0f;
+            // RT60: the loop gain that loses 60 dB over the decay time.
+            if (channel == 0) voice.reverbFeedback[comb] = std::pow(10.0f, -3.0f * static_cast<float>(length) / (decay * rate));
+        }
+        for (int stage = 0; stage < 2; ++stage) {
+            const auto length = static_cast<std::size_t>((AllpassTuning[stage] + channel * StereoSpread) * rate / 44100.0f);
+            voice.allpasses[channel][stage].assign(std::max<std::size_t>(length, 1), 0.0f);
+            voice.allpassPos[channel][stage] = 0;
+        }
+    }
+    voice.reverbConfigured = true;
+}
+
+void renderReverb(VoiceMix& voice) {
+    if (!voice.playing || !voice.reverbConfigured) return;
+    const std::size_t frames = voice.input.size() / 2;
+    for (std::size_t frame = 0; frame < frames; ++frame) {
+        const float in = (voice.input[frame * 2] + voice.input[frame * 2 + 1]) * 0.5f;
+        for (int channel = 0; channel < 2; ++channel) {
+            float sum = 0.0f;
+            for (int comb = 0; comb < 4; ++comb) {
+                std::vector<float>& line = voice.combs[channel][comb];
+                std::size_t& pos = voice.combPos[channel][comb];
+                const float delayed = line[pos];
+                float& filter = voice.combFilter[channel][comb];
+                filter = delayed * (1.0f - voice.reverbDamp) + filter * voice.reverbDamp;
+                line[pos] = in + filter * voice.reverbFeedback[comb];
+                pos = (pos + 1) % line.size();
+                sum += delayed;
+            }
+            for (int stage = 0; stage < 2; ++stage) {
+                std::vector<float>& line = voice.allpasses[channel][stage];
+                std::size_t& pos = voice.allpassPos[channel][stage];
+                const float delayed = line[pos];
+                line[pos] = sum + delayed * AllpassFeedback;
+                pos = (pos + 1) % line.size();
+                sum = delayed - sum;
+            }
+            voice.output[frame * 2 + channel] = sum * 0.25f * voice.reverbWet * voice.volume;
+        }
+    }
+}
 
 // Command records are 32 bytes: word 0 low byte is the type. The title's play and stop
 // helpers (eboot 0x177e0 / 0x178c0) send type 2 with event 1 and 2; volume is type 6.
@@ -73,7 +158,7 @@ void renderSampler(VoiceMix& voice, const std::uint32_t grain, const std::uint32
         voice.playing = false;
         return;
     }
-    const double step = static_cast<double>(voice.sampleRate) / systemRate;
+    const double step = static_cast<double>(voice.sampleRate) * voice.pitch / systemRate;
     for (std::uint32_t index = 0; index < grain; ++index) {
         while (voice.playing && voice.position >= voice.blocks[voice.blockIndex].numSamples) advanceBlock(voice);
         if (!voice.playing) return;
@@ -134,6 +219,27 @@ bool ApplyParam(VoiceMix& voice, const std::uint32_t id, const std::uint8_t* pay
         rewind(voice);
         return true;
     }
+    case ParamReverbI3dl2: {
+        if (size < sizeof(I3dl2)) return false;
+        const I3dl2 params = load<I3dl2>(payload);
+        if (!(params.decayTime > 0.0f) || !(params.decayHFRatio > 0.0f)) return false;
+        voice.reverbLevelMb = params.room + params.reverb;
+        voice.reverbDecayTime = params.decayTime;
+        voice.reverbDecayHFRatio = params.decayHFRatio;
+        voice.reverbParamsSet = true;
+        voice.reverbConfigured = false;
+        return true;
+    }
+    case ParamReverbSetup:
+        // {input channels, output channels}: the network is stereo in, stereo out.
+        return size >= 2 * sizeof(std::uint32_t) && load<std::uint32_t>(payload) == 2 && load<std::uint32_t>(payload + 4) == 2;
+    case ParamSamplerPitch: {
+        if (size < sizeof(float)) return false;
+        const float pitch = load<float>(payload);
+        if (!(pitch > 0.0f && pitch <= 16.0f)) return false;
+        voice.pitch = pitch;
+        return true;
+    }
     case ParamSubmixerSetup:
     case ParamMasteringSetup:
         // Channel count of the bus; the mix runs in stereo and both titles' buses are stereo.
@@ -189,7 +295,30 @@ void Render(const std::vector<VoiceMix*>& voices, const std::function<VoiceMix*(
         voice->input.assign(static_cast<std::size_t>(grain) * 2, 0.0f);
         voice->output.assign(static_cast<std::size_t>(grain) * 2, 0.0f);
     }
-    for (VoiceMix* voice : voices) {
+    // Kahn order over the patch graph so every voice runs after all of its sources, whatever
+    // the rack creation order; voices left in a cycle keep their given order at the end.
+    std::vector<std::size_t> pending(voices.size(), 0);
+    std::vector<std::vector<std::size_t>> edges(voices.size());
+    for (std::size_t source = 0; source < voices.size(); ++source)
+        for (const Patch& patch : voices[source]->patches) {
+            const auto found = std::find(voices.begin(), voices.end(), resolve(patch.destHandle));
+            if (found == voices.end() || *found == voices[source]) continue;
+            const auto target = static_cast<std::size_t>(found - voices.begin());
+            edges[source].push_back(target);
+            ++pending[target];
+        }
+    std::vector<VoiceMix*> order;
+    std::vector<bool> placed(voices.size(), false);
+    for (std::size_t scan = 0; scan < voices.size(); ++scan)
+        if (pending[scan] == 0) order.push_back(voices[scan]), placed[scan] = true;
+    for (std::size_t next = 0; next < order.size(); ++next) {
+        const auto index = static_cast<std::size_t>(std::find(voices.begin(), voices.end(), order[next]) - voices.begin());
+        for (const std::size_t target : edges[index])
+            if (--pending[target] == 0 && !placed[target]) order.push_back(voices[target]), placed[target] = true;
+    }
+    for (std::size_t index = 0; index < voices.size(); ++index)
+        if (!placed[index]) order.push_back(voices[index]);
+    for (VoiceMix* voice : order) {
         switch (voice->rackId) {
         case RackSampler:
             renderSampler(*voice, grain, systemRate);
@@ -199,8 +328,12 @@ void Render(const std::vector<VoiceMix*>& voices, const std::function<VoiceMix*(
             if (voice->playing)
                 for (std::size_t index = 0; index < voice->output.size(); ++index) voice->output[index] = voice->input[index] * voice->volume;
             break;
+        case RackReverb:
+            if (voice->reverbParamsSet && !voice->reverbConfigured) configureReverb(*voice, systemRate);
+            renderReverb(*voice);
+            break;
         default:
-            // Reverb and unknown racks are not modelled: they contribute nothing rather than a guessed effect.
+            // Unknown racks contribute nothing rather than a guessed effect.
             break;
         }
         if (voice->rackId == RackMastering) writeMastering(*voice, buffers, numBuffers, grain);

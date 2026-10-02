@@ -125,7 +125,9 @@ int main() {
     Require(Control(mastering, MakeParam(0x30000000, std::array<std::uint32_t, 2>{2, 0})) == 0, "mastering setup failed");
     Require(Control(mastering, MakeParam(0x30000005, std::array<std::uint32_t, 2>{0, 0})) == 0, "mastering output failed");
     Require(Control(sampler, MakeParam(0x20010001, std::array<std::uint32_t, 2>{0, 0})) < 0, "a reverb parameter applied to a sampler");
-    Require(Control(sampler, MakeParam(0x10000005, std::array<std::uint32_t, 2>{0, 0})) < 0, "an unmodelled sampler parameter reported success");
+    Require(Control(sampler, MakeParam(0x10000005, std::array<std::uint32_t, 2>{0, 0})) < 0, "a zero pitch was accepted");
+    Require(Control(sampler, MakeParam(0x10000005, std::array<std::uint32_t, 2>{0x3f800000, 0})) == 0, "the intro's unit pitch was rejected");
+    Require(Control(sampler, MakeParam(0x10000009, std::array<std::uint32_t, 2>{0, 0})) < 0, "an unmodelled sampler parameter reported success");
     for (const Ngs2Handle voice : {mastering, submixer, sampler}) Require(Command(voice, 2, 1) == 0, "play event failed");
     Require(Volume(submixer, 0.5f) == 0, "volume command failed");
     Require(Volume(submixer, -1.0f) < 0, "a negative volume was accepted");
@@ -171,6 +173,36 @@ int main() {
     bool stopped = true;
     for (const std::int16_t sample : stereo) stopped &= sample == 0;
     Require(stopped, "a stopped sampler still produces sound");
+
+    // Reverb send: an impulse through ANIMAL WELL's own I3DL2 block (traced at boot) yields a
+    // tail that starts after the shortest comb delay and decays.
+    const Ngs2Handle reverb = MakeVoice(system, 0x2001, rackStorage);
+    Require(Control(sampler, MakeParam(5, PatchPayload{0, 0, reverb})) == 0, "sampler to reverb patch failed");
+    Require(Control(reverb, MakeParam(5, PatchPayload{0, 0, mastering})) == 0, "reverb patch failed");
+    Require(Control(reverb, MakeParam(0x20010000, std::array<std::uint32_t, 4>{2, 2, 0, 0})) == 0, "reverb setup failed");
+    const std::array<std::uint32_t, 22> i3dl2{0x3f19999a, 0x3ecccccd, 0xfffffc18, 0, 0, 0x403a3d71, 0x3fa66666, 0xfffffda6, 0x3c75c28f,
+                                              0xfffffed2, 0x3cb43958, 0x42c80000, 0x42c80000, 0x459c4000, 8};
+    Require(Control(reverb, MakeParam(0x20010001, i3dl2)) == 0, "the title's I3DL2 block was rejected");
+    Require(Command(reverb, 2, 1) == 0, "reverb play failed");
+    std::vector<std::int16_t> impulse(Frames, 0);
+    impulse[0] = 32767;
+    const Block once{0, Frames * sizeof(std::int16_t), 0, 0, Frames, 0, 0};
+    Require(Control(sampler, MakeParam(0x10000001, BlocksPayload{reinterpret_cast<std::uint64_t>(impulse.data()), 4, 1, reinterpret_cast<std::uint64_t>(&once)})) == 0, "impulse blocks failed");
+    Require(Command(sampler, 2, 1) == 0, "impulse play failed");
+    std::vector<double> energy;
+    for (int grain = 0; grain < 200; ++grain) {
+        Require(sceNgs2SystemRender(system, buffers.data(), 2) == 0, "reverb render failed");
+        double sum = 0.0;
+        for (const std::int16_t sample : stereo) sum += static_cast<double>(sample) * sample;
+        energy.push_back(sum);
+    }
+    Require(energy[2] == 0.0, "the reverb answered before its shortest comb delay");
+    double early = 0.0;
+    double late = 0.0;
+    for (int grain = 5; grain < 40; ++grain) early += energy[grain];
+    for (int grain = 160; grain < 195; ++grain) late += energy[grain];
+    Require(early > 0.0, "the reverb produced no tail");
+    Require(late < early * 0.05, "the reverb tail does not decay");
 
     Require(sceNgs2SystemDestroy(system, nullptr) == 0, "system destroy failed");
     if (failures != 0) return EXIT_FAILURE;
