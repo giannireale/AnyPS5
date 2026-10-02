@@ -174,6 +174,41 @@ int main() {
     for (const std::int16_t sample : stereo) stopped &= sample == 0;
     Require(stopped, "a stopped sampler still produces sound");
 
+    // A 24 kHz source at 48 kHz lands halfway between frames: the ramp interpolates linearly.
+    Require(Control(sampler, MakeParam(0x10000000, std::array<std::uint32_t, 8>{0x12, 1, 24000})) == 0, "half-rate setup failed");
+    Require(Control(sampler, MakeParam(0x10000001, BlocksPayload{reinterpret_cast<std::uint64_t>(pcm.data()), 4, 1, reinterpret_cast<std::uint64_t>(&block)})) == 0, "half-rate blocks failed");
+    Require(Command(sampler, 2, 1) == 0, "half-rate play failed");
+    Require(sceNgs2SystemRender(system, buffers.data(), 2) == 0, "half-rate render failed");
+    bool interpolated = true;
+    for (std::uint32_t frame = 0; frame + 1 < Grain; frame += 2) {
+        const auto midpoint = static_cast<std::int16_t>((pcm[frame / 2] + pcm[frame / 2 + 1]) / 2);
+        interpolated &= std::abs(stereo[frame * 2] - Expected(pcm[frame / 2], 0.5f)) <= 1;
+        interpolated &= std::abs(stereo[(frame + 1) * 2] - Expected(midpoint, 0.5f)) <= 1;
+    }
+    Require(interpolated, "a half-rate source is not linearly interpolated");
+    Require(Command(sampler, 2, 2) == 0, "half-rate stop failed");
+
+    // A pitched step crosses a short block with overshoot, then skips one frame in the next.
+    Require(Control(sampler, MakeParam(0x10000000, std::array<std::uint32_t, 8>{0x12, 1, 48000})) == 0, "pitched setup failed");
+    Require(Control(sampler, MakeParam(0x10000005, std::array<float, 2>{1.5f, 0.0f})) == 0, "pitched rate failed");
+    const std::array<Block, 2> joined{{
+        {0, 4 * sizeof(std::int16_t), 0, 0, 4, 0, 0},
+        {4 * sizeof(std::int16_t), (Frames - 4) * sizeof(std::int16_t), 0, 1, Frames - 4, 0, 0},
+    }};
+    Require(Control(sampler, MakeParam(0x10000001, BlocksPayload{reinterpret_cast<std::uint64_t>(pcm.data()), 4, 2, reinterpret_cast<std::uint64_t>(joined.data())})) == 0, "joined blocks failed");
+    Require(Command(sampler, 2, 1) == 0, "joined play failed");
+    Require(sceNgs2SystemRender(system, buffers.data(), 2) == 0, "joined render failed");
+    bool phasePreserved = true;
+    for (std::uint32_t frame = 3; frame < 150; ++frame) {
+        const double position = 5.5 + (frame - 3) * 1.5;
+        const auto sourceFrame = static_cast<std::uint32_t>(position);
+        const auto sample = static_cast<std::int16_t>(pcm[sourceFrame] + (pcm[sourceFrame + 1] - pcm[sourceFrame]) * (position - sourceFrame));
+        phasePreserved &= std::abs(stereo[frame * 2] - Expected(sample, 0.5f)) <= 1;
+    }
+    Require(phasePreserved, "a pitched block join lost its overshoot or fractional phase");
+    Require(Command(sampler, 2, 2) == 0, "joined stop failed");
+    Require(Control(sampler, MakeParam(0x10000005, std::array<float, 2>{1.0f, 0.0f})) == 0, "unit pitch restore failed");
+
     // Reverb send: an impulse through ANIMAL WELL's own I3DL2 block (traced at boot) yields a
     // tail that starts after the shortest comb delay and decays.
     const Ngs2Handle reverb = MakeVoice(system, 0x2001, rackStorage);

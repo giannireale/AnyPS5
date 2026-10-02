@@ -136,13 +136,15 @@ void advanceBlock(VoiceMix& voice) {
         voice.position -= block.numSamples - block.numSkipSamples;
         return;
     }
+    const double overshoot = std::max(0.0, voice.position - block.numSamples);
     ++voice.blockIndex;
     voice.repeatsDone = 0;
     if (voice.blockIndex >= voice.blocks.size()) {
         voice.playing = false;
         return;
     }
-    voice.position = voice.blocks[voice.blockIndex].numSkipSamples;
+    // Keep the fractional phase so pitched playback does not jitter at block joins.
+    voice.position = voice.blocks[voice.blockIndex].numSkipSamples + overshoot;
 }
 
 float sampleAt(const VoiceMix& voice, const WaveformBlock& block, const std::uint32_t frame, const std::uint32_t channel) {
@@ -163,9 +165,17 @@ void renderSampler(VoiceMix& voice, const std::uint32_t grain, const std::uint32
         while (voice.playing && voice.position >= voice.blocks[voice.blockIndex].numSamples) advanceBlock(voice);
         if (!voice.playing) return;
         const WaveformBlock& block = voice.blocks[voice.blockIndex];
+        // Linear interpolation between the two neighbouring frames: pitched and non-48 kHz
+        // sources stepped by nearest frame aliased audibly. The last frame holds its value.
         const auto frame = static_cast<std::uint32_t>(voice.position);
-        const float left = sampleAt(voice, block, frame, 0);
-        const float right = voice.channels == 2 ? sampleAt(voice, block, frame, 1) : left;
+        const auto next = frame + 1 < block.numSamples ? frame + 1 : frame;
+        const auto fraction = static_cast<float>(voice.position - frame);
+        const auto lerp = [&](const std::uint32_t channel) {
+            const float a = sampleAt(voice, block, frame, channel);
+            return a + (sampleAt(voice, block, next, channel) - a) * fraction;
+        };
+        const float left = lerp(0);
+        const float right = voice.channels == 2 ? lerp(1) : left;
         voice.output[index * 2] = left * voice.volume;
         voice.output[index * 2 + 1] = right * voice.volume;
         voice.position += step;
@@ -184,7 +194,7 @@ void writeMastering(const VoiceMix& voice, const Ngs2RenderBufferInfo* buffers, 
             const float value = buffer.num_channels == 1 ? (left + right) * 0.5f : channel == 0 ? left : channel == 1 ? right : 0.0f;
             std::int16_t& target = samples[index * buffer.num_channels + channel];
             const float mixed = static_cast<float>(target) + value * 32767.0f;
-            target = static_cast<std::int16_t>(std::clamp(mixed, -32768.0f, 32767.0f));
+            target = static_cast<std::int16_t>(std::lround(std::clamp(mixed, -32768.0f, 32767.0f)));
         }
     }
 }
