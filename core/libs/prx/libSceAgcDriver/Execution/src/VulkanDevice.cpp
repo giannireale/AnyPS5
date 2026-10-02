@@ -56,6 +56,21 @@ void require(bool condition, const char* reason) {
     if (!condition) throw std::runtime_error(std::string("Vulkan presentation: ") + reason);
 }
 
+VkPresentModeKHR ChoosePresentMode(VkPhysicalDevice physical, VkSurfaceKHR surface, const PFN_vkGetInstanceProcAddr instanceProc, VkInstance instance) {
+    // FIFO through the Windows compositor paced ANIMAL WELL at 11-17 fps (acquire blocked ~86 ms per
+    // frame with 2 ms of GPU work). The guest vblank emulation already paces flips at the requested
+    // rate, so prefer MAILBOX (tear-free), then IMMEDIATE (60 fps measured, may tear), then FIFO.
+    auto getPresentModes = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfacePresentModesKHR>(instanceProc(instance, "vkGetPhysicalDeviceSurfacePresentModesKHR"));
+    std::uint32_t modeCount = 0;
+    check(getPresentModes(physical, surface, &modeCount, nullptr), "vkGetPhysicalDeviceSurfacePresentModesKHR");
+    std::vector<VkPresentModeKHR> modes(modeCount);
+    check(getPresentModes(physical, surface, &modeCount, modes.data()), "vkGetPhysicalDeviceSurfacePresentModesKHR");
+    for (const auto preferred : {VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR}) {
+        if (std::find(modes.begin(), modes.end(), preferred) != modes.end()) return preferred;
+    }
+    return VK_PRESENT_MODE_FIFO_KHR;
+}
+
 // The ShaderResources content cache dispatches share with recorded draws: Graphics::ResourceCache,
 // one process-wide instance (see SharedResourceCache) that the State references so this file keeps
 // its Find/Insert/Remove/Clear calls; the device clears it at teardown before its descriptor caches
@@ -161,6 +176,7 @@ struct VulkanDevice::State {
     void* window = nullptr;
     VkSurfaceKHR surface = VK_NULL_HANDLE;
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+    VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR;
     VkExtent2D extent{};
     std::vector<VkImage> images;
     VkFence acquireFence = VK_NULL_HANDLE;
@@ -915,7 +931,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         swapchain.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         swapchain.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
         swapchain.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-        swapchain.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+        swapchain.presentMode = state->presentMode = ChoosePresentMode(selected, state->surface, state->instanceProc, state->instance);
         swapchain.clipped = VK_FALSE;
         check(state->DeviceFunction<PFN_vkCreateSwapchainKHR>("vkCreateSwapchainKHR")(state->device, &swapchain, nullptr, &state->swapchain), "vkCreateSwapchainKHR");
         std::uint32_t imageCount = 0;
@@ -923,7 +939,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         check(getImages(state->device, state->swapchain, &imageCount, nullptr), "vkGetSwapchainImagesKHR");
         state->images.resize(imageCount);
         check(getImages(state->device, state->swapchain, &imageCount, state->images.data()), "vkGetSwapchainImagesKHR");
-        APS5_LOG_OUT("Swapchain created swapchain=%p extent=%ux%u images=%u", reinterpret_cast<void*>(state->swapchain), state->extent.width, state->extent.height, imageCount);
+        APS5_LOG_OUT("Swapchain created swapchain=%p extent=%ux%u images=%u presentMode=%d", reinterpret_cast<void*>(state->swapchain), state->extent.width, state->extent.height, imageCount, state->presentMode);
         VkFenceCreateInfo fence{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         const auto createFence = state->DeviceFunction<PFN_vkCreateFence>("vkCreateFence");
         check(createFence(state->device, &fence, nullptr, &state->acquireFence), "vkCreateFence");
@@ -1547,7 +1563,7 @@ void VulkanDevice::Resize(std::uint32_t width, std::uint32_t height) {
     create.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     create.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
     create.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    create.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    create.presentMode = state->presentMode;
     create.oldSwapchain = state->swapchain;
     state->retiredSwapchains.reserve(state->retiredSwapchains.size() + 1);
     VkSwapchainKHR replacement = VK_NULL_HANDLE;
