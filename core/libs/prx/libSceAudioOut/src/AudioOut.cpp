@@ -89,6 +89,9 @@ struct Port {
     std::uint64_t lastOutputTime = 0;
     SDL_AudioDeviceID device = 0;
     SDL_AudioSpec spec = {};
+    bool deviceStarted = false;
+    std::uint64_t tracePushes = 0;
+    std::uint64_t traceUnderruns = 0;
 };
 
 static std::mutex g_mutex;
@@ -122,7 +125,15 @@ static bool openDevice(Port& port) {
         return false;
     }
     port.spec = obtained;
-    SDL_PauseAudioDevice(port.device, 0);
+    if (std::getenv("APS5_TRACE_AUDIOOUT") != nullptr) {
+        std::fprintf(stderr, "[audioout] device %u: wanted %d Hz fmt 0x%x ch %u samples %u, got %d Hz fmt 0x%x ch %u samples %u\n",
+                     port.device, desired.freq, desired.format, desired.channels, desired.samples,
+                     obtained.freq, obtained.format, obtained.channels, obtained.samples);
+    }
+    // Queue the target latency before starting playback; otherwise callback phase alone
+    // can repeatedly starve a port receiving 256-frame blocks in a 480-frame device.
+    SDL_PauseAudioDevice(port.device, 1);
+    port.deviceStarted = false;
     return true;
 }
 
@@ -133,6 +144,7 @@ static void closeDevice(Port& port) {
     }
     port.device = 0;
     port.spec = {};
+    port.deviceStarted = false;
 }
 
 static constexpr std::uint32_t STD_8CH_MAP[8] = {0, 1, 2, 3, 6, 7, 4, 5};
@@ -222,16 +234,22 @@ static void queueAudio(Port& port, const void* data) {
     // port's queued audio has been output (sceAudioOutOutput(handle, NULL)); it queues nothing.
     if (port.device == 0) return;
     if (data == nullptr) {
+        if (!port.deviceStarted && SDL_GetQueuedAudioSize(port.device) != 0) {
+            SDL_PauseAudioDevice(port.device, 0);
+            port.deviceStarted = true;
+        }
         const std::uint64_t waitStart = sceKernelGetProcessTime();
         while (SDL_GetQueuedAudioSize(port.device) > 0) {
             if (sceKernelGetProcessTime() - waitStart > DRAIN_TIMEOUT_US) {
+                if (std::getenv("APS5_TRACE_AUDIOOUT") != nullptr)
+                    std::fprintf(stderr, "[audioout] device %u queue timeout: %u bytes\n", port.device, SDL_GetQueuedAudioSize(port.device));
                 SDL_ClearQueuedAudio(port.device);
                 break;
             }
-            struct timespec req{};
+            KernelTimespec req{};
             req.tv_sec = 0;
             req.tv_nsec = static_cast<long>(DRAIN_SLEEP_US * 1000ULL);
-            nanosleep(&req, nullptr);
+            sceKernelNanosleep(&req, nullptr);
         }
         return;
     }
@@ -278,17 +296,35 @@ static void queueAudio(Port& port, const void* data) {
 
     while (SDL_GetQueuedAudioSize(port.device) > minQueued) {
         if (sceKernelGetProcessTime() - waitStart > DRAIN_TIMEOUT_US) {
+            if (std::getenv("APS5_TRACE_AUDIOOUT") != nullptr)
+                std::fprintf(stderr, "[audioout] device %u queue cleared after drain timeout\n", port.device);
             SDL_ClearQueuedAudio(port.device);
             break;
         }
-        struct timespec req{};
+        KernelTimespec req{};
         req.tv_sec = 0;
         req.tv_nsec = static_cast<long>(DRAIN_SLEEP_US * 1000ULL);
-        nanosleep(&req, nullptr);
+        sceKernelNanosleep(&req, nullptr);
     }
 
+    if (std::getenv("APS5_TRACE_AUDIOOUT") != nullptr) {
+        const auto queued = SDL_GetQueuedAudioSize(port.device);
+        if (port.tracePushes++ > 200 && port.deviceStarted && queued == 0 && port.traceUnderruns++ < 40) {
+            std::fprintf(stderr, "[audioout] device %u underrun at %llu us (waited %llu us)\n", port.device,
+                         static_cast<unsigned long long>(sceKernelGetProcessTime()),
+                         static_cast<unsigned long long>(sceKernelGetProcessTime() - waitStart));
+        }
+        if (port.tracePushes % 1024 == 0)
+            std::fprintf(stderr, "[audioout] device %u pushes %llu underruns %llu queued %u bytes\n", port.device,
+                         static_cast<unsigned long long>(port.tracePushes),
+                         static_cast<unsigned long long>(port.traceUnderruns), queued);
+    }
     if (SDL_QueueAudio(port.device, queueData, queueSize) < 0) {
         throw std::runtime_error(std::string("SDL_QueueAudio: ") + SDL_GetError());
+    }
+    if (!port.deviceStarted && SDL_GetQueuedAudioSize(port.device) >= minQueued) {
+        SDL_PauseAudioDevice(port.device, 0);
+        port.deviceStarted = true;
     }
     // APS5_LOG_OUT("device=%u type=%d bytes=%u queued=%u", port.device, port.type, queueSize, SDL_GetQueuedAudioSize(port.device));
 }
@@ -390,15 +426,25 @@ int APS5_VABI sceAudioOutOutput(int handle, const void* ptr) {
     const std::uint64_t next = port->lastOutputTime + blockUs;
     if (next > now && port->device == 0) {
         const std::uint64_t waitUs = next - now;
-        struct timespec req{};
+        // The native Windows nanosleep can round a 5.3 ms block up to a scheduler tick.
+        // A vibration port shares the producer with audible ports, so use the kernel's precise wait.
+        KernelTimespec req{};
         req.tv_sec = static_cast<time_t>(waitUs / 1000000ULL);
         req.tv_nsec = static_cast<long>((waitUs % 1000000ULL) * 1000ULL);
-        nanosleep(&req, nullptr);
+        sceKernelNanosleep(&req, nullptr);
+        if (std::getenv("APS5_TRACE_AUDIOOUT") != nullptr) {
+            static unsigned traced = 0;
+            if (traced++ < 8) std::fprintf(stderr, "[audioout] port %d no-device wait requested %llu us actual %llu us\n", handle,
+                                          static_cast<unsigned long long>(waitUs),
+                                          static_cast<unsigned long long>(sceKernelGetProcessTime() - now));
+        }
     }
 
     traceOutput(handle, *port, ptr);
     queueAudio(*port, ptr);
-    port->lastOutputTime = sceKernelGetProcessTime();
+    // Keep the no-device cadence anchored to its deadline, rather than accumulating
+    // mixer work and sleep overshoot on every block alongside the audible ports.
+    port->lastOutputTime = port->device == 0 ? std::max(now, next) : sceKernelGetProcessTime();
     return static_cast<int>(port->samplesNum);
 }
 
@@ -438,10 +484,10 @@ int APS5_VABI sceAudioOutOutputs(AudioOutOutputParam* param, std::uint32_t num) 
     }
 
     if (maxWait != 0 && !anyDevice) {
-        struct timespec req{};
+        KernelTimespec req{};
         req.tv_sec = static_cast<time_t>(maxWait / 1000000ULL);
         req.tv_nsec = static_cast<long>((maxWait % 1000000ULL) * 1000ULL);
-        nanosleep(&req, nullptr);
+        sceKernelNanosleep(&req, nullptr);
     }
 
     for (std::uint32_t i = 0; i < num; i++) {
@@ -450,7 +496,8 @@ int APS5_VABI sceAudioOutOutputs(AudioOutOutputParam* param, std::uint32_t num) 
 
     const std::uint64_t done = sceKernelGetProcessTime();
     for (std::uint32_t i = 0; i < num; i++) {
-        if (auto* port = getPort(param[i].handle)) port->lastOutputTime = done;
+        if (auto* port = getPort(param[i].handle))
+            port->lastOutputTime = anyDevice ? done : std::max(now, port->lastOutputTime + blockUs);
     }
 
     return static_cast<int>(first.samplesNum);
