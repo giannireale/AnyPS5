@@ -2,6 +2,8 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -184,6 +186,36 @@ static const void* prepareBuffer(const Port& port, const void* data, std::vector
     return buf.data();
 }
 
+// Debug aid: APS5_TRACE_AUDIOOUT=1 reports, about once a second per port, the block pointer and the
+// peak of the 16-bit samples the title outputs (whether its audio is silent before any mixing).
+static void traceOutput(int handle, const Port& port, const void* data) {
+    static const bool enabled = std::getenv("APS5_TRACE_AUDIOOUT") != nullptr;
+    if (!enabled || data == nullptr || bytesPerSample(port.format) != 2) return;
+    static std::uint64_t counts[PORTS_MAX] = {};
+    static int peaks[PORTS_MAX] = {};
+    const auto index = static_cast<std::size_t>(handle - 1) % PORTS_MAX;
+    const auto* samples = static_cast<const std::int16_t*>(data);
+    for (std::uint32_t i = 0; i < port.samplesNum * static_cast<std::uint32_t>(port.channels); ++i)
+        peaks[index] = std::max(peaks[index], std::abs(static_cast<int>(samples[i])));
+    // The first minute of each port is also kept as raw S16 in audioout_port<handle>.raw.
+    static std::FILE* files[PORTS_MAX] = {};
+    static std::uint64_t written[PORTS_MAX] = {};
+    const std::uint64_t bytes = static_cast<std::uint64_t>(port.samplesNum) * static_cast<std::uint32_t>(port.channels) * 2u;
+    if (written[index] < 60ull * port.freq * static_cast<std::uint32_t>(port.channels) * 2u) {
+        if (files[index] == nullptr) {
+            char name[32];
+            std::snprintf(name, sizeof(name), "audioout_port%d.raw", handle);
+            files[index] = std::fopen(name, "wb");
+        }
+        if (files[index] != nullptr) { std::fwrite(data, 1, bytes, files[index]); std::fflush(files[index]); }
+        written[index] += bytes;
+    }
+    const auto blocksPerSecond = port.samplesNum != 0 ? port.freq / port.samplesNum : 1u;
+    if (++counts[index] % std::max(1u, blocksPerSecond) != 0) return;
+    std::fprintf(stderr, "[audioout] port %d type %d %u ch %d: block %p, peak %d over the last second\n", handle, port.type, port.samplesNum, port.channels, data, peaks[index]);
+    peaks[index] = 0;
+}
+
 static void queueAudio(Port& port, const void* data) {
     // Without an SDL device there is nothing to queue: the callers already sleep for the block's
     // duration so the game's timing holds. A null pointer is the documented way to wait until the
@@ -364,6 +396,7 @@ int APS5_VABI sceAudioOutOutput(int handle, const void* ptr) {
         nanosleep(&req, nullptr);
     }
 
+    traceOutput(handle, *port, ptr);
     queueAudio(*port, ptr);
     port->lastOutputTime = sceKernelGetProcessTime();
     return static_cast<int>(port->samplesNum);
@@ -412,7 +445,7 @@ int APS5_VABI sceAudioOutOutputs(AudioOutOutputParam* param, std::uint32_t num) 
     }
 
     for (std::uint32_t i = 0; i < num; i++) {
-        if (auto* port = getPort(param[i].handle)) queueAudio(*port, param[i].ptr);
+        if (auto* port = getPort(param[i].handle)) { traceOutput(param[i].handle, *port, param[i].ptr); queueAudio(*port, param[i].ptr); }
     }
 
     const std::uint64_t done = sceKernelGetProcessTime();
