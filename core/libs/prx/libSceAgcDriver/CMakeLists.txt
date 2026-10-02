@@ -268,6 +268,10 @@ configure_windows_unwind(agc_driver_graphics_tests)
 
 if(BUILD_TESTING)
     add_test(NAME agc_primitive_translation COMMAND agc_driver_graphics_tests --primitives)
+    if(WIN32)
+        set_tests_properties(agc_primitive_translation PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
 endif()
 
 add_executable(agc_driver_bda_device_tests EXCLUDE_FROM_ALL
