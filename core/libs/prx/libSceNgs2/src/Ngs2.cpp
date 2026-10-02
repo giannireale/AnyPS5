@@ -10,6 +10,7 @@
 #include <mutex>
 #include <vector>
 #include "SceTypes.hpp"
+#include "Ngs2Mixer.hpp"
 
 namespace {
 
@@ -76,7 +77,7 @@ struct Rack;
 struct Voice {
     Ngs2Handle handle = 0;
     std::uint32_t id = 0;
-    std::uint32_t stateFlags = 0;
+    ngs2mix::VoiceMix mix;
     Rack* rack = nullptr;
 };
 
@@ -283,9 +284,11 @@ int createRack(System* system, const std::uint32_t rackId, const Ngs2RackOption*
         voice->handle = nextHandle();
         voice->id = index;
         voice->rack = created.get();
+        voice->mix.rackId = rackId;
         g_voices[voice->handle] = voice.get();
         created->voices.push_back(std::move(voice));
     }
+    if (TraceNgs2()) std::fprintf(stderr, "[ngs2] rack 0x%llx id 0x%x voices %u\n", static_cast<unsigned long long>(created->handle), rackId, voices);
     *handle = created->handle;
     g_racks[created->handle] = created.get();
     system->racks.push_back(std::move(created));
@@ -404,6 +407,13 @@ int APS5_VABI sceNgs2SystemRender(Ngs2Handle system_handle, const Ngs2RenderBuff
     // Before this the call failed and the title sent its uninitialized render buffers to
     // AudioOut: a constant full-scale buzz. Voice playback replaces the fill when it exists.
     for (std::uint32_t index = 0; index < num_buffer_info; ++index) std::memset(buffer_info[index].buffer, 0, buffer_info[index].buffer_size);
+    std::vector<ngs2mix::VoiceMix*> voices;
+    for (const auto& rack : system->racks)
+        for (const auto& voice : rack->voices) voices.push_back(&voice->mix);
+    ngs2mix::Render(voices, [](const std::uint64_t handle) -> ngs2mix::VoiceMix* {
+        Voice* destination = findVoice(static_cast<Ngs2Handle>(handle));
+        return destination == nullptr ? nullptr : &destination->mix;
+    }, buffer_info, num_buffer_info, system->sampleRate);
     ++system->renderCount;
     return 0;
 }
@@ -511,25 +521,43 @@ int APS5_VABI sceNgs2RackUnlock(Ngs2Handle rack_handle) {
 int APS5_VABI sceNgs2VoiceControl(Ngs2Handle voice_handle, const Ngs2VoiceParamHeader* param_list) {
     std::lock_guard lock(g_lock);
     if (findVoice(voice_handle) == nullptr) return SCE_NGS2_ERROR_INVALID_VOICE_HANDLE;
-    if (TraceNgs2() && param_list != nullptr) traceParamChain(voice_handle, param_list);
-    // PS5 parameter blocks differ from Ngs2VoiceParamHeader. Until their
-    // semantics are implemented, reject them without reading or applying them.
-    (void)param_list;
-    return SCE_NGS2_ERROR_FAIL;
+    if (TraceNgs2() && param_list != nullptr) {
+        std::fprintf(stderr, "[ngs2] control caller %p\n", __builtin_return_address(0));
+        traceParamChain(voice_handle, param_list);
+    }
+    if (param_list == nullptr) return SCE_NGS2_ERROR_INVALID_OPTION_ADDRESS;
+    // Every block in the chain is applied; one the mixer does not model fails the call.
+    Voice* voice = findVoice(voice_handle);
+    bool applied = true;
+    const auto* cursor = reinterpret_cast<const std::uint8_t*>(param_list);
+    for (int index = 0; index < 64; ++index) {
+        Ngs2VoiceParamHeader head{};
+        std::memcpy(&head, cursor, sizeof(head));
+        if (head.size < sizeof(head)) return SCE_NGS2_ERROR_INVALID_OPTION_SIZE;
+        applied &= ngs2mix::ApplyParam(voice->mix, head.id, cursor + sizeof(head), head.size - sizeof(head));
+        if (head.next == 0) break;
+        cursor += head.next;
+    }
+    return applied ? 0 : SCE_NGS2_ERROR_FAIL;
 }
 
 int APS5_VABI sceNgs2VoiceRunCommands(Ngs2Handle voice_handle, const void* commands, std::uint32_t num_commands) {
     std::lock_guard lock(g_lock);
     if (findVoice(voice_handle) == nullptr) return SCE_NGS2_ERROR_INVALID_VOICE_HANDLE;
     if (num_commands == 0) return 0;
-    if (TraceNgs2() && commands != nullptr) {
-        const auto* words = static_cast<const std::uint32_t*>(commands);
-        std::fprintf(stderr, "[ngs2] commands voice 0x%llx count %u: %08x %08x %08x %08x %08x %08x %08x %08x\n", static_cast<unsigned long long>(voice_handle), num_commands, words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7]);
+    if (TraceNgs2() && commands != nullptr) for (std::uint32_t c = 0; c < num_commands && c < 16; ++c) {
+        const auto* words = static_cast<const std::uint32_t*>(commands) + c * 8;
+        std::fprintf(stderr, "[ngs2] caller %p commands voice 0x%llx count %u: %08x %08x %08x %08x %08x %08x %08x %08x\n", __builtin_return_address(0), static_cast<unsigned long long>(voice_handle), num_commands, words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7]);
     }
-    // Observed SDK commands are not VoiceControl parameter blocks. Never
-    // reinterpret them as such or report that an unsupported batch ran.
-    (void)commands;
-    return SCE_NGS2_ERROR_FAIL;
+    constexpr std::uint32_t MaxCommandsPerBatch = 1024;
+    if (commands == nullptr) return SCE_NGS2_ERROR_INVALID_OPTION_ADDRESS;
+    if (num_commands > MaxCommandsPerBatch) return SCE_NGS2_ERROR_FAIL;
+    // 32-byte command records (see Ngs2Mixer.hpp); an unknown type fails the batch.
+    Voice* voice = findVoice(voice_handle);
+    bool ran = true;
+    for (std::uint32_t index = 0; index < num_commands; ++index)
+        ran &= ngs2mix::RunCommand(voice->mix, static_cast<const std::uint32_t*>(commands) + index * 8);
+    return ran ? 0 : SCE_NGS2_ERROR_FAIL;
 }
 
 int APS5_VABI sceNgs2VoiceGetState(Ngs2Handle voice_handle, Ngs2VoiceState* state, std::size_t state_size) {
@@ -538,7 +566,7 @@ int APS5_VABI sceNgs2VoiceGetState(Ngs2Handle voice_handle, Ngs2VoiceState* stat
     std::lock_guard lock(g_lock);
     const Voice* voice = findVoice(voice_handle);
     if (voice == nullptr) return SCE_NGS2_ERROR_INVALID_VOICE_HANDLE;
-    state->state_flags = voice->stateFlags;
+    state->state_flags = ngs2mix::StateFlags(voice->mix);
     return 0;
 }
 
@@ -547,7 +575,7 @@ int APS5_VABI sceNgs2VoiceGetStateFlags(Ngs2Handle voice_handle, std::uint32_t* 
     std::lock_guard lock(g_lock);
     const Voice* voice = findVoice(voice_handle);
     if (voice == nullptr) return SCE_NGS2_ERROR_INVALID_VOICE_HANDLE;
-    *state_flags = voice->stateFlags;
+    *state_flags = ngs2mix::StateFlags(voice->mix);
     return 0;
 }
 

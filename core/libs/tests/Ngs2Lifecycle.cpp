@@ -273,7 +273,13 @@ int main() {
     Require(sceNgs2VoiceRunCommands(0, observedCommand.data(), 1) == static_cast<int>(0x804A0202), "voice commands accepted an invalid handle");
     Require(sceNgs2VoiceRunCommands(voice, nullptr, 0) == 0, "an empty voice command batch failed");
     Require(sceNgs2VoiceRunCommands(voice, nullptr, 1) < 0, "a null nonempty voice command batch reported success");
-    Require(sceNgs2VoiceRunCommands(voice, observedCommand.data(), 1) < 0, "an unsupported SDK command reported success");
+    Require(sceNgs2VoiceRunCommands(voice, observedCommand.data(), 1) == 0, "the observed play event failed");
+    std::uint32_t playingFlags = 0;
+    Require(sceNgs2VoiceGetStateFlags(voice, &playingFlags) == 0 && (playingFlags & 0x2) != 0, "a played voice is not reported as playing");
+    const std::array<std::uint32_t, 4> stopCommand{2, 0x400, 2, 0};
+    Require(sceNgs2VoiceRunCommands(voice, stopCommand.data(), 1) == 0, "the stop event failed");
+    const std::array<std::uint32_t, 4> unknownCommand{7, 0x300, 0, 0};
+    Require(sceNgs2VoiceRunCommands(voice, unknownCommand.data(), 1) < 0, "an unsupported SDK command reported success");
     Require(sceNgs2VoiceRunCommands(voice, observedCommand.data(), UINT32_MAX) < 0, "an oversized unsupported batch reported success");
     flags = 0xFFFFFFFFu;
     Require(sceNgs2VoiceGetStateFlags(voice, &flags) == 0 && flags == 0, "rejected commands changed the voice state");
