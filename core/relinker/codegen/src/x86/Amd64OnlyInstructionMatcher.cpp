@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <codegen/x86/IAmd64OnlyInstructionMatcher.hpp>
 #include <codegen/x86/DecodedInstruction.hpp>
 #include <codegen/x86/Amd64OnlySubstitutionTable.hpp>
@@ -97,14 +98,15 @@ std::optional<SystemInstruction> Amd64OnlyInstructionMatcher::_systemInstruction
     if (instr.IsMwaitx())
         return SystemInstruction::Mwaitx;
     if (instr.IsClzero())
-        return SystemInstruction::Clzero;
+        return std::find(instr.Data, instr.Data + instr.OpcodeOffset(), 0x67) != instr.Data + instr.OpcodeOffset()
+            ? SystemInstruction::Clzero32 : SystemInstruction::Clzero;
     if (instr.IsMcommit())
         return SystemInstruction::Mcommit;
     return std::nullopt;
 }
 
 Amd64OnlyMatch Amd64OnlyInstructionMatcher::_matchSystem(const DecodedInstruction& instr, const Entry& entry, const SystemInstruction instruction, const std::span<const std::uint8_t> trailing) const {
-    if (instruction != SystemInstruction::Clzero && trailing.empty())
+    if (instruction != SystemInstruction::Clzero && instruction != SystemInstruction::Clzero32 && trailing.empty())
         return Amd64OnlyMatch{entry.Name, instr.Length, Amd64OnlyLowering::InPlace, _systemLowering.LowerInPlace(instruction, instr.Length), {}, 0};
     auto body = _systemLowering.LowerOutOfLine(std::span<const SystemInstruction>(&instruction, 1), trailing);
     return Amd64OnlyMatch{entry.Name, instr.Length, Amd64OnlyLowering::Trampoline, {}, std::move(body.Bytes), body.ReturnBranchOffset, body.TrailingOffset, std::move(body.RipFixups)};
@@ -154,7 +156,7 @@ std::optional<Amd64OnlyMatch> Amd64OnlyInstructionMatcher::MatchSequence(
         systemSequence.push_back(*system);
     }
     if (!systemSequence.empty()) {
-        const auto& entry = systemSequence.front() == SystemInstruction::Clzero ? kClzero : (systemSequence.front() == SystemInstruction::Monitorx ? kMonitorx : (systemSequence.front() == SystemInstruction::Mwaitx ? kMwaitx : kMcommit));
+        const auto& entry = (systemSequence.front() == SystemInstruction::Clzero || systemSequence.front() == SystemInstruction::Clzero32) ? kClzero : (systemSequence.front() == SystemInstruction::Monitorx ? kMonitorx : (systemSequence.front() == SystemInstruction::Mwaitx ? kMwaitx : kMcommit));
         auto systemBody = _systemLowering.LowerOutOfLine(systemSequence, trailing);
         return Amd64OnlyMatch{entry.Name, instructions.front().size(), Amd64OnlyLowering::Trampoline, {}, std::move(systemBody.Bytes), systemBody.ReturnBranchOffset, systemBody.TrailingOffset, std::move(systemBody.RipFixups)};
     }
@@ -200,7 +202,7 @@ std::optional<Amd64OnlyMatch> Amd64OnlyInstructionMatcher::Match(
         return _matchSystem(instr, kMwaitx, SystemInstruction::Mwaitx, trailing);
 
     if (instr.IsClzero())
-        return _matchSystem(instr, kClzero, SystemInstruction::Clzero, trailing);
+        return _matchSystem(instr, kClzero, *_systemInstruction(instr), trailing);
 
     if (instr.IsRdpru())
         return _unsupported(kRdpru, length);

@@ -3,6 +3,7 @@
 
 #include "prx/libSceAgcDriver/Graphics/include/Shaders.hpp"
 #include <algorithm>
+#include <cstdint>
 #include <limits>
 #include <set>
 #include <vector>
@@ -49,6 +50,13 @@ inline VertexFormat DecodeVertexFormat(const ShaderRecompiler::VertexAttribute& 
         case 27: { const std::array formats{VK_FORMAT_R16_UINT, VK_FORMAT_R16G16_UINT}; const auto count = std::min(attribute.components, 2u); return {formats[count - 1], count * 2u, 2u, "u32"}; }
         case 28: { const std::array formats{VK_FORMAT_R16_SINT, VK_FORMAT_R16G16_SINT}; const auto count = std::min(attribute.components, 2u); return {formats[count - 1], count * 2u, 2u, "i32"}; }
         case 29: { const std::array formats{VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16G16_SFLOAT}; const auto count = std::min(attribute.components, 2u); return {formats[count - 1], count * 2u, 2u, "f32"}; }
+        case 36: return {VK_FORMAT_B10G11R11_UFLOAT_PACK32, 4u, 4u, "f32"};
+        case 50: return {VK_FORMAT_A2B10G10R10_UNORM_PACK32, 4u, 4u, "f32"};
+        case 51: return {VK_FORMAT_A2B10G10R10_SNORM_PACK32, 4u, 4u, "f32"};
+        case 52: return {VK_FORMAT_A2B10G10R10_USCALED_PACK32, 4u, 4u, "f32"};
+        case 53: return {VK_FORMAT_A2B10G10R10_SSCALED_PACK32, 4u, 4u, "f32"};
+        case 54: return {VK_FORMAT_A2B10G10R10_UINT_PACK32, 4u, 4u, "u32"};
+        case 55: return {VK_FORMAT_A2B10G10R10_SINT_PACK32, 4u, 4u, "i32"};
         case 56: { const std::array formats{VK_FORMAT_R8_UNORM, VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8B8_UNORM, VK_FORMAT_R8G8B8A8_UNORM}; const auto count = std::min(attribute.components, 4u); return {formats[count - 1], count * 1u, 1u, "f32"}; }
         case 57: { const std::array formats{VK_FORMAT_R8_SNORM, VK_FORMAT_R8G8_SNORM, VK_FORMAT_R8G8B8_SNORM, VK_FORMAT_R8G8B8A8_SNORM}; const auto count = std::min(attribute.components, 4u); return {formats[count - 1], count * 1u, 1u, "f32"}; }
         case 58: { const std::array formats{VK_FORMAT_R8_USCALED, VK_FORMAT_R8G8_USCALED, VK_FORMAT_R8G8B8_USCALED, VK_FORMAT_R8G8B8A8_USCALED}; const auto count = std::min(attribute.components, 4u); return {formats[count - 1], count * 1u, 1u, "f32"}; }
@@ -123,6 +131,16 @@ inline std::size_t VertexBufferExtent(const ShaderRecompiler::VertexAttribute& a
     return static_cast<std::size_t>(bytes);
 }
 
+// Host vertex fetch can bound complete stride records. Allocate the final record
+// while keeping guest reads limited to the bytes the shader actually consumes.
+inline std::size_t VertexBufferAllocationSize(const ShaderRecompiler::VertexAttribute& attribute, std::size_t readBytes) {
+    const auto stride = (attribute.resource.fields[1] >> 16u) & 0x3fffu;
+    if (stride == 0) return readBytes;
+    const auto padding = (stride - readBytes % stride) % stride;
+    Require(readBytes <= std::numeric_limits<std::size_t>::max() - padding, "vertex padding overflow");
+    return readBytes + padding;
+}
+
 inline std::size_t VertexBufferReadSize(const ShaderRecompiler::VertexAttribute& attribute, std::uint32_t maxIndex, std::uint32_t instances, std::uint32_t firstInstance = 0) {
     Require(instances != 0, "vertex input requires nonzero instance count");
     Require(firstInstance <= std::numeric_limits<std::uint32_t>::max() - (instances - 1u), "vertex input instance range overflow");
@@ -138,6 +156,107 @@ inline std::size_t VertexBufferReadSize(const ShaderRecompiler::VertexAttribute&
     const auto address = attribute.resource.fields[0] | (static_cast<std::uint64_t>(attribute.resource.fields[1] & 0xffffu) << 32u);
     Require(address != 0 && required <= std::numeric_limits<std::uint64_t>::max() - address, "invalid vertex buffer address range");
     return static_cast<std::size_t>(required);
+}
+
+struct VertexReadSlot {
+    std::uint64_t address = 0;
+    std::size_t readBytes = 0;
+    std::size_t allocationBytes = 0;
+    std::uint32_t stride = 0;
+    std::uint32_t rate = 0;
+    std::uint32_t formatAlignment = 0;
+    std::size_t slot = 0;
+};
+
+struct VertexReadGroupMember {
+    std::size_t slot = 0;
+    std::size_t offset = 0;
+};
+
+struct VertexReadGroup {
+    std::uint64_t address = 0;
+    std::size_t readBytes = 0;
+    std::size_t allocationBytes = 0;
+    std::uint32_t stride = 0;
+    std::uint32_t rate = 0;
+    std::vector<VertexReadGroupMember> members;
+};
+
+// Plan exact read-span unions for attributes that share a fetch rate and stride. Address,
+// read-span and full-record allocation arithmetic is checked before any group is returned.
+inline std::vector<VertexReadGroup> BuildVertexReadGroups(std::span<const VertexReadSlot> slots) {
+    struct ValidatedSlot {
+        VertexReadSlot slot;
+        std::uint64_t readEnd;
+        std::uint64_t allocationEnd;
+    };
+    std::vector<ValidatedSlot> sorted;
+    sorted.reserve(slots.size());
+    for (const auto& slot : slots) {
+        Require(slot.address != 0, "invalid vertex read address");
+        Require(slot.readBytes != 0, "empty vertex read range");
+        Require(slot.allocationBytes >= slot.readBytes, "vertex allocation is smaller than its read range");
+        Require(slot.formatAlignment != 0, "zero vertex format alignment");
+        Require(slot.readBytes <= std::numeric_limits<std::uint64_t>::max() - slot.address, "vertex read range overflow");
+        Require(slot.allocationBytes <= std::numeric_limits<std::uint64_t>::max() - slot.address, "vertex allocation range overflow");
+        sorted.push_back({slot, slot.address + slot.readBytes, slot.address + slot.allocationBytes});
+    }
+    std::sort(sorted.begin(), sorted.end(), [](const auto& left, const auto& right) {
+        if (left.slot.stride != right.slot.stride) return left.slot.stride < right.slot.stride;
+        if (left.slot.rate != right.slot.rate) return left.slot.rate < right.slot.rate;
+        if (left.slot.address != right.slot.address) return left.slot.address < right.slot.address;
+        return left.slot.slot < right.slot.slot;
+    });
+
+    std::vector<VertexReadGroup> groups;
+    std::uint64_t currentReadEnd = 0;
+    std::uint64_t currentAllocationEnd = 0;
+    std::vector<std::uint32_t> currentAlignments;
+    for (const auto& entry : sorted) {
+        bool merge = false;
+        if (!groups.empty()) {
+            const auto& group = groups.back();
+            merge = group.stride == entry.slot.stride && group.rate == entry.slot.rate && entry.slot.address < currentReadEnd;
+            if (merge) {
+                for (const auto alignment : currentAlignments) {
+                    if ((entry.slot.address - group.address) % alignment != 0) { merge = false; break; }
+                }
+                if (merge && (entry.slot.address - group.address) % entry.slot.formatAlignment != 0) merge = false;
+            }
+        }
+        if (!merge) {
+            const auto readSpan = entry.readEnd - entry.slot.address;
+            const auto allocationSpan = entry.allocationEnd - entry.slot.address;
+            Require(readSpan <= std::numeric_limits<std::size_t>::max(), "vertex group read size overflow");
+            Require(allocationSpan <= std::numeric_limits<std::size_t>::max(), "vertex group allocation size overflow");
+            VertexReadGroup group;
+            group.address = entry.slot.address;
+            group.readBytes = static_cast<std::size_t>(readSpan);
+            group.allocationBytes = static_cast<std::size_t>(allocationSpan);
+            group.stride = entry.slot.stride;
+            group.rate = entry.slot.rate;
+            group.members.push_back({entry.slot.slot, 0});
+            groups.push_back(std::move(group));
+            currentReadEnd = entry.readEnd;
+            currentAllocationEnd = entry.allocationEnd;
+            currentAlignments.assign(1, entry.slot.formatAlignment);
+            continue;
+        }
+        auto& group = groups.back();
+        const auto readSpan = std::max(currentReadEnd, entry.readEnd) - group.address;
+        Require(readSpan <= std::numeric_limits<std::size_t>::max(), "vertex group read size overflow");
+        Require(entry.allocationEnd >= group.address, "vertex group allocation range overflow");
+        currentReadEnd = std::max(currentReadEnd, entry.readEnd);
+        currentAllocationEnd = std::max(currentAllocationEnd, entry.allocationEnd);
+        const auto allocationSpan = currentAllocationEnd - group.address;
+        Require(allocationSpan <= std::numeric_limits<std::size_t>::max(), "vertex group allocation size overflow");
+        Require(entry.slot.address - group.address <= std::numeric_limits<std::size_t>::max(), "vertex group member offset overflow");
+        group.readBytes = static_cast<std::size_t>(readSpan);
+        group.allocationBytes = static_cast<std::size_t>(allocationSpan);
+        group.members.push_back({entry.slot.slot, static_cast<std::size_t>(entry.slot.address - group.address)});
+        currentAlignments.push_back(entry.slot.formatAlignment);
+    }
+    return groups;
 }
 
 }

@@ -60,7 +60,10 @@ struct GuestTextureResource {
     // DCC metadata of a compressed surface, or 0 (see DccMetadata.hpp).
     std::uint64_t dccAddress = 0;
     bool dccAlphaOnMsb = false;
+    std::uint32_t minLod = 0;
 };
+
+float EffectiveMinLod(const GuestTextureResource& resource);
 
 GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words);
 bool MatchesGuestDimension(ShaderRecompiler::DescriptorImageShape shape, TextureDimension dimension);

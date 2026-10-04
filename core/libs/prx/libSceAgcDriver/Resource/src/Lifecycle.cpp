@@ -10,7 +10,6 @@ static constexpr uint32_t SCE_AGC_ERROR_RESOURCE_REGISTRATION_UNAVAILABLE = 0x8A
 extern "C" {
 
 uint32_t APS5_VABI sceAgcDriverInitResourceRegistration(void) {
- NotImplemented_nid_no_patch(__func__);
  return 0;
 }
 

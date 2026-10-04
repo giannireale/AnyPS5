@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <cstdio>
 #include "CacheKey.hpp"
+#include "CompiledVariant.hpp"
+#include "ShaderDiskCache.hpp"
 #include <list>
 #include <mutex>
 #include <shared_mutex>
@@ -80,11 +82,16 @@ std::uint32_t HostSubgroupSize(const RecompileRequest& request) {
     return request.target.subgroupSize;
 }
 
+ShaderStageInputInfo RequestInputInfo(const RecompileRequest& request) {
+    const auto* mesh = request.graphics && request.graphics->mesh ? &*request.graphics->mesh : nullptr;
+    return BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request), mesh);
+}
+
 }
 
 IrProgram PrepareResourceProgram(const RecompileRequest& request) {
     const auto stageKind = toShaderStageKind(request.shader.stage);
-    const auto inputInfo = BuildShaderStageInputInfo(stageKind, request.context, HostSubgroupSize(request));
+    const auto inputInfo = RequestInputInfo(request);
 
     constexpr RdnaInstructionDecoder decoder;
     const auto decoded = decoder.Decode(request.shader.code);
@@ -97,6 +104,7 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request) {
 
     TranslateOptions translateOptions {};
     translateOptions.stage = stageKind;
+    translateOptions.shaderHash = request.shader.codeAddress;
     translateOptions.waveSize = request.context.waveSize;
     translateOptions.userDataBaseRegister = request.context.userDataBaseRegister;
     translateOptions.userDataCount = static_cast<std::uint32_t>(request.context.userData.size());
@@ -159,14 +167,6 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request) {
 
     return program;
 }
-
-struct CompiledVariant {
-    ResourceSpecialization specialization;
-    BindingLayout layout;
-    CompiledShaderInfo info;
-    BindingAllocationResult bindings;
-    RecompileResult result;
-};
 
 // A materialized result of one variant over one snapshot (Recompile(request, capture)): the
 // shared immutable object every later capture that reproduces the snapshot receives, so Populate
@@ -273,8 +273,17 @@ std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request) {
     return source;
 }
 
+std::array<std::uint32_t, 3> partialThreads(const RecompileRequest& request) {
+    return request.context.compute ? request.context.compute->partialThreads : std::array<std::uint32_t, 3>{};
+}
+
+std::uint64_t nextVariantId() {
+    static std::atomic<std::uint64_t> variants{0};
+    return variants.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
 CompiledVariant compileVariant(const RecompileRequest& request, IrProgram program, const ResourceSnapshot& resourceSnapshot, const ResourceSpecialization& resourceSpecialization) {
-    const auto inputInfo = BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request));
+    const auto inputInfo = RequestInputInfo(request);
     constexpr DeadCodeEliminator deadCodeEliminator;
     constexpr ResourceMaterializer resourceMaterializer;
     resourceMaterializer.Apply(program, resourceSpecialization);
@@ -289,7 +298,7 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
     auto bindings = bindingAllocator.Allocate(program, request.layout);
 
     constexpr DescriptorBindingBuilder descriptorBindingBuilder;
-    descriptorBindingBuilder.Populate(bindings, program, resourceSnapshot);
+    descriptorBindingBuilder.Populate(bindings, program, resourceSnapshot, partialThreads(request));
 
     SpirvTargetOptions targetOptions {};
     targetOptions.vulkanVersion = request.target.vulkanVersion;
@@ -302,8 +311,7 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
 
     constexpr SpirvEmitter spirvEmitter;
     RecompileResult result;
-    static std::atomic<std::uint64_t> variants{0};
-    result.variantId = variants.fetch_add(1, std::memory_order_relaxed) + 1;
+    result.variantId = nextVariantId();
     result.spirv = spirvEmitter.Emit(program, inputInfo, bindings, targetOptions);
 
 #if ANYPS5_ENABLE_SPIRV_TOOLS
@@ -311,6 +319,7 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
 #endif
 
     result.bdaAbiVersion = program.Info().usesDma ? request.target.bdaAbiVersion : 0u;
+    result.memoryOffsetDword = bindings.layout.memoryOffsetDword;
     result.vertexOffsetSgpr = program.Info().vertexOffsetSgpr;
     result.instanceOffsetSgpr = program.Info().instanceOffsetSgpr;
     result.vertexOffsetShared = program.Info().vertexOffsetShared;
@@ -344,7 +353,7 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
     bindings.layout = variant.bindings.layout;
     bindings.pushConstantOffsetBytes = variant.bindings.pushConstantOffsetBytes;
     bindings.pushConstantSizeBytes = variant.bindings.pushConstantSizeBytes;
-    DescriptorBindingBuilder{}.Populate(bindings, variant.info.info, variant.info.stage, variant.info.userDataBase, snapshot);
+    DescriptorBindingBuilder{}.Populate(bindings, variant.info.info, variant.info.stage, variant.info.userDataBase, snapshot, partialThreads(request));
     result.bindings = std::move(bindings.bindings);
     result.pushConstants = std::move(bindings.pushConstants);
     for (auto& attribute : result.vertexAttributes) {
@@ -358,24 +367,43 @@ bool sameLayout(const BindingLayout& left, const BindingLayout& right) {
     return left.descriptorSet == right.descriptorSet && left.firstBinding == right.firstBinding && left.pushConstantOffsetBytes == right.pushConstantOffsetBytes && left.pushConstantSizeBytes == right.pushConstantSizeBytes;
 }
 
+std::shared_ptr<const CompiledVariant> findOrCompileVariant(SourceEntry& source, const RecompileRequest& request, const ResourceSnapshot& snapshot, const ResourceSpecialization& specialization, bool& cacheHit) {
+    for (const auto& candidate : source.variants) {
+        if (sameLayout(candidate->layout, request.layout) && candidate->specialization == specialization) {
+            cacheHit = true;
+            return candidate;
+        }
+    }
+    cacheHit = false;
+    const bool disk = ShaderDiskCache::Enabled() && !DebugProbeActive();
+    std::vector<std::byte> diskKey;
+    std::shared_ptr<const CompiledVariant> variant;
+    if (disk) {
+        ShaderDiskCache::BuildKey(request, HostSubgroupSize(request), specialization, diskKey);
+        CompiledVariant loaded;
+        if (ShaderDiskCache::Load(diskKey, loaded)) {
+            loaded.specialization = specialization;
+            loaded.layout = request.layout;
+            loaded.result.variantId = nextVariantId();
+            variant = std::make_shared<const CompiledVariant>(std::move(loaded));
+        }
+    }
+    if (variant == nullptr) {
+        auto program = PrepareResourceProgram(request);
+        variant = std::make_shared<const CompiledVariant>(compileVariant(request, std::move(program), snapshot, specialization));
+        if (disk) ShaderDiskCache::Store(std::move(diskKey), variant);
+    }
+    source.variants.push_back(variant);
+    return variant;
+}
+
 // The cached variant of `source` for the specialization, compiled on first use.
 RecompileResult materializeVariant(SourceEntry& source, const RecompileRequest& request, const ResourceSnapshot& snapshot, const ResourceSpecialization& specialization) {
     std::shared_ptr<const CompiledVariant> variant;
     bool cacheHit = false;
     {
         std::lock_guard lock(source.mutex);
-        for (const auto& candidate : source.variants) {
-            if (sameLayout(candidate->layout, request.layout) && candidate->specialization == specialization) {
-                variant = candidate;
-                cacheHit = true;
-                break;
-            }
-        }
-        if (variant == nullptr) {
-            auto program = PrepareResourceProgram(request);
-            variant = std::make_shared<CompiledVariant>(compileVariant(request, std::move(program), snapshot, specialization));
-            source.variants.push_back(variant);
-        }
+        variant = findOrCompileVariant(source, request, snapshot, specialization, cacheHit);
     }
     auto result = materializeResult(*variant, request, snapshot);
     result.cacheHit = cacheHit;
@@ -383,7 +411,7 @@ RecompileResult materializeVariant(SourceEntry& source, const RecompileRequest& 
 }
 
 RecompileResult RecompileImpl(const RecompileRequest& request) {
-    static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request)));
+    static_cast<void>(RequestInputInfo(request));
     RequestMemoryView memory(request.context.memory);
     const auto runtime = memory.MakeRuntime(request.context.userData, request.shader.codeAddress);
     ResourceSnapshot snapshot;
@@ -467,6 +495,7 @@ std::uint64_t snapshotHash(const RecompileRequest& request, const ResourceSnapsh
     for (const auto stride : snapshot.uniformFill.groupStride) mix(stride);
     mix(snapshot.uniformFill.words);
     mix(snapshot.uniformFill.value);
+    for (const auto threads : partialThreads(request)) mix(threads);
     if (request.context.vertex) {
         const auto& vertex = *request.context.vertex;
         const auto count = std::min<std::uint32_t>(vertex.resourcesNum, ShaderVertexStageInfo::MaxResources);
@@ -492,18 +521,7 @@ std::shared_ptr<const RecompileResult> materializeMemoized(SourceEntry& source, 
     auto& counters = resultMemoCounters();
     {
         std::lock_guard lock(source.mutex);
-        for (const auto& candidate : source.variants) {
-            if (sameLayout(candidate->layout, request.layout) && candidate->specialization == specialization) {
-                variant = candidate;
-                cacheHit = true;
-                break;
-            }
-        }
-        if (variant == nullptr) {
-            auto program = PrepareResourceProgram(request);
-            variant = std::make_shared<CompiledVariant>(compileVariant(request, std::move(program), snapshot, specialization));
-            source.variants.push_back(variant);
-        }
+        variant = findOrCompileVariant(source, request, snapshot, specialization, cacheHit);
         index = (variant->result.variantId * 0x9e3779b97f4a7c15ull) ^ hash;
         const auto found = source.memoIndex.find(index);
         if (found != source.memoIndex.end() && found->second->variantId == variant->result.variantId && found->second->hash == hash) {
@@ -575,7 +593,7 @@ auto recompileReporting(const RecompileRequest& request, Impl&& impl) -> decltyp
 }
 
 std::shared_ptr<const IrResourcePlan> GetResourcePlan(const RecompileRequest& request) {
-    static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request)));
+    static_cast<void>(RequestInputInfo(request));
     if (request.useCache) return getSource(request)->plan;
     return makeResourcePlan(request);
 }
@@ -604,7 +622,7 @@ std::shared_ptr<const ResourceCapture> CaptureResources(const RecompileRequest& 
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     const auto started = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     // Validates the stage inputs once per request, as GetResourcePlan and Recompile(request) do.
-    static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request)));
+    static_cast<void>(RequestInputInfo(request));
     auto capture = std::make_shared<ResourceCapture>();
     if (request.useCache) {
         capture->source = getSource(request);
@@ -619,7 +637,7 @@ std::shared_ptr<const ResourceCapture> CaptureResources(const RecompileRequest& 
 
 std::shared_ptr<const SourceHandle> ResolveSource(const RecompileRequest& request) {
     if (!request.useCache) return nullptr;
-    static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request)));
+    static_cast<void>(RequestInputInfo(request));
     return std::make_shared<const SourceHandle>(SourceHandle{getSource(request)});
 }
 
@@ -627,7 +645,7 @@ std::shared_ptr<const ResourceCapture> CaptureResources(const RecompileRequest& 
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     const auto started = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     // The whole vertex family (Vertex, Local, TC, TE, Mesh) validates V# fields the memo key does not cover.
-    if (request.shader.stage != ShaderStage::Compute && request.shader.stage != ShaderStage::Fragment) static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request)));
+    if (request.shader.stage != ShaderStage::Compute && request.shader.stage != ShaderStage::Fragment) static_cast<void>(RequestInputInfo(request));
     auto capture = std::make_shared<ResourceCapture>();
     capture->source = handle.source;
     capture->plan = handle.source->plan;

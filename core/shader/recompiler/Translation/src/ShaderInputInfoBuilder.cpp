@@ -63,7 +63,7 @@ void _detectVertexBuffers(ShaderVertexInputInfo& info) {
 
 }
 
-ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const GuestContext& context, std::uint32_t hostSubgroupSize) {
+ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const GuestContext& context, std::uint32_t hostSubgroupSize, const MeshConfiguration* mesh) {
     switch (stage) {
     case ShaderStageKind::Compute: {
         if (!context.compute.has_value()) {
@@ -84,6 +84,7 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
         computeStorage.groupId[2] = compute.groupIdEnable[2];
         computeStorage.tgSizeEn = compute.tgSizeEnable;
         computeStorage.threadIdsNum = static_cast<int>(compute.threadIdComponentCount);
+        computeStorage.partialGroups = compute.PartialGroups();
         // Workgroup ids (and the thread-group size word) follow the user SGPRs.
         computeStorage.workgroupRegister = static_cast<int>(context.userDataBaseRegister + context.userData.size());
         ShaderStageInputInfo result;
@@ -102,9 +103,23 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
             pixelStorage.interpolatorSettings[i] = pixel.interpolatorSettings[i];
         }
         pixelStorage.inputNum = pixel.interpolatorCount;
-        if (pixel.hasPerspectiveCenterVgpr) {
-            pixelStorage.psPerspectiveCenterVgpr = pixel.perspectiveCenterVgpr;
-        }
+        const auto place = [&](PixelInput input, bool loaded) {
+            if (!loaded) return;
+            if ((pixel.inputAddr & PixelInputBit(input)) == 0u) {
+                throw std::runtime_error("ShaderInputInfoBuilder: a loaded pixel input is missing from SPI_PS_INPUT_ADDR");
+            }
+            pixelStorage.psInputVgpr[static_cast<std::uint32_t>(input)] = PixelInputVgpr(pixel.inputAddr, input);
+        };
+        place(PixelInput::PerspectiveCenter, pixel.hasPerspectiveCenterVgpr);
+        place(PixelInput::PerspectiveCentroid, pixel.perspectiveCentroid);
+        place(PixelInput::LinearCenter, pixel.noPerspective);
+        place(PixelInput::LinearCentroid, pixel.linearCentroid);
+        place(PixelInput::PositionX, pixel.posX);
+        place(PixelInput::PositionY, pixel.posY);
+        place(PixelInput::PositionZ, pixel.posZ);
+        place(PixelInput::PositionW, pixel.posW);
+        place(PixelInput::FrontFace, pixel.frontFace);
+        place(PixelInput::Ancillary, pixel.ancillary);
         for (std::uint32_t i = 0; i < 8; ++i) {
             pixelStorage.targetOutputMode[i] = pixel.targetOutputMode[i];
             pixelStorage.targetExportMapping[i].packed = pixel.targetExportMapping[i];
@@ -153,6 +168,24 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
             vertexStorage.resourcesDst[i].fetchIndex = vertex.resourcesDst[i].fetchIndex;
         }
         _detectVertexBuffers(vertexStorage);
+        if (stage == ShaderStageKind::Mesh) {
+            if (mesh == nullptr) throw std::runtime_error("ShaderInputInfoBuilder: a mesh-stage program has no mesh configuration");
+            auto& target = vertexStorage.mesh;
+            target.threadsNum[0] = mesh->threadsPerGroup;
+            target.threadsNum[1] = 1u;
+            target.threadsNum[2] = 1u;
+            target.ldsSizeDwords = mesh->ldsSizeDwords;
+            target.waveSize = context.waveSize;
+            target.hostSubgroupSize = hostSubgroupSize;
+            target.inputPrimitive = mesh->inputPrimitive;
+            target.primitivesPerGroup = mesh->primitivesPerGroup;
+            target.verticesPerGroup = mesh->verticesPerGroup;
+            target.maxVertices = mesh->maxVertices;
+            target.maxPrimitives = mesh->maxPrimitives;
+            target.provokingVertex = mesh->provokingVertex;
+            target.esgsItemSize = mesh->esgsItemSize;
+            if (target.threadsNum[0] == 0u || target.maxVertices == 0u || target.maxPrimitives == 0u || target.provokingVertex > 2u) throw std::runtime_error("ShaderInputInfoBuilder: invalid mesh configuration");
+        }
         ShaderStageInputInfo result;
         result.vertex = &vertexStorage;
         return result;

@@ -30,6 +30,8 @@ std::uint32_t read(const Registers& registers, std::uint32_t offset, RegisterBan
     NoteRegisterRead(bank, offset);
     const auto it = registers.find(offset);
     if (it == registers.end()) {
+        // PA_PS_INPUT_ENA/ADDR (0x1b3/0x1b4) may be absent in deferred pipeline setups; treat as zero.
+        if (offset == spiPsInputEna || offset == spiPsInputAddr) return 0u;
         char text[64];
         std::snprintf(text, sizeof(text), "AGC graphics: missing register at DWORD 0x%x", offset);
         throw std::runtime_error(text);
@@ -84,7 +86,7 @@ ShaderRecompiler::ShaderComputeStageInfo DecodeComputeStageInfo(const Registers&
     };
 }
 
-ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& context, bool hasColorTarget, std::uint8_t colorComponentMapping) {
+ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& context, const std::array<std::uint8_t, 8>& exportMappings) {
     const auto inControl = read(context, spiPsInControl, RegisterBank::Context);
     const auto inputNum = inControl & 0x3Fu;
     if (inputNum > 32u) {
@@ -93,9 +95,16 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
     const auto ena = read(context, spiPsInputEna, RegisterBank::Context);
     const auto addr = read(context, spiPsInputAddr, RegisterBank::Context);
     const auto activeInputs = ena & addr;
-    constexpr std::uint32_t knownMask = 0x1u | 0x2u | 0x10u | 0x20u | 0x100u | 0x200u | 0x400u | 0x800u | 0x1000u | 0x2000u;
+    using ShaderRecompiler::PixelInput;
+    using ShaderRecompiler::PixelInputBit;
+    constexpr std::uint32_t knownMask = PixelInputBit(PixelInput::PerspectiveSample) | PixelInputBit(PixelInput::PerspectiveCenter) | PixelInputBit(PixelInput::PerspectiveCentroid) |
+        PixelInputBit(PixelInput::LinearSample) | PixelInputBit(PixelInput::LinearCenter) | PixelInputBit(PixelInput::LinearCentroid) |
+        PixelInputBit(PixelInput::PositionX) | PixelInputBit(PixelInput::PositionY) | PixelInputBit(PixelInput::PositionZ) | PixelInputBit(PixelInput::PositionW) |
+        PixelInputBit(PixelInput::FrontFace) | PixelInputBit(PixelInput::Ancillary);
     if ((activeInputs & ~knownMask) != 0) {
-        throw std::runtime_error("AGC graphics: unsupported SPI_PS_INPUT_ENA/ADDR bit combination");
+        char message[128];
+        std::snprintf(message, sizeof(message), "AGC graphics: unsupported SPI_PS_INPUT_ENA/ADDR bit combination (ena 0x%x addr 0x%x)", ena, addr);
+        throw std::runtime_error(message);
     }
     std::array<std::uint32_t, 32> interpolatorSettings{};
     for (std::uint32_t i = 0; i < inputNum; ++i) {
@@ -112,37 +121,34 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
     for (std::uint32_t i = 0; i < 8u; ++i) {
         targetOutputMode[i] = static_cast<std::uint8_t>((colFormat >> (4u * i)) & 0xFu);
     }
-    const bool hasPerspectiveCenterVgpr = (activeInputs & 0x2u) != 0;
     const bool pixelKillEnable = ((shaderControl >> 6u) & 0x1u) != 0;
     const bool depthExportEnable = (shaderControl & 0x1u) != 0;
     const bool sampleMaskExportEnable = ((shaderControl >> 8u) & 0x1u) != 0;
     const auto zOrder = (shaderControl >> 4u) & 0x3u;
-    std::array<std::uint8_t, 8> targetExportMapping{};
-    targetExportMapping.fill(0xe4u);
-    if (hasColorTarget) {
-        targetExportMapping[0] = colorComponentMapping;
-    }
+    const auto loaded = [&](PixelInput input) { return (activeInputs & PixelInputBit(input)) != 0; };
     return ShaderRecompiler::ShaderPixelStageInfo{
-        inputNum,
-        interpolatorSettings,
-        (inControl & 0x8000u) != 0,
-        hasPerspectiveCenterVgpr ? ((activeInputs & 0x1u) ? 2u : 0u) : 0u,
-        hasPerspectiveCenterVgpr,
-        (activeInputs & 0x100u) != 0,
-        (activeInputs & 0x200u) != 0,
-        (activeInputs & 0x400u) != 0,
-        (activeInputs & 0x800u) != 0,
-        (activeInputs & 0x1000u) != 0,
-        (activeInputs & 0x2000u) != 0,
-        (activeInputs & 0x11u) == 0x11u,
-        (activeInputs & 0x20u) != 0,
-        pixelKillEnable,
-        depthExportEnable,
-        sampleMaskExportEnable,
-        zOrder == 1u && !pixelKillEnable && !depthExportEnable && !sampleMaskExportEnable,
-        ((shaderControl >> 10u) & 0x1u) != 0,
-        targetOutputMode,
-        targetExportMapping
+        .interpolatorCount = inputNum,
+        .interpolatorSettings = interpolatorSettings,
+        .wave32 = (inControl & 0x8000u) != 0,
+        .inputAddr = addr,
+        .hasPerspectiveCenterVgpr = loaded(PixelInput::PerspectiveCenter),
+        .perspectiveCentroid = loaded(PixelInput::PerspectiveCentroid),
+        .posX = loaded(PixelInput::PositionX),
+        .posY = loaded(PixelInput::PositionY),
+        .posZ = loaded(PixelInput::PositionZ),
+        .posW = loaded(PixelInput::PositionW),
+        .frontFace = loaded(PixelInput::FrontFace),
+        .ancillary = loaded(PixelInput::Ancillary),
+        .sampleShading = loaded(PixelInput::PerspectiveSample) && loaded(PixelInput::LinearSample),
+        .noPerspective = loaded(PixelInput::LinearCenter),
+        .linearCentroid = loaded(PixelInput::LinearCentroid),
+        .pixelKillEnable = pixelKillEnable,
+        .depthExportEnable = depthExportEnable,
+        .sampleMaskExportEnable = sampleMaskExportEnable,
+        .earlyZ = zOrder == 1u && !pixelKillEnable && !depthExportEnable && !sampleMaskExportEnable,
+        .executeOnNoop = ((shaderControl >> 10u) & 0x1u) != 0,
+        .targetOutputMode = targetOutputMode,
+        .targetExportMapping = exportMappings
     };
 }
 

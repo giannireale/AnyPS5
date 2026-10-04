@@ -24,6 +24,7 @@ const char* DccKeysName(DccKeys keys);
 // The keys covering a surface of `surfaceBytes`, when they all agree.
 DccKeys ReadDccKeys(std::uint64_t metaAddress, std::uint64_t surfaceBytes);
 bool IsDccClear(DccKeys keys);
+DccKeys CurrentDccKeys(std::uint64_t metaAddress, std::uint64_t surfaceBytes);
 // Stores "uncompressed" keys over the surface's metadata on the CPU (a guest memory write: it waits
 // for recorded GPU work that writes the keys first).
 void MarkDccUncompressed(std::uint64_t metaAddress, std::uint64_t surfaceBytes);
@@ -71,6 +72,7 @@ struct DccKeyProofCounts {
 DccKeyProofCounts KeyProofCounts();
 // A surface's texels as a read sees them: the guest bytes, or the clear value of fast-cleared keys.
 void ReadTextureSurface(const GuestTextureResource& resource, DccKeys keys, std::span<std::byte> bytes);
+void NoteKeysFillOnGpu(std::uint64_t begin, std::size_t count, DccKeys keys);
 
 }
 

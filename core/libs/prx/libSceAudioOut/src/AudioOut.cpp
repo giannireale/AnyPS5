@@ -1,3 +1,5 @@
+#include <cstdlib>
+#include <cstdio>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -96,13 +98,26 @@ struct Port {
 
 static std::mutex g_mutex;
 static Port g_ports[PORTS_MAX];
+// g_mutex guards the port table; producers pace themselves by sleeping, and they must not hold it
+// meanwhile or state queries (sceAudioOutGetPortState) from other threads starve. g_outputMutex keeps
+// producers and Close serialized across those sleeps. Lock order: g_outputMutex, then g_mutex.
+static std::mutex g_outputMutex;
 static bool g_sdlInitialized = false;
+
+// Caller holds g_mutex (and g_outputMutex); the port table may change while it is released.
+static void sleepWithoutPortLock(KernelTimespec& req) {
+    g_mutex.unlock();
+    sceKernelNanosleep(&req, nullptr);
+    g_mutex.lock();
+}
 
 static bool ensureSdlAudio() {
     if (g_sdlInitialized) {
         return true;
     }
     if (SDL_InitSubSystem(SDL_INIT_AUDIO) < 0) {
+        if (std::getenv("APS5_TRACE_AUDIOOUT") != nullptr)
+            std::fprintf(stderr, "[audioout] SDL audio init failed: %s\n", SDL_GetError());
         return false;
     }
     g_sdlInitialized = true;
@@ -122,6 +137,8 @@ static bool openDevice(Port& port) {
     SDL_AudioSpec obtained{};
     port.device = SDL_OpenAudioDevice(nullptr, 0, &desired, &obtained, SDL_AUDIO_ALLOW_ANY_CHANGE);
     if (port.device == 0) {
+        if (std::getenv("APS5_TRACE_AUDIOOUT") != nullptr)
+            std::fprintf(stderr, "[audioout] SDL audio open failed: %s\n", SDL_GetError());
         return false;
     }
     port.spec = obtained;
@@ -249,7 +266,7 @@ static void queueAudio(Port& port, const void* data) {
             KernelTimespec req{};
             req.tv_sec = 0;
             req.tv_nsec = static_cast<long>(DRAIN_SLEEP_US * 1000ULL);
-            sceKernelNanosleep(&req, nullptr);
+            sleepWithoutPortLock(req);
         }
         return;
     }
@@ -304,7 +321,7 @@ static void queueAudio(Port& port, const void* data) {
         KernelTimespec req{};
         req.tv_sec = 0;
         req.tv_nsec = static_cast<long>(DRAIN_SLEEP_US * 1000ULL);
-        sceKernelNanosleep(&req, nullptr);
+        sleepWithoutPortLock(req);
     }
 
     if (std::getenv("APS5_TRACE_AUDIOOUT") != nullptr) {
@@ -397,6 +414,8 @@ int APS5_VABI sceAudioOutOpen(int userId, int type, int index, std::uint32_t len
             if (type != PORT_TYPE_VIBRATION) {
                 openDevice(port);
             }
+            static const bool trace = std::getenv("APS5_TRACE_AUDIOOUT") != nullptr;
+            if (trace) std::fprintf(stderr, "[audioout] port %d: type %d, %u samples at %u Hz, format %d, device %u\n", i + 1, type, len, freq, static_cast<int>(format), static_cast<unsigned>(port.device));
             return i + 1;
         }
     }
@@ -404,6 +423,7 @@ int APS5_VABI sceAudioOutOpen(int userId, int type, int index, std::uint32_t len
 }
 
 int APS5_VABI sceAudioOutClose(int handle) {
+    std::lock_guard<std::mutex> outputLock(g_outputMutex);
     std::lock_guard<std::mutex> lock(g_mutex);
     Port* port = getPort(handle);
     if (port == nullptr) {
@@ -415,6 +435,7 @@ int APS5_VABI sceAudioOutClose(int handle) {
 }
 
 int APS5_VABI sceAudioOutOutput(int handle, const void* ptr) {
+    std::lock_guard<std::mutex> outputLock(g_outputMutex);
     std::lock_guard<std::mutex> lock(g_mutex);
     Port* port = getPort(handle);
     if (port == nullptr) {
@@ -431,7 +452,7 @@ int APS5_VABI sceAudioOutOutput(int handle, const void* ptr) {
         KernelTimespec req{};
         req.tv_sec = static_cast<time_t>(waitUs / 1000000ULL);
         req.tv_nsec = static_cast<long>((waitUs % 1000000ULL) * 1000ULL);
-        sceKernelNanosleep(&req, nullptr);
+        sleepWithoutPortLock(req);
         if (std::getenv("APS5_TRACE_AUDIOOUT") != nullptr) {
             static unsigned traced = 0;
             if (traced++ < 8) std::fprintf(stderr, "[audioout] port %d no-device wait requested %llu us actual %llu us\n", handle,
@@ -453,6 +474,7 @@ int APS5_VABI sceAudioOutOutputs(AudioOutOutputParam* param, std::uint32_t num) 
         return -2144993276;
     }
 
+    std::lock_guard<std::mutex> outputLock(g_outputMutex);
     std::lock_guard<std::mutex> lock(g_mutex);
 
     for (std::uint32_t i = 0; i < num; i++) {
@@ -487,7 +509,7 @@ int APS5_VABI sceAudioOutOutputs(AudioOutOutputParam* param, std::uint32_t num) 
         KernelTimespec req{};
         req.tv_sec = static_cast<time_t>(maxWait / 1000000ULL);
         req.tv_nsec = static_cast<long>((maxWait % 1000000ULL) * 1000ULL);
-        sceKernelNanosleep(&req, nullptr);
+        sleepWithoutPortLock(req);
     }
 
     for (std::uint32_t i = 0; i < num; i++) {
@@ -568,6 +590,11 @@ int APS5_VABI sceAudioOutGetPortState(int handle, AudioOutPortState* state) {
             throw std::runtime_error("sceAudioOutGetPortState: unknown port type");
     }
     return 0;
+}
+
+int APS5_VABI sceAudioOutSetMixLevelPadSpk(void) {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
 }
 
 }

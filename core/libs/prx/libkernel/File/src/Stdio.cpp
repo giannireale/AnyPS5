@@ -1,3 +1,4 @@
+#include "prx/libc/include/general/ExportMacros.hpp"
 #include <cstdint>
 #include <cstddef>
 #include <limits>
@@ -6,6 +7,8 @@
 #include "prx/libkernel/File/include/File.hpp"
 #include "prx/libkernel/File/include/FileFlags.hpp"
 #include "prx/libkernel/File/include/NativeStat.hpp"
+#include "prx/libkernel/File/include/DirectoryDescriptor.hpp"
+#include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libkernel/Socket/include/SocketRuntime.hpp"
 #include <cerrno>
 #include <cstring>
@@ -13,11 +16,18 @@
 #include <filesystem>
 #include <stdexcept>
 #include <string>
+extern "C" int* APS5_VABI __error_nid_postfix();
+static int PosixResult(int result) {
+    if (result >= 0) return result;
+    *__error_nid_postfix() = static_cast<unsigned int>(result) & 0xffffu;
+    return -1;
+}
 #ifdef _WIN32
 #include <windows.h>
 #include <io.h>
 #include <direct.h>
 #include <sys/stat.h>
+#include <sys/utime.h>
 static int NativeRmdir(const std::filesystem::path& path) {
     return ::_wrmdir(path.wstring().c_str());
 }
@@ -30,6 +40,11 @@ static int NativeChmod(const std::filesystem::path& path, int mode) {
 }
 static int NativeFtruncate(int descriptor, std::int64_t length) {
     return static_cast<int>(::_chsize_s(descriptor, length));
+}
+static int NativeUtimes(const std::filesystem::path& path, const KernelTimeval* times) {
+    if (times == nullptr) return ::_wutime(path.wstring().c_str(), nullptr);
+    struct _utimbuf values{static_cast<time_t>(times[0].tv_sec), static_cast<time_t>(times[1].tv_sec)};
+    return ::_wutime(path.wstring().c_str(), &values);
 }
 static int NativeFlock(int descriptor, int operation) {
     HANDLE handle = reinterpret_cast<HANDLE>(::_get_osfhandle(descriptor));
@@ -45,40 +60,39 @@ static int NativeFlock(int descriptor, int operation) {
     if (operation & 4) flags |= LOCKFILE_FAIL_IMMEDIATELY;
     return ::LockFileEx(handle, flags, 0, MAXDWORD, MAXDWORD, &overlapped) ? 0 : -1;
 }
+static std::int64_t NativePositioned(int descriptor, void* buf, std::size_t nbytes, std::int64_t offset, bool write) {
+    if (nbytes > static_cast<std::size_t>(std::numeric_limits<DWORD>::max())) {
+        throw std::runtime_error("NativePositioned: nbytes exceeds platform limit");
+    }
+    const auto handle = reinterpret_cast<HANDLE>(::_get_osfhandle(descriptor));
+    if (handle == INVALID_HANDLE_VALUE) {
+        errno = EBADF;
+        return -1;
+    }
+    OVERLAPPED overlapped{};
+    overlapped.Offset = static_cast<DWORD>(offset);
+    overlapped.OffsetHigh = static_cast<DWORD>(static_cast<std::uint64_t>(offset) >> 32u);
+    DWORD done = 0;
+    const BOOL ok = write ? ::WriteFile(handle, buf, static_cast<DWORD>(nbytes), &done, &overlapped)
+                          : ::ReadFile(handle, buf, static_cast<DWORD>(nbytes), &done, &overlapped);
+    if (!ok) {
+        if (!write && ::GetLastError() == ERROR_HANDLE_EOF) return 0;
+        errno = EIO;
+        return -1;
+    }
+    return done;
+}
 static std::int64_t NativePread(int descriptor, void* buf, std::size_t nbytes, std::int64_t offset) {
-    if (nbytes > static_cast<std::size_t>(std::numeric_limits<unsigned int>::max())) {
-        throw std::runtime_error("NativePread: nbytes exceeds platform limit");
-    }
-    std::int64_t saved = ::_lseeki64(descriptor, 0, SEEK_CUR);
-    if (saved < 0) {
-        return -1;
-    }
-    if (::_lseeki64(descriptor, offset, SEEK_SET) < 0) {
-        return -1;
-    }
-    int n = ::_read(descriptor, buf, static_cast<unsigned int>(nbytes));
-    ::_lseeki64(descriptor, saved, SEEK_SET);
-    return n;
+    return NativePositioned(descriptor, buf, nbytes, offset, false);
 }
 static std::int64_t NativePwrite(int descriptor, const void* buf, std::size_t nbytes, std::int64_t offset) {
-    if (nbytes > static_cast<std::size_t>(std::numeric_limits<unsigned int>::max())) {
-        throw std::runtime_error("NativePwrite: nbytes exceeds platform limit");
-    }
-    std::int64_t saved = ::_lseeki64(descriptor, 0, SEEK_CUR);
-    if (saved < 0) {
-        return -1;
-    }
-    if (::_lseeki64(descriptor, offset, SEEK_SET) < 0) {
-        return -1;
-    }
-    int n = ::_write(descriptor, buf, static_cast<unsigned int>(nbytes));
-    ::_lseeki64(descriptor, saved, SEEK_SET);
-    return n;
+    return NativePositioned(descriptor, const_cast<void*>(buf), nbytes, offset, true);
 }
 #else
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/file.h>
+#include <sys/time.h>
 #include <dirent.h>
 #include <sys/syscall.h>
 #include <vector>
@@ -93,6 +107,12 @@ static int NativeChmod(const std::filesystem::path& path, int mode) {
 }
 static int NativeFtruncate(int descriptor, std::int64_t length) {
     return ::ftruncate(descriptor, static_cast<off_t>(length));
+}
+static int NativeUtimes(const std::filesystem::path& path, const KernelTimeval* times) {
+    if (times == nullptr) return ::utimes(path.c_str(), nullptr);
+    struct timeval values[2]{{static_cast<time_t>(times[0].tv_sec), static_cast<suseconds_t>(times[0].tv_usec)},
+        {static_cast<time_t>(times[1].tv_sec), static_cast<suseconds_t>(times[1].tv_usec)}};
+    return ::utimes(path.c_str(), values);
 }
 static int NativeFlock(int descriptor, int operation) {
     return ::flock(descriptor, operation);
@@ -157,9 +177,10 @@ int APS5_VABI flock_nid_postfix(int d, int operation) {
 
 int64_t APS5_VABI fstat_nid_disambig1_nid_postfix(int d, FileStat* sb) {
     if (sb == nullptr) {
-        APS5_INVALID_ARG_EX;
+        return PosixResult(SCE_KERNEL_ERROR_EFAULT);
     }
-    File::FillFileStat(d, sb);
+    if (d < 0) return PosixResult(SCE_KERNEL_ERROR_EBADF);
+    if (!File::FillFileStatFromDescriptor(d, sb)) return PosixResult(SceErrorFromErrno(errno));
     return 0;
 }
 
@@ -180,6 +201,10 @@ int APS5_VABI ftruncate_nid_postfix(int d, int64_t length) {
     return 0;
 }
 
+int APS5_VABI sceKernelFtruncate(int d, int64_t length) {
+    return ftruncate_nid_postfix(d, length);
+}
+
 int64_t APS5_VABI lseek_nid_postfix(int d, int64_t offset, int whence) {
     return static_cast<int64_t>(sceKernelLseek(d, offset, whence));
 }
@@ -196,7 +221,8 @@ int APS5_VABI mkdir_nid_postfix(const char* path, uint16_t mode) {
 }
 
 int APS5_VABI open_nid_postfix(const char* path, int flags, int mode) {
-    return sceKernelOpen(path, flags, static_cast<std::uint16_t>(mode));
+    if (!path) return PosixResult(SCE_KERNEL_ERROR_EFAULT);
+    return PosixResult(sceKernelOpen(path, flags, static_cast<std::uint16_t>(mode)));
 }
 
 int APS5_VABI _open_nid_postfix(const char* path, int flags, ...) {
@@ -214,7 +240,8 @@ int APS5_VABI _open_nid_postfix(const char* path, int flags, ...) {
         va_end(arguments);
 #endif
     }
-    return sceKernelOpen(path, flags, mode);
+    if (!path) return PosixResult(SCE_KERNEL_ERROR_EFAULT);
+    return PosixResult(sceKernelOpen(path, flags, mode));
 }
 
 int64_t APS5_VABI pread_nid_postfix(int d, void* buf, size_t nbytes, int64_t offset) {
@@ -273,9 +300,10 @@ int APS5_VABI unlink_nid_postfix(const char* path) {
 }
 
 int APS5_VABI sceKernelCheckReachability(const char* path) {
- (void)path;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (path == nullptr) return SCE_KERNEL_ERROR_EINVAL;
+    if (std::strlen(path) > 255) return SCE_KERNEL_ERROR_ENAMETOOLONG;
+    std::error_code error;
+    return std::filesystem::exists(ResolvePath_nid_no_patch(path), error) ? 0 : SCE_KERNEL_ERROR_ENOENT;
 }
 
 int APS5_VABI sceKernelFstat(int d, FileStat* sb) {
@@ -285,28 +313,25 @@ int APS5_VABI sceKernelFstat(int d, FileStat* sb) {
 }
 
 int APS5_VABI sceKernelFsync(int fd) {
- (void)fd;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+#ifdef _WIN32
+ return ::_commit(fd);
+#else
+ return ::fsync(fd);
+#endif
 }
 
 #ifdef _WIN32
 
-int APS5_VABI sceKernelGetdents(int fd, char* buf, int nbytes) {
- (void)fd;
- (void)buf;
- (void)nbytes;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* basep) {
+    if (buf == nullptr) return SceErrorFromErrno(GUEST_EFAULT);
+    if (nbytes <= 0) return SceErrorFromErrno(GUEST_EINVAL);
+    if (basep != nullptr) *basep = 0;
+    const int written = File::ReadDirectoryDescriptor(fd, buf, nbytes);
+    return written < 0 ? SceErrorFromErrno(GUEST_ENOTDIR) : written;
 }
 
-int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* basep) {
- (void)fd;
- (void)buf;
- (void)nbytes;
- (void)basep;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+int APS5_VABI sceKernelGetdents(int fd, char* buf, int nbytes) {
+    return sceKernelGetdirentries(fd, buf, nbytes, nullptr);
 }
 
 #else
@@ -371,21 +396,11 @@ int APS5_VABI sceKernelMkdir(const char* path, uint16_t mode) {
 #ifdef _WIN32
 
 int64_t APS5_VABI sceKernelPread(int d, void* buf, size_t nbytes, int64_t offset) {
- (void)d;
- (void)buf;
- (void)nbytes;
- (void)offset;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return pread_nid_postfix(d, buf, nbytes, offset);
 }
 
 int64_t APS5_VABI sceKernelPwrite(int d, const void* buf, size_t nbytes, int64_t offset) {
- (void)d;
- (void)buf;
- (void)nbytes;
- (void)offset;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return pwrite_nid_disambig1_nid_postfix(d, buf, nbytes, offset);
 }
 
 #else
@@ -416,6 +431,12 @@ int APS5_VABI sceKernelRename(const char* from, const char* to) {
     return 0;
 }
 
+int APS5_VABI rename_nid_postfix(const char* from, const char* to);
+
+int APS5_VABI KernelPosixRename_nid_no_patch(const char* from, const char* to) {
+    return rename_nid_postfix(from, to);
+}
+
 int APS5_VABI sceKernelRmdir(const char* path) {
     if (path == nullptr) throw std::invalid_argument("sceKernelRmdir: path is null");
     const auto native = ResolvePath_nid_no_patch(path);
@@ -435,24 +456,53 @@ int APS5_VABI rmdir_nid_postfix(const char* path) {
 extern "C" {
 
 int APS5_VABI sceKernelChmod_nid_postfix(const char* path, std::uint16_t mode) {
-    (void)path;
-    (void)mode;
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return chmod_nid_postfix(path, mode);
 }
 
 int APS5_VABI sceKernelTruncate_nid_postfix(const char* path, std::int64_t length) {
-    (void)path;
-    (void)length;
-    NotImplemented_nid_no_patch(__func__);
+    if (path == nullptr) throw std::invalid_argument("sceKernelTruncate: path is null");
+    if (length < 0) return SceErrorFromErrno(GUEST_EINVAL);
+    const auto native = ResolvePath_nid_no_patch(path);
+    std::error_code error;
+    if (!std::filesystem::exists(native, error)) return SceErrorFromErrno(GUEST_ENOENT);
+    std::filesystem::resize_file(native, static_cast<std::uintmax_t>(length), error);
+    if (error) return SceErrorFromErrno(GUEST_EIO);
     return 0;
 }
 
 int APS5_VABI sceKernelUtimes_nid_postfix(const char* path, const KernelTimeval* times) {
-    (void)path;
+    if (path == nullptr) throw std::invalid_argument("sceKernelUtimes: path is null");
+    const auto native = ResolvePath_nid_no_patch(path);
+    if (NativeUtimes(native, times) != 0) return SceErrorFromErrno(errno);
+    return 0;
+}
+
+int APS5_VABI utimes_nid_postfix(const char* path, const KernelTimeval* times) {
+    return sceKernelUtimes_nid_postfix(path, times);
+}
+
+int APS5_VABI futimes_nid_postfix(int d, const KernelTimeval* times) {
+    (void)d;
     (void)times;
-    NotImplemented_nid_no_patch(__func__);
+    NotImplemented_nid_no_patch("futimes: descriptor timestamps");
+    return 0;
+}
+
+int APS5_VABI fchmod_nid_postfix(int d, int mode) {
+    (void)d;
+    (void)mode;
+    NotImplemented_nid_no_patch("fchmod: descriptor permissions");
+    return 0;
+}
+
+int APS5_VABI sceKernelFchmod(int d, std::uint16_t mode) {
+    (void)d;
+    (void)mode;
+    NotImplemented_nid_no_patch("sceKernelFchmod: descriptor permissions");
     return 0;
 }
 
 }
+
+// libScePosix rename: the NID patcher skips the plain name because libc exports one too.
+APS5_EXPORT("NN01qLRhiqU", KernelPosixRename_nid_no_patch);

@@ -36,6 +36,12 @@ RdnaOperand TranslationContext::destinationOperand(const RdnaInstruction& inst) 
     return destination;
 }
 
+RdnaOperand TranslationContext::accumulatorOperand(const RdnaInstruction& inst) {
+    RdnaOperand accumulator = inst.destination;
+    accumulator.dpp = false;
+    return accumulator;
+}
+
 RdnaOperand TranslationContext::offsetOperand(const RdnaOperand& operand, std::uint32_t offset) {
     if (offset == 0u) {
         return operand;
@@ -113,7 +119,7 @@ IrValue* TranslationContext::readOperand(const RdnaOperand& operand, IrType type
         return &ir.Emit(IrOpcode::ConvertU16U32, IrType::U16, {&applyBitSourceModifiers(operand, readRawU32(operand)).Value()});
     }
     if (type == IrType::F16) {
-        const IrU16 bits(ir.Emit(IrOpcode::ConvertU16U32, IrType::U16, {&applyBitSourceModifiers(operand, readRawU32(operand)).Value()}));
+        const IrU16 bits(ir.Emit(IrOpcode::ConvertU16U32, IrType::U16, {&readF16SourceBits(operand).Value()}));
         return &ir.Emit(IrOpcode::BitCastF16U16, IrType::F16, {&bits.Value()});
     }
     if (type == IrType::U1) {

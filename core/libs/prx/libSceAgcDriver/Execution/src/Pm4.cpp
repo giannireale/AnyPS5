@@ -30,7 +30,11 @@ std::uint64_t address(std::uint32_t low, std::uint32_t high) {
 std::uint32_t registerOffset(std::uint32_t value) {
     require(value != 0xffffffffu, "indirect register sentinel semantics are not implemented");
     const auto offset = value & ~0x70000000u;
-    if (offset > 0xffffu) throw std::runtime_error("extended register semantics are not implemented (register dword 0x" + ToHex(value) + ")");
+    if (offset > 0xffffu) {
+        char what[80];
+        std::snprintf(what, sizeof(what), "extended register semantics are not implemented (offset dword 0x%08x)", value);
+        throw std::runtime_error(what);
+    }
     return offset;
 }
 
@@ -175,8 +179,9 @@ std::string_view UnsupportedReason(std::uint32_t header) {
         case 0x22: return "conditional command execution and conditional flip reservation are not implemented";
         case 0x33: case 0x3f: return "nested command buffers, branching and nested flip reservation are not implemented";
         case 0x3c: case 0x93: return {};
-        case 0x39: case 0x59:
+        case 0x39:
             return "cooperative command-queue waits are not implemented";
+        case 0x59: return {};
         case 0x84: case 0x85: case 0x86: case 0x88:
             return "separate CE/DE execution and counter synchronization are not implemented";
         case 0x49: return {};
@@ -286,10 +291,10 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             require((packet[8] & 3u) == 0 && packet[8] >= (opcode == 0x2c ? 16u : 20u), "invalid indirect draw stride");
             require((packet[9] & ~0x20u) == (opcode == 0x2c ? 2u : 0u), "unsupported indirect draw initiator");
             break;
-        case 0x15: size(5); if ((packet[4] & ~0x8020u) != 0x41u) throw std::runtime_error("dispatch modifiers 0x" + ToHex(packet[4]) + " are not implemented"); break;
+        case 0x15: size(5); if ((packet[4] & ~0xa020u) != 0x41u) throw std::runtime_error("dispatch modifiers 0x" + ToHex(packet[4]) + " are not implemented"); break;
         case 0x16:
             require(packet.size() == 3 || packet.size() == 4, "invalid indirect dispatch size");
-            require((packet.back() & ~0x8020u) == 0x41u, "indirect dispatch modifiers are not implemented");
+            require((packet.back() & ~0xa020u) == 0x41u, "indirect dispatch modifiers are not implemented");
             break;
         case 0x42: size(2); require(packet[1] == 0, "unsupported PFP_SYNC_ME payload"); break;
         case 0x46: {
@@ -306,6 +311,12 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
                     graphics();
                     size(2);
                     require(eventIndex == 0 || eventIndex == 7, "invalid cache-flush event index");
+                    break;
+                case 0x39:
+                    graphics();
+                    size(4);
+                    require(eventIndex == 1, "invalid occlusion counter dump event index");
+                    require(address(packet[2], packet[3]) != 0 && (packet[2] & 7u) == 0, "null or misaligned occlusion counter dump address");
                     break;
                 default: throw std::runtime_error("EVENT_WRITE event type " + std::to_string(eventType) + " is not implemented");
             }
@@ -341,6 +352,10 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             require(packet.size() - 2 <= 0x10000u - offset, "register range overflow");
             break;
         }
+        case 0x59:
+            size(2);
+            require((packet[1] & 0x7fffffffu) == 0, "unsupported REWIND payload bits");
+            break;
         case 0x3c: case 0x93: {
             size(opcode == 0x3c ? 7 : 9);
             require((packet[1] & 0x10u) != 0, "register-space WAIT_REG_MEM is not implemented");
@@ -365,7 +380,10 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             break;
         case 0x37: {
             require(packet.size() >= 5, "WRITE_DATA has no data");
-            require((packet[1] & ~0x00110f00u) == 0, "WRITE_DATA engine, cache or reserved fields are not implemented");
+            // CACHE_POLICY (bits 26:25) only hints the GPU L2 policy of the write; the emulated write
+            // lands in guest memory either way.
+            constexpr std::uint32_t writeDataCachePolicy = 0x06000000u;
+            require((packet[1] & ~(0x00110f00u | writeDataCachePolicy)) == 0, "WRITE_DATA engine or reserved fields are not implemented");
             const auto destination = (packet[1] >> 8u) & 0xfu;
             require(destination == 1 || destination == 2 || (queue != 0 && destination == 5), "WRITE_DATA register or GDS destination is not implemented");
             require((packet[2] & 3u) == 0, "misaligned WRITE_DATA destination");
@@ -440,6 +458,11 @@ bool WaitSatisfiedUnchecked(std::span<const std::uint32_t> packet) {
 bool WaitComparesValue(std::span<const std::uint32_t> packet, std::uint64_t value) {
     const bool wide = ((packet[0] >> 8u) & 0xffu) == 0x93u;
     return waitCompares(packet, wide, value);
+}
+
+std::size_t WaitAwaitedBytes(std::span<const std::uint32_t> packet) {
+    const bool wide = ((packet[0] >> 8u) & 0xffu) == 0x93u;
+    return wide && (packet.size() < 8 || packet[7] != 0) ? 8 : 4;
 }
 
 std::optional<LabelWrite> DecodeLabelWrite(std::span<const std::uint32_t> packet) {
@@ -629,7 +652,9 @@ DrawParameters ResolveDraw(std::span<const std::uint32_t> packet, const QueueSta
     require(bytes <= std::numeric_limits<std::size_t>::max(), "index range size overflow");
     GuestMemory::CheckRange(reinterpret_cast<const void*>(address), static_cast<std::size_t>(bytes), indexSize);
     APS5_LOG_OUT_DEBUG("ResolveDraw context targetMask=0x%x shaderMask=0x%x indexCount=%u indexType=%u instances=%u", queue.context.contains(0x8e) ? queue.context.at(0x8e) : 0u, queue.context.contains(0x8f) ? queue.context.at(0x8f) : 0u, count, queue.indexType, queue.instanceCount);
-    return {address, count, indexSize, queue.instanceCount, packet.back()};
+    const auto indexOffset = queue.userConfig.find(0x24a);
+    require(indexOffset != queue.userConfig.end(), "missing GE_INDX_OFFSET register");
+    return {address, count, indexSize, queue.instanceCount, packet.back(), true, indexOffset->second, 0};
 }
 
 void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
@@ -703,6 +728,7 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
             }
             return;
         }
+        case 0x59: break;
         case 0x3c: case 0x93: {
             // The waited-on value is written by the CPU or another queue; poll it like the CP would.
             const auto start = std::chrono::steady_clock::now();
@@ -719,7 +745,7 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
         }
         case 0x49: {
             // Earlier work has drained by the time the driver reaches this packet, so the end-of-pipe
-            // write can happen immediately. Interrupt delivery is not modeled.
+            // write can happen immediately.
             const auto dataSelect = packet[2] >> 29u;
             const auto destination = address(packet[3], packet[4]);
             if (dataSelect == 0 || destination == 0) return;

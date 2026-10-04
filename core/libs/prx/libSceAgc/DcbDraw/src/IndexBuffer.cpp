@@ -14,8 +14,7 @@ std::uint32_t* APS5_VABI sceAgcDcbSetIndexBuffer(CommandBuffer* buf, std::uint64
 }
 
 std::uint32_t APS5_VABI sceAgcDcbSetIndexBufferGetSize() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return 12;
 }
 
 std::uint32_t* APS5_VABI sceAgcDcbSetIndexCount(CommandBuffer* buf, std::uint32_t indexCount) {
@@ -33,8 +32,15 @@ std::uint32_t* APS5_VABI sceAgcDcbSetIndexSize(CommandBuffer* buf, std::uint8_t 
 }
 
 std::uint32_t APS5_VABI sceAgcDcbSetIndexSizeGetSize() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return 12;
+}
+
+APS5_EXPORT("-KRzWekV120", sceAgcUnknown__MKRzWekV120);
+std::uint32_t* APS5_VABI sceAgcUnknown__MKRzWekV120(CommandBuffer* buf, std::uint8_t indexSize, std::uint8_t cachePolicy, std::uint8_t perInstanceObjectId) {
+    Agc::Command::CheckBits(perInstanceObjectId, 1, __func__);
+    auto* packet = sceAgcDcbSetIndexSize(buf, indexSize, cachePolicy);
+    packet[2] |= static_cast<std::uint32_t>(perInstanceObjectId) << 14u;
+    return packet;
 }
 
 std::uint32_t* APS5_VABI sceAgcDcbSetIndexIndirectArgs(CommandBuffer* buf, std::uint32_t dataOffsetInBytes) {

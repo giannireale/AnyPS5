@@ -15,11 +15,20 @@ bool sharedTiers() {
     return shared;
 }
 
+VkDeviceSize hostBudget(const char* name, VkDeviceSize fallback) {
+    const char* value = std::getenv(name);
+    if (value == nullptr) return fallback;
+    char* end = nullptr;
+    const auto mib = std::strtoull(value, &end, 10);
+    if (end == value || *end != '\0' || mib == 0 || mib > 16384) return fallback;
+    return static_cast<VkDeviceSize>(mib) * 1024 * 1024;
+}
+
 }
 
 BufferPool::BufferPool(const Context& context) : device(context.device), unmap(context.Function<PFN_vkUnmapMemory>("vkUnmapMemory")), destroyBuffer(context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer")), freeMemory(context.Function<PFN_vkFreeMemory>("vkFreeMemory")) {
-    smallTier.budget = smallBudget;
-    largeTier.budget = budget;
+    smallTier.budget = hostBudget("APS5_HOST_SMALL_POOL_MIB", smallBudget);
+    largeTier.budget = hostBudget("APS5_HOST_LARGE_POOL_MIB", budget);
     deviceTier.budget = DeviceBudget();
 }
 
@@ -66,7 +75,7 @@ std::optional<BufferAllocation> BufferPool::Take(std::size_t bytes, VkBufferUsag
         const auto now = std::chrono::steady_clock::now();
         if (now - lastReport > std::chrono::seconds(10)) {
             lastReport = now;
-            std::fprintf(stderr, "[bufferpool] small: %llu hits, %llu misses, %llu evictions, %zu retained (%.0f MiB); large: %llu hits, %llu misses, %llu evictions, %zu retained (%.0f MiB)%s; device: %llu hits, %llu misses, %llu evictions, %zu retained (%.0f MiB of %llu)\n", static_cast<unsigned long long>(smallTier.hits), static_cast<unsigned long long>(smallTier.misses), static_cast<unsigned long long>(smallTier.evictions), smallTier.free.size(), smallTier.retainedBytes / 1048576.0, static_cast<unsigned long long>(largeTier.hits), static_cast<unsigned long long>(largeTier.misses), static_cast<unsigned long long>(largeTier.evictions), largeTier.free.size(), largeTier.retainedBytes / 1048576.0, sharedTiers() ? " (shared)" : "", static_cast<unsigned long long>(deviceTier.hits), static_cast<unsigned long long>(deviceTier.misses), static_cast<unsigned long long>(deviceTier.evictions), deviceTier.free.size(), deviceTier.retainedBytes / 1048576.0, static_cast<unsigned long long>(deviceTier.budget >> 20u));
+            std::fprintf(stderr, "[bufferpool] small: %llu hits, %llu misses, %llu evictions, %zu retained (%.0f MiB of %llu); large: %llu hits, %llu misses, %llu evictions, %zu retained (%.0f MiB of %llu)%s; device: %llu hits, %llu misses, %llu evictions, %zu retained (%.0f MiB of %llu)\n", static_cast<unsigned long long>(smallTier.hits), static_cast<unsigned long long>(smallTier.misses), static_cast<unsigned long long>(smallTier.evictions), smallTier.free.size(), smallTier.retainedBytes / 1048576.0, static_cast<unsigned long long>(smallTier.budget >> 20u), static_cast<unsigned long long>(largeTier.hits), static_cast<unsigned long long>(largeTier.misses), static_cast<unsigned long long>(largeTier.evictions), largeTier.free.size(), largeTier.retainedBytes / 1048576.0, static_cast<unsigned long long>(largeTier.budget >> 20u), sharedTiers() ? " (shared)" : "", static_cast<unsigned long long>(deviceTier.hits), static_cast<unsigned long long>(deviceTier.misses), static_cast<unsigned long long>(deviceTier.evictions), deviceTier.free.size(), deviceTier.retainedBytes / 1048576.0, static_cast<unsigned long long>(deviceTier.budget >> 20u));
         }
     }
     auto& tier = tierFor(capacity, properties);

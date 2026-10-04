@@ -27,6 +27,19 @@ std::exception_ptr shutdownFailure;
 std::stop_source shutdownSource;
 std::atomic<bool> exitRequested{false};
 std::atomic<bool> exitStarted{false};
+using GuestExitCallback = void (APS5_VABI*)();
+std::mutex exitCallbackMutex;
+std::vector<GuestExitCallback> exitCallbacks;
+
+void runGuestExitCallback() {
+    GuestExitCallback callback;
+    {
+        std::lock_guard lock(exitCallbackMutex);
+        callback = exitCallbacks.back();
+        exitCallbacks.pop_back();
+    }
+    callback();
+}
 
 }
 
@@ -112,6 +125,10 @@ void APS5_VABI exit_nid_postfix(int code) {
     LibcExit_nid_no_patch(code);
 }
 
+[[noreturn]] void APS5_VABI catchReturnFromMain_nid_postfix(int status) {
+    LibcExit_nid_no_patch(status);
+}
+
 [[noreturn]] void abort_nid_postfix(
     uint64_t arg0, uint64_t arg1, uint64_t arg2,
     uint64_t arg3, uint64_t arg4, uint64_t arg5
@@ -135,10 +152,14 @@ int* APS5_VABI __error_nid_postfix() {
     std::abort();
 }
 
-int APS5_VABI atexit_nid_postfix(atexit_func_t func) {
+int APS5_VABI atexit_nid_postfix(GuestExitCallback func) {
     if (func == nullptr)
         return 0;
-    return std::atexit(func);
+    std::lock_guard lock(exitCallbackMutex);
+    exitCallbacks.push_back(func);
+    const int result = std::atexit(runGuestExitCallback);
+    if (result != 0) exitCallbacks.pop_back();
+    return result;
 }
 
 }

@@ -45,6 +45,8 @@ struct MemoryInfo {
     bool idxen = false;
     bool offen = false;
     bool planningOnly = false;
+    bool coherent = false;
+    bool gpuDescriptor = false;
 
     bool operator==(const MemoryInfo& other) const = default;
 };

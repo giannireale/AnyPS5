@@ -107,7 +107,7 @@ private:
 
     static void commit(void* pointer, std::size_t bytes) {
 #ifdef _WIN32
-        if (!VirtualAlloc(pointer, bytes, MEM_COMMIT, PAGE_READWRITE)) throw std::bad_alloc();
+        GuestArena::GuestArenaCommit_nid_postfix(pointer, bytes, PAGE_READWRITE, bytes);
 #else
         (void)pointer;
         (void)bytes;
@@ -165,7 +165,7 @@ private:
 
         static void release(void* raw, std::size_t bytes) {
 #ifdef _WIN32
-            if (!VirtualFree(raw, bytes, MEM_DECOMMIT)) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "guest heap decommit failed");
+            GuestArena::GuestArenaReset_nid_postfix(raw, bytes);
             GuestAllocations::GuestAllocationsInvalidate_nid_postfix(reinterpret_cast<std::uintptr_t>(raw), bytes);
 #endif
             GuestArena::GuestArenaRelease_nid_postfix(raw, bytes);
@@ -244,6 +244,21 @@ void* GuestHeapReallocate_nid_postfix(void* pointer, std::size_t bytes) {
         return nullptr;
     }
     void* result = allocate(mutation, MinimumAlignment, bytes);
+    std::memcpy(result, pointer, std::min(bytes, range.bytes));
+    free(mutation, pointer);
+    return result;
+}
+
+void* GuestHeapRealign_nid_postfix(void* pointer, std::size_t bytes, std::size_t alignment) {
+    if (pointer == nullptr) return GuestHeapAlign_nid_postfix(alignment, bytes);
+    GuestAllocations::Mutation mutation;
+    const auto range = mutation.Find(pointer);
+    mutation.RequireUnpinned(pointer, range.bytes);
+    if (bytes == 0) {
+        free(mutation, pointer);
+        return nullptr;
+    }
+    void* result = allocate(mutation, alignment, bytes);
     std::memcpy(result, pointer, std::min(bytes, range.bytes));
     free(mutation, pointer);
     return result;

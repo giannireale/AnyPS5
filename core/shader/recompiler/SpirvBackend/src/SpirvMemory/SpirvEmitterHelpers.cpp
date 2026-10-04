@@ -190,7 +190,21 @@ void DefineInputs(SpirvEmitterState& state) {
             addBuiltin(StageInputKind::WorkgroupId, 3u, "gl_WorkGroupID");
         }
     }
+    const bool pixelStage = state.program.Resources().stage == IrShaderStage::Pixel;
     for (auto& input : state.inputs) {
+        if (pixelStage && input.kind == StageInputKind::Parameter) {
+            const auto location = PixelParameterLocation(state, input.location);
+            const auto shared = std::find_if(state.inputs.begin(), state.inputs.end(), [&](const SpirvInputBinding& other) {
+                return &other != &input && other.kind == StageInputKind::Parameter && other.variableId != 0u && PixelParameterLocation(state, other.location) == location;
+            });
+            if (shared != state.inputs.end()) {
+                if (shared->perVertex != input.perVertex) {
+                    throw std::runtime_error("SPIR-V module emission failed: pixel inputs sharing parameter " + std::to_string(location) + " disagree on per-vertex access");
+                }
+                input.variableId = shared->variableId;
+                continue;
+            }
+        }
         std::uint32_t type = TypeU32(state);
         switch (input.kind) {
         case StageInputKind::VertexIndex:
@@ -244,7 +258,7 @@ void DefineInputs(SpirvEmitterState& state) {
             } else if (flat) {
                 state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationFlat);
             }
-            if (state.program.Resources().stage == IrShaderStage::Pixel && PixelInfo(state).psNoPerspective && !flat && !input.perVertex) {
+            if (!flat && !input.perVertex && PixelParameterIsLinear(state, input.location)) {
                 state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationNoPerspective);
             }
             state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationLocation, PixelParameterLocation(state, input.location));
@@ -331,7 +345,7 @@ void DefineOutputs(SpirvEmitterState& state) {
 void DefineDescriptors(SpirvEmitterState& state) {
     const IrBindingLayout& layout = state.program.Metadata().bindings;
     const IrShaderStage stage = state.program.Resources().stage;
-    if (layout.UsesPushData()) {
+    if (layout.UsesPushData() || stage == IrShaderStage::Mesh) {
         const auto type = PushConstantBlockType(state);
         state.pushConstantVariable = state.module.DefineGlobalVariable(TypePointer(state, spv::StorageClassPushConstant, type), spv::StorageClassPushConstant);
         state.module.AddName(type, "BufferResource");
@@ -355,6 +369,10 @@ void DefineDescriptors(SpirvEmitterState& state) {
                 state.storageBufferU64Variable = Define(ArrayType(StorageBufferU64BlockType(state)), "buffers_u64");
                 state.module.AddAnnotation(spv::OpDecorate, state.storageBufferVariable, spv::DecorationAliased);
                 state.module.AddAnnotation(spv::OpDecorate, state.storageBufferU64Variable, spv::DecorationAliased);
+            }
+            if (state.requirements.coherentBuffers) {
+                state.module.AddAnnotation(spv::OpDecorate, state.storageBufferVariable, spv::DecorationCoherent);
+                if (state.storageBufferU64Variable != 0u) state.module.AddAnnotation(spv::OpDecorate, state.storageBufferU64Variable, spv::DecorationCoherent);
             }
             break;
         case DescriptorBindingKind::BdaPagetable:

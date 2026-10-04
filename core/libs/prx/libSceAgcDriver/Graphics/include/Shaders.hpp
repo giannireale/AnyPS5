@@ -49,7 +49,7 @@ inline VkShaderStageFlags PushConstantStages(std::span<const CompiledShader> sha
     VkShaderStageFlags result = 0;
     for (const auto& shader : shaders) {
         Require(shader.program != nullptr, "missing compiled shader");
-        if (!shader.program->pushConstants.empty()) result |= VulkanStage(shader.stage);
+        if (!shader.program->pushConstants.empty() || shader.stage == ShaderRecompiler::ShaderStage::Mesh) result |= VulkanStage(shader.stage);
     }
     return result;
 }

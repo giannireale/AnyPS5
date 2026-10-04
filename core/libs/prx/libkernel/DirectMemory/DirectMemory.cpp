@@ -1,6 +1,7 @@
-#include "DirectMemory.hpp"
+#include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestArena.hpp"
+#include "prx/libc/include/GuestWriteWatch.hpp"
 #include <algorithm>
 #include <cerrno>
 #include <iterator>
@@ -9,12 +10,16 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <memory>
 #include <limits>
 #include <stdexcept>
 #include <system_error>
+#include <vector>
 
 #if defined(__linux__)
 #include <sys/mman.h>
+#include <unistd.h>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -53,8 +58,7 @@ struct KernelArena {
 };
 
 static void CommitArenaRange(void* addr, size_t len, DWORD winProt) {
-    if (!VirtualAlloc(addr, len, MEM_COMMIT, winProt))
-        throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "VirtualAlloc commit failed");
+    GuestArena::GuestArenaCommit_nid_postfix(addr, len, winProt, PS5_PAGE_SIZE);
 }
 
 static void* mmap_aligned(size_t len, int prot, size_t alignment) {
@@ -95,9 +99,9 @@ static void* mmap(void* addr, size_t len, int prot, int flags, int, int) {
 }
 
 static int munmap(void* addr, size_t len) {
-    if (!VirtualFree(addr, len, MEM_DECOMMIT))
-        throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "VirtualFree decommit failed");
     auto& arena = KernelArena::Get();
+    if (arena.Contains(addr, len)) GuestArena::GuestArenaReset_nid_postfix(addr, len);
+    else if (!VirtualFree(addr, len, MEM_DECOMMIT)) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "VirtualFree decommit failed");
     if (arena.Contains(addr, len)) arena.Release(addr, len);
     return 0;
 }
@@ -109,6 +113,7 @@ static int munmap_release(void* addr) {
 }
 
 static int mprotect(void* addr, size_t len, int prot) {
+    GuestArena::GuestArenaSetProtection_nid_postfix(reinterpret_cast<std::uintptr_t>(addr), len, WinProtFromPosix(prot));
     if (prot != PROT_NONE && KernelArena::Get().Contains(addr, len)) CommitArenaRange(addr, len, WinProtFromPosix(prot));
     auto cursor = reinterpret_cast<std::uintptr_t>(addr);
     const auto end = cursor + len;
@@ -230,6 +235,133 @@ void Trace(const char* format, ...) {
     va_end(args);
 }
 
+class PhysicalBacking {
+public:
+    explicit PhysicalBacking(std::size_t bytes, int memoryType) : memoryType(memoryType) {
+#ifdef _WIN32
+        const auto size = static_cast<std::uint64_t>(bytes);
+        section = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_EXECUTE_READWRITE, static_cast<DWORD>(size >> 32), static_cast<DWORD>(size), nullptr);
+        if (!section) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "create direct memory backing");
+#else
+        file = memfd_create("direct memory", MFD_CLOEXEC);
+        if (file < 0) throw std::system_error(errno, std::generic_category(), "create direct memory backing");
+        if (ftruncate(file, static_cast<off_t>(bytes)) != 0) {
+            const int error = errno;
+            ::close(file);
+            throw std::system_error(error, std::generic_category(), "size direct memory backing");
+        }
+#endif
+    }
+
+    int MemoryType() const { return memoryType; }
+
+    ~PhysicalBacking() {
+#ifdef _WIN32
+        CloseHandle(section);
+#else
+        ::close(file);
+#endif
+    }
+
+    PhysicalBacking(const PhysicalBacking&) = delete;
+    PhysicalBacking& operator=(const PhysicalBacking&) = delete;
+
+    void Map(std::uintptr_t address, std::size_t bytes, std::uint64_t offset, int protection) const {
+#ifdef _WIN32
+        GuestArena::GuestArenaMap_nid_postfix(reinterpret_cast<void*>(address), bytes, section, offset, WinProtFromPosix(protection));
+#else
+        if (::mmap(reinterpret_cast<void*>(address), bytes, protection, MAP_SHARED | MAP_FIXED, file, static_cast<off_t>(offset)) == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "map direct memory backing");
+#endif
+    }
+
+private:
+    int memoryType;
+#ifdef _WIN32
+    HANDLE section = nullptr;
+#else
+    int file = -1;
+#endif
+};
+
+struct PhysicalPage {
+    std::shared_ptr<PhysicalBacking> backing;
+    std::uint64_t offset;
+};
+
+std::mutex g_directLock;
+std::map<std::uint64_t, PhysicalPage> g_physPages;
+
+struct DirectMapping {
+    std::uintptr_t end;
+    std::uint64_t phys;
+    int memoryType;
+    std::shared_ptr<PhysicalBacking> backing;
+};
+
+std::map<std::uintptr_t, DirectMapping> g_directMappings;
+
+void EraseMappings(std::uintptr_t start, std::uintptr_t end) {
+    auto it = g_directMappings.lower_bound(start);
+    if (it != g_directMappings.begin() && std::prev(it)->second.end > start) --it;
+    while (it != g_directMappings.end() && it->first < end) {
+        const auto base = it->first;
+        const auto mapping = it->second;
+        it = g_directMappings.erase(it);
+        if (base < start) g_directMappings.emplace(base, DirectMapping{start, mapping.phys, mapping.memoryType, mapping.backing});
+        if (mapping.end > end) it = g_directMappings.emplace(end, DirectMapping{mapping.end, mapping.phys + end - base, mapping.memoryType, mapping.backing}).first;
+    }
+}
+
+
+void ValidatePhysicalRange(std::uint64_t phys, std::size_t len) {
+    for (std::size_t offset = 0; offset < len; offset += PS5_PAGE_SIZE) {
+        if (!g_physPages.contains(phys + offset)) {
+            char message[160];
+            std::snprintf(message, sizeof(message), "direct memory range 0x%llx+0x%zx references unallocated physical page 0x%llx", static_cast<unsigned long long>(phys), len, static_cast<unsigned long long>(phys + offset));
+            throw std::invalid_argument(message);
+        }
+    }
+}
+
+#if defined(__linux__)
+void WatchMapping(std::uintptr_t address, std::size_t len) {
+    GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(reinterpret_cast<const void*>(address), len);
+    const auto end = address + len;
+    for (auto added = g_directMappings.lower_bound(address); added != g_directMappings.end() && added->first < end; ++added) {
+        const auto addedPhys = added->second.phys;
+        const auto addedPhysEnd = addedPhys + (added->second.end - added->first);
+        for (const auto& [base, other] : g_directMappings) {
+            if ((base >= address && base < end) || other.backing != added->second.backing) continue;
+            const auto first = std::max(addedPhys, other.phys);
+            const auto last = std::min(addedPhysEnd, other.phys + (other.end - base));
+            if (first >= last) continue;
+            GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(reinterpret_cast<const void*>(added->first + (first - addedPhys)), last - first);
+            GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(reinterpret_cast<const void*>(base + (first - other.phys)), last - first);
+        }
+    }
+}
+#endif
+
+void AddMapping(std::uintptr_t address, std::size_t len, std::uint64_t phys, int nativeProt) {
+    ValidatePhysicalRange(phys, len);
+    EraseMappings(address, address + len);
+    for (std::size_t offset = 0; offset < len;) {
+        const auto& page = g_physPages.at(phys + offset);
+        std::size_t bytes = PS5_PAGE_SIZE;
+        while (offset + bytes < len) {
+            const auto& next = g_physPages.at(phys + offset + bytes);
+            if (next.backing != page.backing || next.offset != page.offset + bytes) break;
+            bytes += PS5_PAGE_SIZE;
+        }
+        page.backing->Map(address + offset, bytes, page.offset, nativeProt);
+        g_directMappings.emplace(address + offset, DirectMapping{address + offset + bytes, phys + offset, page.backing->MemoryType(), page.backing});
+        offset += bytes;
+    }
+#if defined(__linux__)
+    WatchMapping(address, len);
+#endif
+}
+
 bool RemapFixedIntoRegistered(GuestAllocations::Mutation& mutation, void* addr, size_t len, int prot, int flags, int64_t physStart = -1) {
     constexpr int GuestMapFixed = 0x10;
     constexpr int GuestMapNoOverwrite = 0x80;
@@ -238,10 +370,20 @@ bool RemapFixedIntoRegistered(GuestAllocations::Mutation& mutation, void* addr, 
     Trace("remap fixed %p+0x%zx prot=0x%x phys=0x%llx", addr, len, prot, static_cast<long long>(physStart));
     const auto nativeProtection = LinuxProtFromSce(prot);
     mutation.Protect(addr, len, (prot & 3) != 0, (prot & 2) != 0, [&] {
+        const auto address = reinterpret_cast<std::uintptr_t>(addr);
+        std::lock_guard lock(g_directLock);
+        if (physStart >= 0) {
+            AddMapping(address, len, static_cast<std::uint64_t>(physStart), nativeProtection);
+        } else {
+            EraseMappings(address, address + len);
 #ifdef _WIN32
-        if (!VirtualAlloc(addr, len, MEM_COMMIT, WinProtFromPosix(nativeProtection))) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "VirtualAlloc commit failed");
+            GuestArena::GuestArenaReset_nid_postfix(addr, len);
+            if (nativeProtection != PROT_NONE) CommitArenaRange(addr, len, WinProtFromPosix(nativeProtection));
+#else
+            if (::mmap(addr, len, nativeProtection, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "remap anonymous memory");
+            GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(addr, len);
 #endif
-        if (mprotect(addr, len, nativeProtection) != 0) throw std::system_error(errno, std::generic_category(), "mprotect failed");
+        }
     });
     return true;
 }
@@ -249,13 +391,14 @@ bool RemapFixedIntoRegistered(GuestAllocations::Mutation& mutation, void* addr, 
 void Unmap(void* addr, size_t len) {
 #if defined(__linux__)
     if (munmap(addr, len) != 0) throw std::system_error(errno, std::generic_category(), "munmap failed");
+    GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(addr, len);
 #else
     if (KernelArena::Get().Contains(addr, len)) munmap(addr, len);
     else munmap_release(addr);
 #endif
 }
 
-void* MapAligned(void* addr, size_t len, int prot, int flags, size_t alignment, int additionalSupportedFlags = 0) {
+void* MapPlaced(void* addr, size_t len, int prot, int flags, size_t alignment, int additionalSupportedFlags = 0) {
     ValidateLength(len);
     alignment = ValidateAlignment(alignment);
     if (HasUnsupportedMapFlags(flags, additionalSupportedFlags)) {
@@ -314,6 +457,40 @@ void* MapAligned(void* addr, size_t len, int prot, int flags, size_t alignment, 
     return aligned;
 }
 
+struct ProtectedRange {
+    std::uintptr_t end;
+    int prot;
+};
+std::mutex g_protectionLock;
+std::map<std::uintptr_t, ProtectedRange> g_protections;
+
+void EraseProtections(std::uintptr_t start, std::uintptr_t end) {
+    auto it = g_protections.lower_bound(start);
+    if (it != g_protections.begin() && std::prev(it)->second.end > start) --it;
+    while (it != g_protections.end() && it->first < end) {
+        const auto rangeStart = it->first;
+        const auto range = it->second;
+        it = g_protections.erase(it);
+        if (rangeStart < start) g_protections.emplace(rangeStart, ProtectedRange{start, range.prot});
+        if (range.end > end) it = g_protections.emplace(end, ProtectedRange{range.end, range.prot}).first;
+    }
+}
+
+void RecordProtection(const void* addr, size_t len, int prot) {
+    const auto start = reinterpret_cast<std::uintptr_t>(addr);
+    std::lock_guard lock(g_protectionLock);
+    EraseProtections(start, start + len);
+    if (prot >= 0) g_protections.emplace(start, ProtectedRange{start + len, prot});
+}
+
+void* MapAligned(void* addr, size_t len, int prot, int flags, size_t alignment, int additionalSupportedFlags = 0) {
+    void* mapped = MapPlaced(addr, len, prot, flags, alignment, additionalSupportedFlags);
+#if defined(__linux__)
+    GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(mapped, len);
+#endif
+    return mapped;
+}
+
 void ValidateOutput(void** addr) {
     if (!addr) {
         // return SCE_KERNEL_ERROR_EINVAL;
@@ -323,7 +500,7 @@ void ValidateOutput(void** addr) {
 
 }
 
-int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart, size_t alignment) {
+int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart, size_t alignment) try {
     ValidateOutput(addr);
     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
     if (HasUnsupportedMapFlags(flags)) return SCE_KERNEL_ERROR_EINVAL;
@@ -331,18 +508,32 @@ int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart,
         return SCE_KERNEL_ERROR_EINVAL;
     }
     GuestAllocations::Mutation mutation;
-    if (RemapFixedIntoRegistered(mutation, *addr, len, prot, flags)) return 0;
+    if (RemapFixedIntoRegistered(mutation, *addr, len, prot, flags, physStart)) {
+        RecordProtection(*addr, len, prot);
+        return 0;
+    }
     if (*addr != nullptr && (flags & GuestMapFixedFlag) != 0) mutation.RequireAvailable(*addr, len);
-    void* mapped = MapAligned(*addr, len, LinuxProtFromSce(prot), flags, alignment);
+    std::lock_guard lock(g_directLock);
+    ValidatePhysicalRange(static_cast<std::uint64_t>(physStart), len);
+    void* mapped = MapAligned(*addr, len, PROT_NONE, flags, alignment);
     try {
+        AddMapping(reinterpret_cast<std::uintptr_t>(mapped), len, static_cast<std::uint64_t>(physStart), LinuxProtFromSce(prot));
         mutation.Add(mapped, len, (prot & 3) != 0, (prot & 2) != 0);
     } catch (...) {
+        EraseMappings(reinterpret_cast<std::uintptr_t>(mapped), reinterpret_cast<std::uintptr_t>(mapped) + len);
         Unmap(mapped, len);
         throw;
     }
     *addr = mapped;
+    RecordProtection(mapped, len, prot);
     Trace("map direct %p+0x%zx phys=0x%llx prot=0x%x flags=0x%x align=0x%zx", mapped, len, static_cast<unsigned long long>(physStart), prot, flags, alignment);
     return 0;
+} catch (const std::invalid_argument& error) {
+    const char* trace = std::getenv("APS5_TRACE_DIRECT_ERRORS");
+    if (trace != nullptr && std::strcmp(trace, "1") == 0) {
+        std::fprintf(stderr, "[memory-error] map direct phys=0x%llx len=0x%zx: %s\n", static_cast<unsigned long long>(physStart), len, error.what());
+    }
+    return SCE_KERNEL_ERROR_EINVAL;
 }
 
 int DoMapAnon(void** addr, size_t len, int prot, int flags) {
@@ -351,7 +542,10 @@ int DoMapAnon(void** addr, size_t len, int prot, int flags) {
     // Observed on the game's SceLibcHeap flexible mapping; its native meaning is unknown, so it is placement-neutral here.
     if (HasUnsupportedMapFlags(flags, ObservedFlexibleMappingFlag)) return SCE_KERNEL_ERROR_EINVAL;
     GuestAllocations::Mutation mutation;
-    if (RemapFixedIntoRegistered(mutation, *addr, len, prot, flags)) return 0;
+    if (RemapFixedIntoRegistered(mutation, *addr, len, prot, flags)) {
+        RecordProtection(*addr, len, prot);
+        return 0;
+    }
     if (*addr != nullptr && (flags & GuestMapFixedFlag) != 0) mutation.RequireAvailable(*addr, len);
     void* mapped = MapAligned(*addr, len, LinuxProtFromSce(prot), flags, PS5_PAGE_SIZE, ObservedFlexibleMappingFlag);
     try {
@@ -361,6 +555,7 @@ int DoMapAnon(void** addr, size_t len, int prot, int flags) {
         throw;
     }
     *addr = mapped;
+    RecordProtection(mapped, len, prot);
     Trace("map anon %p+0x%zx prot=0x%x flags=0x%x", mapped, len, prot, flags);
     return 0;
 }
@@ -390,6 +585,7 @@ int DoMprotect(const void* addr, size_t len, int prot) {
     mutation.Protect(pointer, bytes, (prot & 3) != 0, (prot & 2) != 0, [&] {
         if (mprotect(const_cast<void*>(pointer), bytes, nativeProtection) != 0) throw std::system_error(errno, std::generic_category(), "mprotect failed");
     });
+    RecordProtection(pointer, bytes, prot);
     return 0;
 }
 
@@ -397,23 +593,44 @@ int DoMunmap(void* addr, size_t len) {
     Trace("unmap %p+0x%zx", addr, len);
     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0 || !addr) return SCE_KERNEL_ERROR_EINVAL;
     GuestAllocations::Mutation mutation;
-    mutation.Unmap(addr, len, [&](const void* allocation, bool last) {
+    mutation.Unmap(addr, len, [&](const void* piece, std::size_t pieceBytes, const void* allocation, bool last) {
+        auto* pieceAddress = const_cast<void*>(piece);
+        std::lock_guard lock(g_directLock);
+        EraseMappings(reinterpret_cast<std::uintptr_t>(piece), reinterpret_cast<std::uintptr_t>(piece) + pieceBytes);
 #if defined(__linux__)
-        Unmap(addr, len);
+        Unmap(pieceAddress, pieceBytes);
 #else
-        if (KernelArena::Get().Contains(addr, len)) munmap(addr, len);
+        if (KernelArena::Get().Contains(pieceAddress, pieceBytes)) munmap(pieceAddress, pieceBytes);
         else if (last) munmap_release(const_cast<void*>(allocation));
-        else munmap(addr, len);
+        else munmap(pieceAddress, pieceBytes);
 #endif
     });
+    RecordProtection(addr, len, -1);
     return 0;
 }
 
-int DoReserveVirtual(void** addr, size_t len, size_t alignment) {
+int DoReserveVirtual(void** addr, size_t len, int flags, size_t alignment) {
     ValidateOutput(addr);
     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
+    const bool fixed = *addr != nullptr && (flags & GuestMapFixedFlag) != 0;
+    // A fixed reservation over the title's own mappings replaces them, as MAP_FIXED does (Unity's
+    // virtual allocator decommits a range by reserving it again); MAP_NO_OVERWRITE keeps the error.
+    constexpr int GuestMapNoOverwrite = 0x80;
+    if (fixed && (flags & GuestMapNoOverwrite) == 0) {
+        bool replaced = false;
+        {
+            GuestAllocations::Mutation probe;
+            replaced = probe.Covers(*addr, len);
+        }
+        if (replaced) {
+            const int unmapped = DoMunmap(*addr, len);
+            if (unmapped != 0) return unmapped;
+        }
+    }
     GuestAllocations::Mutation mutation;
-    void* mapped = MapAligned(nullptr, len, PROT_NONE, 0, alignment);
+    if (fixed) mutation.RequireAvailable(*addr, len);
+    constexpr int GuestMapNoCoalesce = 0x400000;
+    void* mapped = MapAligned(fixed ? *addr : nullptr, len, PROT_NONE, fixed ? GuestMapFixedFlag | (flags & GuestMapNoCoalesce) : 0, alignment);
     try {
         mutation.Add(mapped, len, false, false);
     } catch (...) {
@@ -421,6 +638,50 @@ int DoReserveVirtual(void** addr, size_t len, size_t alignment) {
         throw;
     }
     *addr = mapped;
-    Trace("reserve %p+0x%zx align=0x%zx", mapped, len, alignment);
+    Trace("reserve %p+0x%zx flags=0x%x align=0x%zx", mapped, len, flags, alignment);
     return 0;
+}
+
+void CreateDirectMemoryBacking(int64_t start, size_t len, int memoryType) {
+    std::lock_guard lock(g_directLock);
+    const auto first = static_cast<std::uint64_t>(start);
+    for (std::size_t offset = 0; offset < len; offset += PS5_PAGE_SIZE) {
+        if (g_physPages.contains(first + offset)) throw std::runtime_error("physical allocation overlaps live direct memory");
+    }
+    const auto backing = std::make_shared<PhysicalBacking>(len, memoryType);
+    std::map<std::uint64_t, PhysicalPage> pages;
+    for (std::size_t offset = 0; offset < len; offset += PS5_PAGE_SIZE) pages.emplace(first + offset, PhysicalPage{backing, offset});
+    g_physPages.merge(pages);
+    Trace("allocate physical 0x%llx+0x%zx", static_cast<unsigned long long>(first), len);
+}
+
+void ForgetDirectMemory(int64_t start, size_t len) {
+    const auto first = static_cast<std::uint64_t>(start);
+    std::lock_guard lock(g_directLock);
+    ValidatePhysicalRange(first, len);
+    g_physPages.erase(g_physPages.lower_bound(first), g_physPages.lower_bound(first + len));
+    Trace("release physical 0x%llx+0x%zx", static_cast<unsigned long long>(first), len);
+}
+
+bool GuestProtection(uintptr_t addr, int* prot) {
+    std::lock_guard lock(g_protectionLock);
+    auto next = g_protections.upper_bound(addr);
+    if (next == g_protections.begin()) return false;
+    const auto containing = std::prev(next);
+    if (addr >= containing->second.end) return false;
+    *prot = containing->second.prot;
+    return true;
+}
+
+bool QueryDirectMapping(std::uintptr_t address, std::uintptr_t* start, std::uintptr_t* end, std::uint64_t* offset, int* memoryType) {
+    std::lock_guard lock(g_directLock);
+    const auto next = g_directMappings.upper_bound(address);
+    if (next == g_directMappings.begin()) return false;
+    const auto it = std::prev(next);
+    if (address >= it->second.end) return false;
+    *start = it->first;
+    *end = it->second.end;
+    *offset = it->second.phys;
+    *memoryType = it->second.memoryType;
+    return true;
 }

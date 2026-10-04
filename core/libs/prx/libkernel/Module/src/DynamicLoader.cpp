@@ -2,9 +2,11 @@
 #include <nid/NidCompute.hpp>
 #include <array>
 #include <cstdio>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <vector>
 #ifdef _WIN32
 #define NOMINMAX
@@ -44,11 +46,35 @@ void* Symbol(Module& module, const char* name) {
     return ::dlsym(module.native, name);
 #endif
 }
+// The relinker converts the title's modules into <name>.guest.prx inside app0/sce_module, but titles
+// load them at runtime by their original path (Unity: /app0/Media/Modules/Il2CppUserAssemblies.prx),
+// which still holds the console binary. Load the converted module when one exists for that name.
+std::filesystem::path HostModulePath(const char* path) {
+    const auto original = std::filesystem::path(path).filename().string();
+    const auto converted = ResolvePath_nid_no_patch(("/app0/sce_module/" + original + ".guest.prx").c_str());
+    std::error_code error;
+    if (std::filesystem::is_regular_file(converted, error)) return converted;
+    return ResolvePath_nid_no_patch(path);
+}
 void* FindSymbol(Module& module, const char* name) {
     if (auto* symbol = Symbol(module, name)) return symbol;
     const auto nid = Nid::ComputeNid(name, "");
     return Symbol(module, nid.c_str());
 }
+}
+
+// Keep the registered module alive while initialization runs, outside the registry lock:
+// guest constructors can load other modules and their public handles are not native handles.
+int StartDynamicGuestModule_nid_no_patch(void* handle, size_t args, const void* argp,
+                                       int (*initialize)(void*, size_t, const void*)) {
+    std::shared_ptr<Module> module;
+    {
+        std::lock_guard lock(modulesMutex);
+        const auto found = modules.find(reinterpret_cast<std::uintptr_t>(handle));
+        if (found == modules.end()) throw std::runtime_error("invalid dynamic module handle");
+        module = found->second;
+    }
+    return initialize(module->native, args, argp);
 }
 
 extern "C" {
@@ -70,7 +96,7 @@ void* APS5_VABI dlopen_nid_postfix(const char* path, int flags) {
             module->owned = false;
         } else {
             if (!*path) { Error("dlopen: empty module path"); return nullptr; }
-            const auto resolved = ResolvePath_nid_no_patch(path);
+            const auto resolved = HostModulePath(path);
             module->native = LoadLibraryExW(resolved.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
         }
         if (!module->native) {
@@ -79,7 +105,7 @@ void* APS5_VABI dlopen_nid_postfix(const char* path, int flags) {
             Error(message); return nullptr;
         }
 #else
-        const auto resolved = path ? ResolvePath_nid_no_patch(path).string() : std::string{};
+        const auto resolved = path ? HostModulePath(path).string() : std::string{};
         const int nativeFlags = ((flags & 3) == 1 ? RTLD_LAZY : RTLD_NOW) |
             ((flags & 0x100) ? RTLD_GLOBAL : RTLD_LOCAL);
         module->native = ::dlopen(path ? resolved.c_str() : nullptr, nativeFlags);

@@ -1,11 +1,15 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 #include <mutex>
+#include <stdexcept>
+#include <string>
 #include <vector>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "AudioOut2Internal.hpp"
+#include "AudioOut2PadMix.hpp"
 
 static constexpr std::uint16_t OUTPUT_MAIN = 1;
 static constexpr std::int16_t VOLUME_MAX = 127;
@@ -19,11 +23,9 @@ static constexpr std::uint64_t ATTRIBUTE_TRACE_EVERY = 2000;
 static constexpr std::uint32_t ATTRIBUTE_DATA = 0;
 static constexpr std::uint32_t ATTRIBUTE_VOLUME = 1;
 
-// data_format bits 8..11 carry the channel count: the title opens 0x100 (mono object ports),
-// 0x200 (stereo) and 0x880 (7.1 bed). The buffers behind them are float, as their spacing shows
-// (1024 bytes per 256-sample mono grain). The low byte's meaning is not known.
 static constexpr std::uint32_t FORMAT_CHANNELS_SHIFT = 8;
 static constexpr std::uint32_t FORMAT_CHANNELS_MASK = 0xFu;
+static constexpr std::uint32_t FORMAT_TYPE_MASK = 0x7Fu;
 
 static std::mutex g_portsLock;
 // Grows on demand: the title opens its bed ports plus max_object_ports object ports at once.
@@ -39,11 +41,27 @@ static AudioOut2Port* FromHandle(AudioOut2PortHandle handle) {
 // and side pairs fold into the front at -3 dB, the centre into both sides, and the LFE is dropped.
 static constexpr float DOWNMIX_GAIN = 0.7071f;
 
+static void ReadFrame(const AudioOut2Port& port, std::uint32_t frame, float* in) {
+    const auto first = static_cast<std::size_t>(frame) * port.channels;
+    for (std::uint32_t c = 0; c < port.channels; c++) {
+        in[c] = port.int16 ? static_cast<const std::int16_t*>(port.data)[first + c] / 32768.0f : static_cast<const float*>(port.data)[first + c];
+    }
+}
+
+static void AccumulatePadPort(const AudioOut2Port& port, AudioOut2Route route, float* out, std::uint32_t frames) {
+    float in[AUDIO_OUT2_PORT_CHANNELS_MAX];
+    for (std::uint32_t frame = 0; frame < frames; frame++) {
+        ReadFrame(port, frame, in);
+        AudioOut2AccumulatePadFrame(route, in, port.channels, port.volume, out + static_cast<std::size_t>(frame) * AUDIO_OUT2_PAD_CHANNELS);
+    }
+}
+
 static void AccumulatePort(const AudioOut2Port& port, float* out, std::uint32_t frames) {
     const auto ch = port.channels;
     const float* volume = port.volume;
+    float in[AUDIO_OUT2_PORT_CHANNELS_MAX];
     for (std::uint32_t frame = 0; frame < frames; frame++) {
-        const float* in = port.data + static_cast<std::size_t>(frame) * ch;
+        ReadFrame(port, frame, in);
         float left = 0.0f;
         float right = 0.0f;
         if (ch == 1) {
@@ -61,15 +79,24 @@ static void AccumulatePort(const AudioOut2Port& port, float* out, std::uint32_t 
     }
 }
 
-std::uint32_t AudioOut2MixPorts(const AudioOut2Context& context, float* out, std::uint32_t frames) {
+std::uint32_t AudioOut2MixPorts(const AudioOut2Context& context, float* out, float* padOut, std::uint32_t frames) {
     std::lock_guard lock(g_portsLock);
     std::uint32_t mixed = 0;
     for (const auto& port : g_ports) {
         if (!port.used || port.context != &context || port.data == nullptr || port.channels == 0) continue;
-        AccumulatePort(port, out, frames);
+        const auto route = padOut != nullptr ? AudioOut2RouteForPort(port.type, port.channels) : AudioOut2Route::Main;
+        if (route == AudioOut2Route::Main) AccumulatePort(port, out, frames);
+        else AccumulatePadPort(port, route, padOut, frames);
         mixed++;
     }
     return mixed;
+}
+
+bool AudioOut2HasPadPorts(const AudioOut2Context& context) {
+    std::lock_guard lock(g_portsLock);
+    return std::any_of(g_ports.begin(), g_ports.end(), [&context](const AudioOut2Port& port) {
+        return port.used && port.context == &context && AudioOut2RouteForPort(port.type, port.channels) != AudioOut2Route::Main;
+    });
 }
 
 void AudioOut2ReleasePorts(const AudioOut2Context& context) {
@@ -116,7 +143,12 @@ int APS5_VABI sceAudioOut2PortCreate(AudioOut2ContextHandle ctx, const AudioOut2
     entry.samplingFreq = params->sampling_freq;
     entry.flags = params->flags;
     entry.channels = (params->data_format >> FORMAT_CHANNELS_SHIFT) & FORMAT_CHANNELS_MASK;
-    if (entry.channels > AUDIO_OUT2_PORT_CHANNELS_MAX) entry.channels = 0;
+    const auto sampleType = params->data_format & FORMAT_TYPE_MASK;
+    if (entry.channels == 0 || entry.channels > AUDIO_OUT2_PORT_CHANNELS_MAX || sampleType > 1) {
+        entry = AudioOut2Port{};
+        throw std::runtime_error("sceAudioOut2PortCreate: data format 0x" + [&] { char text[16]; std::snprintf(text, sizeof(text), "%x", params->data_format); return std::string(text); }() + " is not implemented");
+    }
+    entry.int16 = sampleType == 1;
     *port = static_cast<AudioOut2PortHandle>(index) + 1;
     AUDIOOUT2_TRACE("t=%.3f PortCreate ctx=%llx -> port %llu: type=0x%x data_format=0x%x (%u float ch) sampling_freq=%u flags=0x%x user=%llx\n",
         AudioOut2TraceSeconds(), static_cast<unsigned long long>(ctx), static_cast<unsigned long long>(*port), params->port_type, params->data_format,

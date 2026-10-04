@@ -17,6 +17,7 @@ void MeshShaderTranslationTests() {
         vertex.mesh.verticesPerGroup = vertex.mesh.InputVertexCount(4);
         vertex.mesh.maxVertices = 12;
         vertex.mesh.maxPrimitives = 4;
+        vertex.mesh.esgsItemSize = 4;
         vertex.mesh.threadsNum[0] = 64;
         TranslateOptions options;
         options.stage = ShaderStageKind::Mesh;

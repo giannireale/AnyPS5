@@ -48,11 +48,14 @@ int APS5_VABI sceUserServiceGetAccessibilityZoomEnabled(int user_id, int32_t* zo
  return USER_SERVICE_OK;
 }
 
+// The single local user is an unrestricted adult account; the level value is an assumption (age in
+// years), so titles that gate content on it see no parental restriction.
 int APS5_VABI sceUserServiceGetAgeLevel(int user_id, uint32_t* age_level) {
- (void)user_id;
- (void)age_level;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (age_level == nullptr || user_id != USER_SERVICE_INITIAL_USER_ID) {
+  return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+ }
+ *age_level = 18;
+ return USER_SERVICE_OK;
 }
 
 // The initial user is reported as logging in once; afterwards there are no user events.
@@ -142,9 +145,17 @@ int APS5_VABI sceUserServiceTerminate(void) {
 // No PSN account exists, so the platform privacy setting reports the feature as not permitted.
 int APS5_VABI sceUserServiceGetPlatformPrivacyWs1(int32_t user_id, int32_t* value) {
     (void)user_id;
-    if (!value) return static_cast<int>(0x80960002);
+    if (!value) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
     *value = 0;
     return 0;
+}
+
+int APS5_VABI sceUserServiceGetAccessibilityZoomFollowFocus(int user_id, int32_t* zoom_follow_focus) {
+    if (zoom_follow_focus == nullptr || user_id != USER_SERVICE_INITIAL_USER_ID) {
+        return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+    }
+    *zoom_follow_focus = 0;
+    return USER_SERVICE_OK;
 }
 
 }

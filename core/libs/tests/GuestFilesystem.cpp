@@ -1,4 +1,5 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include "SceTypes.hpp"
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -7,7 +8,15 @@
 extern "C" {
 int APS5_VABI remove_nid_postfix(const char*);
 int APS5_VABI rename_nid_postfix(const char*, const char*);
+int APS5_VABI sceKernelChmod_nid_postfix(const char*, unsigned short);
+int APS5_VABI sceKernelFsync(int);
+int APS5_VABI sceKernelFtruncate(int, long long);
+int APS5_VABI sceKernelTruncate_nid_postfix(const char*, long long);
+int APS5_VABI sceKernelUtimes_nid_postfix(const char*, const void*);
 int* APS5_VABI __error_nid_postfix();
+int APS5_VABI open_nid_postfix(const char*, int, int);
+int APS5_VABI _open_nid_postfix(const char*, int, ...);
+int64_t APS5_VABI fstat_nid_disambig1_nid_postfix(int, FileStat*);
 }
 static void Check(bool value, int line) {
     if (!value) {
@@ -20,6 +29,11 @@ int main() {
     const auto root = std::filesystem::path("anyps5-filesystem-test-" +
         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     Require(std::filesystem::create_directory(root));
+    const auto missing = (root / "missing").string();
+    Require(open_nid_postfix(missing.c_str(), 0, 0) == -1 && *__error_nid_postfix() == 2);
+    Require(_open_nid_postfix(missing.c_str(), 0) == -1 && *__error_nid_postfix() == 2);
+    FileStat status{};
+    Require(fstat_nid_disambig1_nid_postfix(-1, &status) == -1 && *__error_nid_postfix() == 9);
     const auto file = root / "file.txt";
     { std::ofstream stream(file); stream << "retained until removal"; }
     Require(remove_nid_postfix(root.string().c_str()) == -1);
@@ -41,6 +55,27 @@ int main() {
     Require(remove_nid_postfix(file.string().c_str()) == 0);
     Require(!std::filesystem::exists(file));
     Require(remove_nid_postfix(file.string().c_str()) == -1 && *__error_nid_postfix() == 2);
+    const auto sized = root / "sized.txt";
+    { std::ofstream stream(sized); stream << "0123456789abcdef"; }
+    Require(sceKernelChmod_nid_postfix(sized.string().c_str(), 0600) == 0);
+    Require(sceKernelTruncate_nid_postfix(sized.string().c_str(), 6) == 0);
+    Require(std::filesystem::file_size(sized) == 6);
+    { std::ifstream stream(sized); std::string contents; std::getline(stream, contents);
+      Require(contents == "012345"); }
+    Require(sceKernelTruncate_nid_postfix((sized / "missing").string().c_str(), 6) == static_cast<int>(0x80020002u));
+    Require(sceKernelUtimes_nid_postfix(sized.string().c_str(), nullptr) == 0);
+    std::FILE* native = std::fopen(sized.string().c_str(), "r+b");
+    Require(native != nullptr);
+#ifdef _WIN32
+    const int descriptor = _fileno(native);
+#else
+    const int descriptor = ::fileno(native);
+#endif
+    Require(descriptor >= 0 && sceKernelFsync(descriptor) == 0);
+    Require(sceKernelFtruncate(descriptor, 3) == 0);
+    Require(std::fclose(native) == 0);
+    Require(std::filesystem::file_size(sized) == 3);
+    Require(remove_nid_postfix(sized.string().c_str()) == 0);
     Require(remove_nid_postfix(root.string().c_str()) == 0);
     Require(!std::filesystem::exists(root));
 }

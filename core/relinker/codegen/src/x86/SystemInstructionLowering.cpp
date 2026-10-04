@@ -35,10 +35,12 @@ void _nopFill(std::vector<std::uint8_t>& out, std::size_t count) {
     }
 }
 
-void _emitClzero(std::vector<std::uint8_t>& out) {
+void _emitClzero(std::vector<std::uint8_t>& out, bool addressSize32) {
     _append(out, {kLeaRspBelowRedZone.Bytes, kLeaRspBelowRedZone.Size});
     _append(out, kPushFlags);
     _append(out, kPushRax);
+    // A 67h prefix uses EAX; clear its high half after saving the original RAX.
+    if (addressSize32) _append(out, std::array<std::uint8_t, 2>{0x89, 0xC0});
     _append(out, kAlignRax);
     for (std::size_t offset = 0; offset < kCacheLineBytes; offset += kStoreBytes) {
         std::array<std::uint8_t, sizeof(kStoreZero)> store{};
@@ -59,7 +61,10 @@ void _emitRelocated(std::vector<std::uint8_t>& out, const SystemInstruction inst
         _append(out, kPause);
         return;
     case SystemInstruction::Clzero:
-        _emitClzero(out);
+        _emitClzero(out, false);
+        return;
+    case SystemInstruction::Clzero32:
+        _emitClzero(out, true);
         return;
     case SystemInstruction::Mcommit:
         _append(out, kMfence);
@@ -72,7 +77,7 @@ void _emitRelocated(std::vector<std::uint8_t>& out, const SystemInstruction inst
 }
 
 std::vector<std::uint8_t> SystemInstructionLowering::LowerInPlace(const SystemInstruction instruction, const std::size_t originalLength) const {
-    if (instruction == SystemInstruction::Clzero)
+    if ((instruction == SystemInstruction::Clzero || instruction == SystemInstruction::Clzero32))
         throw CodegenException("CLZERO has no in-place Intel lowering");
     std::vector<std::uint8_t> sequence;
     _emitRelocated(sequence, instruction);

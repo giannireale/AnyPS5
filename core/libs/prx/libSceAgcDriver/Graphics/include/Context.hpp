@@ -74,6 +74,8 @@ inline std::uint64_t& DeviceProcLookups() {
     return count;
 }
 
+inline constexpr std::size_t EmptyBufferBytes = 16;
+
 struct Context {
     VkDevice device;
     VkPhysicalDevice physical;
@@ -116,6 +118,8 @@ struct Context {
     bool drawIndirectFirstInstance = false;
     bool multiDrawIndirect = false;
     bool drawIndirectCount = false;
+    bool occlusionQueryPrecise = false;
+    VkBuffer emptyBuffer = VK_NULL_HANDLE;
     // The device's list of recorded dispatches whose copied written buffers await a CPU write-back
     // (VulkanDevice's State::copiedWriters; the draw counterpart is DrawCopiedWriters): an indirect
     // draw whose records one of them produces reads them on the CPU. Null in tests.
@@ -125,6 +129,8 @@ struct Context {
     // VK_EXT_descriptor_indexing with non-uniform sampled/storage image array indexing enabled
     // (bindless image tables in graphics stages).
     bool descriptorIndexing = false;
+    bool primitiveListRestart = false;
+    bool imageViewMinLod = false;
 
     template<typename TFunction>
     TFunction Function(const char* name) const {

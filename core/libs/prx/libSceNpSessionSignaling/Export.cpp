@@ -27,6 +27,10 @@ int APS5_VABI sceNpSessionSignalingCreateContext2(const void* param, uint32_t* c
     return 0;
 }
 
+int APS5_VABI sceNpSessionSignalingCreateContext(const void* param, uint32_t* context_id) {
+    return sceNpSessionSignalingCreateContext2(param, context_id);
+}
+
 int APS5_VABI sceNpSessionSignalingDeactivate(uint32_t context_id) {
     (void)context_id;
     return 0;
@@ -43,6 +47,20 @@ int APS5_VABI sceNpSessionSignalingGetConnectionInfo(void) {
 
 int APS5_VABI sceNpSessionSignalingTerminate(void) {
     return 0;
+}
+
+// Offline: no peer-to-peer signaling. Activation succeeds, queries report the user signed out.
+std::int32_t APS5_VABI sceNpSessionSignalingActivateUser(const void*, const void*, const void*, const void*) {
+    return 0;
+}
+std::int32_t APS5_VABI sceNpSessionSignalingRequestPrepare(const void*, const void*, const void*, const void*) {
+    return 0;
+}
+std::int32_t APS5_VABI sceNpSessionSignalingGetConnectionStatus(const void*, const void*, const void*, const void*) {
+    return static_cast<std::int32_t>(0x80550006u);
+}
+std::int32_t APS5_VABI sceNpSessionSignalingGetLocalNetInfo(const void*, const void*, const void*, const void*) {
+    return static_cast<std::int32_t>(0x80550006u);
 }
 
 }

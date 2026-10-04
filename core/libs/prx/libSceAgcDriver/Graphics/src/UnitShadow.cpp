@@ -312,7 +312,7 @@ std::size_t publishUnits(const std::shared_ptr<UnitShadow>& shadow, std::uint64_
         for (auto unit = first; unit <= last; ++unit) {
             const auto k = static_cast<std::size_t>(unit - first);
             if (!selected[k] || !shadow->Live(unit)) continue;
-            if (changed[k] != 0) {
+            if (changed[k] == GuestMemory::BlockWritten) {
                 // Newer bytes reached the import since the retile: the slab's are dead.
                 shadow->generation[unit] = 0;
                 (cpu[k] != 0 ? Stats().staleDroppedCpu : Stats().staleDroppedDriver).fetch_add(1, std::memory_order_relaxed);
@@ -416,8 +416,8 @@ bool evictOne(Shadows& registry) {
 }
 
 bool UnitShadowEnabled() {
-    static const bool disabled = std::getenv("APS5_NO_UNIT_SHADOW") != nullptr;
-    return !disabled;
+    static const bool enabled = std::getenv("APS5_NO_UNIT_SHADOW") == nullptr && GuestMemory::WriteWatched();
+    return enabled;
 }
 
 bool ShadowVerify() {
@@ -517,6 +517,7 @@ VkDeviceSize SlabOffset(const HostImport& import, const ShadowSlab& slab, std::u
 
 std::optional<ShadowDestination> ShadowDestinationFor(const Context& context, const HostImport& import, std::uint64_t begin, std::uint64_t end) {
     if (!UnitShadowEnabled() || end <= begin || begin < import.base || end > import.base + import.bytes) return std::nullopt;
+    if (!GuestMemory::Watched(begin, static_cast<std::size_t>(end - begin))) return std::nullopt;
     auto& registry = Registry();
     std::shared_ptr<UnitShadow> shadow;
     std::size_t slabIndex = 0;

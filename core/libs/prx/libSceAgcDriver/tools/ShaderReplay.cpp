@@ -1,6 +1,8 @@
 // agc_shader_replay <shader_*.req>...: replays compute recompile requests the driver saved with
 // APS5_DUMP_SHADERS=1, running the same resource analysis and recompile steps without the game.
+#include "ControlFlow/GraphBuilder.hpp"
 #include "ControlFlow/RequestSerializer.hpp"
+#include "ControlFlow/Structurizer.hpp"
 #include "Optimization/ResourceMaterializer.hpp"
 #include "Optimization/ResourceProgram.hpp"
 #include "Recompiler.hpp"
@@ -38,6 +40,8 @@ std::string FirstLine(const std::string& text) {
 bool g_disassemble = false;
 bool g_assembly = false;
 bool g_memory = false;
+bool g_spirv = false;
+bool g_graph = false;
 
 bool Replay(const char* path) {
     const auto request = ShaderRecompiler::RequestSerializer{}.Deserialize(ReadText(path));
@@ -45,6 +49,15 @@ bool Replay(const char* path) {
     if (request.request.context.compute.has_value()) {
         const auto& compute = *request.request.context.compute;
         std::printf("  compute: threads %ux%ux%u, lds %u dwords, group ids %d%d%d, tg size %d, thread id components %u\n", compute.numThreads[0], compute.numThreads[1], compute.numThreads[2], compute.ldsSizeDwords, compute.groupIdEnable[0], compute.groupIdEnable[1], compute.groupIdEnable[2], compute.tgSizeEnable, compute.threadIdComponentCount);
+        if (compute.PartialGroups()) std::printf("  partial groups: dispatch of %ux%ux%u threads\n", compute.partialThreads[0], compute.partialThreads[1], compute.partialThreads[2]);
+    }
+    if (request.request.graphics.has_value()) {
+        const auto& graphics = *request.request.graphics;
+        std::printf("  graphics: %zu linked programs, draw %u indices of %u bytes at 0x%llx, %u instances\n", graphics.linkedPrograms.size(), graphics.draw.indexCount, graphics.draw.indexElementBytes, static_cast<unsigned long long>(graphics.draw.indexAddress), graphics.draw.instanceCount);
+        if (graphics.mesh.has_value()) {
+            const auto& mesh = *graphics.mesh;
+            std::printf("  mesh: input primitive %u, %u primitives / %u vertices per group, max %u vertices / %u primitives, %u threads, lds %u dwords, provoking %u, ESGS item %u\n", mesh.inputPrimitive, mesh.primitivesPerGroup, mesh.verticesPerGroup, mesh.maxVertices, mesh.maxPrimitives, mesh.threadsPerGroup, mesh.ldsSizeDwords, mesh.provokingVertex, mesh.esgsItemSize);
+        }
     }
     if (g_memory) {
         // --mem: the captured inputs. User data words are printed; each memory region is written to
@@ -66,6 +79,18 @@ bool Replay(const char* path) {
         // Raw first words carry what the text omits (branch offsets, waitcnt fields).
         for (const auto& instruction : program.instructions) std::printf("raw=%08x %s\n", instruction.rawWords[0], ShaderRecompiler::RdnaInstructionToString(instruction).c_str());
     }
+    if (g_graph) {
+        const auto program = ShaderRecompiler::RdnaInstructionDecoder{}.Decode(request.request.shader.code);
+        auto graph = ShaderRecompiler::GraphBuilder{}.Build(program);
+        std::printf("control flow graph:\n%s", ShaderRecompiler::GraphToString(graph).c_str());
+        try {
+            ShaderRecompiler::Structurizer{}.Structurize(graph);
+            std::printf("structured control flow graph:\n%s", ShaderRecompiler::GraphToString(graph).c_str());
+        } catch (const std::exception& error) {
+            std::printf("  structurization failed: %s\n", FirstLine(error.what()).c_str());
+            return false;
+        }
+    }
     try {
         auto program = ShaderRecompiler::PrepareResourceProgram(request.request);
         constexpr ShaderRecompiler::ResourceMaterializer materializer;
@@ -77,6 +102,26 @@ bool Replay(const char* path) {
     try {
         const auto result = ShaderRecompiler::Recompile(request.request);
         std::printf("  recompiled: %zu SPIR-V words\n", result.spirv.size());
+        if (g_spirv) {
+            std::string name(path);
+            name = name.substr(name.find_last_of("/\\") + 1) + ".spv";
+            std::ofstream(name, std::ios::binary).write(reinterpret_cast<const char*>(result.spirv.data()), static_cast<std::streamsize>(result.spirv.size() * sizeof(result.spirv[0])));
+        }
+        if (g_memory) {
+            for (const auto& attribute : result.vertexAttributes) {
+                const auto& v = attribute.resource.fields;
+                std::printf("  vertex location %u, components %u, fetch %u: V# %08x %08x %08x %08x\n", attribute.location, attribute.components, attribute.fetchIndex, v[0], v[1], v[2], v[3]);
+            }
+            std::printf("  vertex offset SGPR %d, instance offset SGPR %d\n", result.vertexOffsetSgpr, result.instanceOffsetSgpr);
+            for (const auto& binding : result.bindings) {
+                if (binding.role != ShaderRecompiler::DescriptorRole::GuestBuffers) continue;
+                for (std::size_t i = 0; i + 4 <= binding.guestDescriptor.size(); i += 4) {
+                    const auto* v = binding.guestDescriptor.data() + i;
+                    const bool written = i / 4 >= binding.bufferWritten.size() || binding.bufferWritten[i / 4];
+                    std::printf("  buffer %zu: V# %08x %08x %08x %08x%s\n", i / 4, v[0], v[1], v[2], v[3], written ? " written" : "");
+                }
+            }
+        }
 #if ANYPS5_ENABLE_SPIRV_TOOLS
         if (g_disassemble) {
             spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
@@ -97,7 +142,7 @@ bool Replay(const char* path) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "usage: agc_shader_replay [--dis] <shader.req>...\n  the driver writes shader_<address>.req files when APS5_DUMP_SHADERS is set\n");
+        std::fprintf(stderr, "usage: agc_shader_replay [--dis] [--asm] [--cfg] [--mem] [--spv] <shader.req>...\n  the driver writes shader_<address>.req files when APS5_DUMP_SHADERS is set\n");
         return 2;
     }
     int failures = 0;
@@ -110,8 +155,16 @@ int main(int argc, char** argv) {
             g_assembly = true;
             continue;
         }
+        if (std::string(argv[i]) == "--cfg") {
+            g_graph = true;
+            continue;
+        }
         if (std::string(argv[i]) == "--mem") {
             g_memory = true;
+            continue;
+        }
+        if (std::string(argv[i]) == "--spv") {
+            g_spirv = true;
             continue;
         }
         try {

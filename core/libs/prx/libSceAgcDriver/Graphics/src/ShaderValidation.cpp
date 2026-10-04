@@ -118,7 +118,7 @@ struct Module {
             Require(value == spv::BuiltInPosition && signature == "f32x4" && !position, "unsupported or duplicate vertex built-in output");
             position = true;
         } else {
-            Require(storage == spv::StorageClassInput && ((value == spv::BuiltInFragCoord && signature == "f32x4") || (value == spv::BuiltInFrontFacing && signature == "bool")), "unsupported fragment built-in");
+            Require((storage == spv::StorageClassInput && ((value == spv::BuiltInFragCoord && signature == "f32x4") || (value == spv::BuiltInFrontFacing && signature == "bool"))) || (storage == spv::StorageClassOutput && value == spv::BuiltInFragDepth && signature == "f32"), "unsupported fragment built-in");
         }
     }
 };
@@ -204,6 +204,8 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
 
                 // Enabled unconditionally or by the device setup in VulkanDevice.
                 const bool isFeatureCapability =
+                    capability == spv::CapabilitySampled1D ||
+                    capability == spv::CapabilityImage1D ||
                     capability == spv::CapabilityImageGatherExtended ||
                     capability == spv::CapabilityImageQuery ||
                     capability == spv::CapabilityStorageImageWriteWithoutFormat ||
@@ -347,7 +349,9 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
     if (mesh) {
         Require(state.stages.mesh.has_value(), "mesh configuration is missing");
         const auto& config = *state.stages.mesh;
-        mode(spv::ExecutionModeLocalSize, {config.threadsPerGroup, 1, 1});
+        const auto local = module.modes.find(spv::ExecutionModeLocalSize);
+        const bool paired = state.stages.vertexWaveSize == 64u && subgroup.subgroupSize == 32u && local != module.modes.end() && local->second == std::vector<std::uint32_t>{config.threadsPerGroup / 2u, 1, 1};
+        mode(spv::ExecutionModeLocalSize, {paired ? config.threadsPerGroup / 2u : config.threadsPerGroup, 1, 1});
         mode(spv::ExecutionModeOutputVertices, {config.maxVertices});
         mode(spv::ExecutionModeOutputPrimitivesEXT, {config.maxPrimitives});
         mode(spv::ExecutionModeOutputTrianglesEXT, {});
@@ -362,7 +366,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
         mode(spv::ExecutionModeVertexOrderCw, {});
         Require(module.modes.size() == 3, "unsupported tessellation-evaluation execution mode");
     } else if (fragment) {
-        for (const auto& [name, operands] : module.modes) Require(operands.empty() && (name == spv::ExecutionModeOriginUpperLeft || name == spv::ExecutionModeEarlyFragmentTests), "unsupported fragment execution mode");
+        for (const auto& [name, operands] : module.modes) Require(operands.empty() && (name == spv::ExecutionModeOriginUpperLeft || name == spv::ExecutionModeEarlyFragmentTests || name == spv::ExecutionModeDepthReplacing), "unsupported fragment execution mode");
     } else Require(module.modes.empty(), "unsupported vertex execution mode");
     std::set<std::pair<std::uint32_t, std::uint32_t>> descriptors;
     bool push = false;
@@ -417,7 +421,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                 }
             }
         } else if (variable.storage == spv::StorageClassPushConstant) {
-            Require(!push && !shader.pushConstants.empty() && (type[0] & 0xffffu) == spv::OpTypeStruct, "invalid push constant interface");
+            Require(!push && (!shader.pushConstants.empty() || mesh) && (type[0] & 0xffffu) == spv::OpTypeStruct, "invalid push constant interface");
             push = true;
             Require(type.size() == 3 && module.decorations[typeId].block, "push constant variable must be a Block struct with exactly one member");
             const auto offset = module.offsets.find({typeId, 0});
@@ -476,7 +480,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
         Require(shader.vertexAttributes.empty(), "vertex attribute metadata is invalid for this stage");
     }
     Require(descriptors.size() == shader.bindings.size(), "recompiler binding metadata contains undeclared resources");
-    Require(push == !shader.pushConstants.empty(), "recompiler push constant metadata disagrees with SPIR-V");
+    Require(push == (!shader.pushConstants.empty() || mesh), "recompiler push constant metadata disagrees with SPIR-V");
     for (const auto id : module.interface) Require(module.variables.contains(id), "entry point interface contains an unknown variable");
     if (mesh) Require(module.primitiveIndices, "mesh shader does not export primitive indices");
     if (stage == Stage::Vertex || mesh || evaluation) Require(module.position, "vertex shader does not export position");
@@ -515,7 +519,8 @@ std::set<std::uint32_t> ValidateShaders(std::span<const CompiledShader> shaders,
     const auto attachments = std::max<std::size_t>(state.colors.size(), 1u);
     std::set<std::uint32_t> locations;
     for (const auto& [location, signature] : previous.outputs) {
-        Require(location < attachments && signature == "vertex:f32x4", "fragment shader must export float4 colors at locations below the attachment count");
+        if (location >= attachments) continue;
+        Require(signature == "vertex:f32x4", "fragment shader must export float4 colors to its attachments");
         locations.insert(location);
     }
     return locations;

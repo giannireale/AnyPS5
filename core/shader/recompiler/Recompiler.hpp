@@ -43,14 +43,68 @@ struct ShaderComputeStageInfo {
     std::array<bool, 3> groupIdEnable;
     bool tgSizeEnable;
     std::uint32_t threadIdComponentCount;
+    std::array<std::uint32_t, 3> partialThreads;
+
+    [[nodiscard]] bool PartialGroups() const {
+        return partialThreads != std::array<std::uint32_t, 3>{};
+    }
 };
+
+enum class PixelInput : std::uint32_t {
+    PerspectiveSample,
+    PerspectiveCenter,
+    PerspectiveCentroid,
+    PerspectivePullModel,
+    LinearSample,
+    LinearCenter,
+    LinearCentroid,
+    LineStipple,
+    PositionX,
+    PositionY,
+    PositionZ,
+    PositionW,
+    FrontFace,
+    Ancillary,
+    SampleCoverage,
+    PositionFixedPoint,
+    Count
+};
+
+constexpr std::uint32_t PixelInputBit(PixelInput input) {
+    return 1u << static_cast<std::uint32_t>(input);
+}
+
+constexpr std::uint32_t PixelInputVgprCount(PixelInput input) {
+    switch (input) {
+    case PixelInput::PerspectiveSample:
+    case PixelInput::PerspectiveCenter:
+    case PixelInput::PerspectiveCentroid:
+    case PixelInput::LinearSample:
+    case PixelInput::LinearCenter:
+    case PixelInput::LinearCentroid:
+        return 2u;
+    case PixelInput::PerspectivePullModel:
+        return 3u;
+    default:
+        return 1u;
+    }
+}
+
+constexpr std::uint32_t PixelInputVgpr(std::uint32_t inputAddr, PixelInput input) {
+    std::uint32_t vgpr = 0;
+    for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(input); ++i) {
+        if ((inputAddr & (1u << i)) != 0u) vgpr += PixelInputVgprCount(static_cast<PixelInput>(i));
+    }
+    return vgpr;
+}
 
 struct ShaderPixelStageInfo {
     std::uint32_t interpolatorCount;
     std::array<std::uint32_t, 32> interpolatorSettings;
     bool wave32;
-    std::uint32_t perspectiveCenterVgpr;
+    std::uint32_t inputAddr;
     bool hasPerspectiveCenterVgpr;
+    bool perspectiveCentroid;
     bool posX;
     bool posY;
     bool posZ;
@@ -59,6 +113,7 @@ struct ShaderPixelStageInfo {
     bool ancillary;
     bool sampleShading;
     bool noPerspective;
+    bool linearCentroid;
     bool pixelKillEnable;
     bool depthExportEnable;
     bool sampleMaskExportEnable;
@@ -169,6 +224,7 @@ struct MeshConfiguration {
     std::uint32_t threadsPerGroup;
     std::uint32_t ldsSizeDwords;
     std::uint32_t provokingVertex;
+    std::uint32_t esgsItemSize = 0;
 };
 
 struct TessellationConfiguration {
@@ -178,6 +234,10 @@ struct TessellationConfiguration {
     std::uint32_t partitioning;
     std::uint32_t outputTopology;
 };
+
+inline constexpr std::uint32_t MeshDrawPushOffsetBytes = 104;
+inline constexpr std::uint32_t MeshDrawPushBytes = 24;
+inline constexpr std::uint32_t MeshIndexBufferUserWord = 4;
 
 struct GraphicsDrawParameters {
     std::uint64_t indexAddress;
@@ -244,6 +304,7 @@ struct DescriptorBinding {
     std::vector<bool> samplerDepthCompare;
     // Guest image elements the shader stores to (or updates atomically); the others are only read.
     std::vector<bool> imageWritten;
+    std::vector<bool> imageDepthCompare;
     // Guest buffer elements the shader updates atomically (one entry per element of a GuestBuffers
     // binding, empty otherwise). An atomic on a host-imported range is a serialized PCIe round trip
     // (~0.4-0.5 us each on NVIDIA), so a driver may keep these elements in device-local memory.
@@ -319,6 +380,7 @@ struct RecompileResult {
     SharedSpirv spirv;
     std::vector<DescriptorBinding> bindings;
     std::vector<std::byte> pushConstants;
+    std::uint32_t memoryOffsetDword = 0;
     std::uint32_t bdaAbiVersion = 0;
     std::vector<VertexAttribute> vertexAttributes;
     std::int32_t vertexOffsetSgpr = -1;
@@ -353,6 +415,8 @@ struct ResourceCapture;
 // cache keys on it.
 void SetDebugProbeActive(bool active);
 [[nodiscard]] bool DebugProbeActive();
+[[nodiscard]] bool RayTracingStrict();
+[[nodiscard]] bool RayTracingMiss();
 
 struct RectListShaders {
     RecompileResult control;

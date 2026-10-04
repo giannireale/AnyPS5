@@ -69,7 +69,8 @@ void _sigma(StubBodyBuilder& body, const std::uint8_t out, const std::uint8_t in
     body.Sse(kStubPrefixPacked, {kPxor[0], kPxor[1]}, out, tempB);
 }
 
-constexpr std::int32_t kFrameSize = 0x100;
+// Keep the scratch slot above all eleven saved GPRs and below the guest red zone.
+constexpr std::int32_t kFrameSize = 0x110;
 constexpr std::int32_t kDestinationSlot = 0x08;
 constexpr std::int32_t kSourceSlot = 0x18;
 constexpr std::int32_t kImplicitSlot = 0x28;

@@ -3,7 +3,12 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/Apr/include/AprCommandBuffer.hpp"
+#include "prx/libkernel/File/include/NativeStat.hpp"
+#include "prx/libkernel/Equeue/Equeue.hpp"
+#include "prx/libkernel/Time/include/Time.hpp"
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -13,6 +18,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 #ifdef _WIN32
@@ -115,6 +121,23 @@ AprFile _file(std::uint32_t id) {
     return g_files[id];
 }
 
+constexpr std::uint32_t INVALID_FILE_ID = 0xFFFFFFFFu;
+constexpr int SCE_KERNEL_ERROR_ENOENT = static_cast<int>(0x80020002);
+
+int _resolveForEach(const char* prefix, const char** paths, uint32_t count, uint32_t* ids, uint64_t* sizes, int* results) {
+    if (!paths || !ids) return _fail(GUEST_EINVAL);
+    for (uint32_t index = 0; index < count; ++index) {
+        const std::string path = prefix ? (paths[index] ? std::string(prefix) + paths[index] : std::string()) : (paths[index] ? std::string(paths[index]) : std::string());
+        const bool resolved = !path.empty() && _resolve(path.c_str(), &ids[index], sizes ? &sizes[index] : nullptr);
+        if (!resolved) {
+            ids[index] = INVALID_FILE_ID;
+            if (sizes) sizes[index] = 0;
+        }
+        if (results) results[index] = resolved ? 0 : SCE_KERNEL_ERROR_ENOENT;
+    }
+    return 0;
+}
+
 void _readFile(const Apr::ReadFileCommand& command) {
     const auto file = _file(command.fileId);
     static const bool trace = std::getenv("APS5_TRACE_APR") != nullptr;
@@ -129,6 +152,32 @@ void _readFile(const Apr::ReadFileCommand& command) {
 void _writeAddress(const Apr::WriteAddressCommand& command) {
     if (command.flags != 0) throw std::runtime_error("APR: WriteAddress flags " + std::to_string(command.flags) + " not implemented");
     std::atomic_ref<std::uint64_t>(*reinterpret_cast<std::uint64_t*>(command.address)).store(command.value, std::memory_order_release);
+}
+
+std::array<std::atomic<std::uint32_t>, 256> g_counters{};
+
+std::uint32_t _counter(std::uint32_t index) {
+    return g_counters[index % g_counters.size()].load(std::memory_order_acquire);
+}
+
+bool _waitSatisfied(std::uint32_t compare, std::uint64_t value, std::uint64_t reference) {
+    switch (compare) {
+        case 0: return true;
+        case 1: return value < reference;
+        case 2: return value <= reference;
+        case 3: return value == reference;
+        case 4: return value != reference;
+        case 5: return value >= reference;
+        case 6: return value > reference;
+        default: throw std::runtime_error("APR: wait compare function " + std::to_string(compare) + " not implemented");
+    }
+}
+
+template<class TCommand>
+TCommand _read(const Apr::CommandBufferObject& buffer, std::uint32_t cursor) {
+    TCommand command;
+    std::memcpy(&command, buffer.base + cursor, sizeof(command));
+    return command;
 }
 
 void _execute(const Apr::CommandBufferObject& buffer) {
@@ -151,6 +200,39 @@ void _execute(const Apr::CommandBufferObject& buffer) {
             Apr::WriteAddressCommand command;
             std::memcpy(&command, buffer.base + cursor, sizeof(command));
             _writeAddress(command);
+            break;
+        }
+        case Apr::Opcode::WriteCounter: {
+            const auto command = _read<Apr::WriteCounterCommand>(buffer, cursor);
+            g_counters[command.counter % g_counters.size()].store(command.value, std::memory_order_release);
+            break;
+        }
+        case Apr::Opcode::WaitOnAddress:
+        case Apr::Opcode::WaitOnCounter: {
+            const auto command = _read<Apr::WaitCommand>(buffer, cursor);
+            const auto current = [&]() -> std::uint64_t {
+                if (header.opcode == Apr::Opcode::WaitOnCounter) return _counter(command.counter);
+                return std::atomic_ref<std::uint64_t>(*reinterpret_cast<std::uint64_t*>(command.address)).load(std::memory_order_acquire);
+            };
+            while (!_waitSatisfied(command.compare, current() & command.mask, command.reference & command.mask)) std::this_thread::sleep_for(std::chrono::microseconds(50));
+            break;
+        }
+        case Apr::Opcode::WriteKernelEventQueue: {
+            const auto command = _read<Apr::WriteKernelEventQueueCommand>(buffer, cursor);
+            EqueueTriggerEvent_nid_postfix(static_cast<KernelEqueue>(command.equeue), static_cast<uintptr_t>(command.ident), EVFILT_USER, reinterpret_cast<void*>(command.data));
+            break;
+        }
+        case Apr::Opcode::WriteAddressFromTimeCounter: {
+            const auto command = _read<Apr::WriteAddressFromCounterCommand>(buffer, cursor);
+            std::atomic_ref<std::uint64_t>(*reinterpret_cast<std::uint64_t*>(command.address)).store(sceKernelGetProcessTimeCounter(), std::memory_order_release);
+            break;
+        }
+        case Apr::Opcode::WriteAddressFromCounter:
+        case Apr::Opcode::WriteAddressFromCounterPair: {
+            const auto command = _read<Apr::WriteAddressFromCounterCommand>(buffer, cursor);
+            std::uint64_t value = _counter(command.counter0);
+            if (header.opcode == Apr::Opcode::WriteAddressFromCounterPair) value |= static_cast<std::uint64_t>(_counter(command.counter1)) << 32u;
+            std::atomic_ref<std::uint64_t>(*reinterpret_cast<std::uint64_t*>(command.address)).store(value, std::memory_order_release);
             break;
         }
         default:
@@ -186,11 +268,80 @@ int APS5_VABI sceKernelAprResolveFilepathsToIdsAndFileSizes(const char** paths, 
     return 0;
 }
 
+int APS5_VABI sceKernelAprResolveFilepathsWithPrefixToIdsAndFileSizes(const char* prefix, const char** paths, uint32_t count, uint32_t* ids, uint64_t* sizes, uint32_t* error_index) {
+    if (!prefix || !paths || !ids) return _fail(GUEST_EINVAL);
+    for (uint32_t index = 0; index < count; ++index) {
+        const std::string path = paths[index] ? std::string(prefix) + paths[index] : std::string();
+        if (path.empty() || !_resolve(path.c_str(), &ids[index], sizes ? &sizes[index] : nullptr)) {
+            if (error_index) *error_index = index;
+            return _fail(GUEST_ENOENT);
+        }
+    }
+    return 0;
+}
+
+int APS5_VABI sceKernelAprResolveFilepathsWithPrefixToIds(const char* prefix, const char** paths, uint32_t count, uint32_t* ids, uint32_t* error_index) {
+    return sceKernelAprResolveFilepathsWithPrefixToIdsAndFileSizes(prefix, paths, count, ids, nullptr, error_index);
+}
+
+int APS5_VABI sceKernelAprGetFileSize(uint32_t id, uint64_t* size) {
+    if (!size) return _fail(GUEST_EINVAL);
+    *size = _file(id).size;
+    return 0;
+}
+
+int APS5_VABI sceKernelAprGetFileStat(uint32_t id, FileStat* stat) {
+    if (!stat) return _fail(GUEST_EINVAL);
+    File::FillFileStat(_file(id).path, stat);
+    return 0;
+}
+
 int APS5_VABI sceKernelAprSubmitCommandBuffer(const Apr::CommandBufferObject* buffer, uint32_t priority) {
     (void)priority;
     if (!buffer || buffer->type != Apr::BufferType::Apr) return _fail(GUEST_EINVAL);
     _execute(*buffer);
     return 0;
+}
+
+int APS5_VABI sceKernelAprSubmitCommandBufferAndGetId(const Apr::CommandBufferObject* buffer, uint32_t priority, uint32_t* id) {
+    if (!id) return _fail(GUEST_EINVAL);
+    const int result = sceKernelAprSubmitCommandBuffer(buffer, priority);
+    if (result != 0) return result;
+    static std::atomic<uint32_t> nextId{1};
+    *id = nextId.fetch_add(1);
+    return 0;
+}
+
+int APS5_VABI sceKernelAprSubmitCommandBufferAndGetResult(const Apr::CommandBufferObject* buffer, uint32_t priority, uint32_t* result, uint32_t* id) {
+    if (!result) return _fail(GUEST_EINVAL);
+    const int submitted = sceKernelAprSubmitCommandBufferAndGetId(buffer, priority, id);
+    if (submitted != 0) return submitted;
+    *result = 0;
+    return 0;
+}
+
+int APS5_VABI sceKernelAprWaitCommandBuffer(uint32_t id) {
+    (void)id;
+    return 0;
+}
+
+int APS5_VABI sceKernelAprResolveFilepathsToIdsForEach(const char** paths, uint32_t count, uint32_t* ids, int* results) {
+    return _resolveForEach(nullptr, paths, count, ids, nullptr, results);
+}
+
+int APS5_VABI sceKernelAprResolveFilepathsToIdsAndFileSizesForEach(const char** paths, uint32_t count, uint32_t* ids, uint64_t* sizes, int* results) {
+    if (!sizes) return _fail(GUEST_EINVAL);
+    return _resolveForEach(nullptr, paths, count, ids, sizes, results);
+}
+
+int APS5_VABI sceKernelAprResolveFilepathsWithPrefixToIdsForEach(const char* prefix, const char** paths, uint32_t count, uint32_t* ids, int* results) {
+    if (!prefix) return _fail(GUEST_EINVAL);
+    return _resolveForEach(prefix, paths, count, ids, nullptr, results);
+}
+
+int APS5_VABI sceKernelAprResolveFilepathsWithPrefixToIdsAndFileSizesForEach(const char* prefix, const char** paths, uint32_t count, uint32_t* ids, uint64_t* sizes, int* results) {
+    if (!prefix || !sizes) return _fail(GUEST_EINVAL);
+    return _resolveForEach(prefix, paths, count, ids, sizes, results);
 }
 
 }

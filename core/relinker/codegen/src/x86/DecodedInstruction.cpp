@@ -18,6 +18,11 @@ std::size_t DecodedInstruction::_skipPrefixesAndRex(
     while (pos < Length) {
         const std::uint8_t b = Data[pos];
 
+        if (b >= RexMin && b <= RexMax) {
+            pos += 1;
+            continue;
+        }
+
         if (b == PrefixRepne) {
             *outHasRepnePrefix = true;
             pos += 1;
@@ -49,10 +54,6 @@ std::size_t DecodedInstruction::_skipPrefixesAndRex(
         }
 
         break;
-    }
-
-    if (pos < Length && Data[pos] >= RexMin && Data[pos] <= RexMax) {
-        pos += 1;
     }
 
     return pos;
@@ -95,6 +96,28 @@ bool DecodedInstruction::IsShaNi() const {
     }
 
     return false;
+}
+
+bool DecodedInstruction::IsSha256() const {
+    bool operandSizeOverride = false;
+    bool repnePrefix = false;
+    bool repPrefix = false;
+    const std::size_t pos = _skipPrefixesAndRex(&operandSizeOverride, &repnePrefix, &repPrefix);
+
+    if (operandSizeOverride || repnePrefix || repPrefix) {
+        return false;
+    }
+
+    if (pos + 2 >= Length) {
+        return false;
+    }
+
+    if (Data[pos] != TwoByteOpcodeEscape || Data[pos + 1] != ThreeByteEscape38) {
+        return false;
+    }
+
+    const std::uint8_t opcode = Data[pos + 2];
+    return opcode == 0xCB || opcode == 0xCC || opcode == 0xCD;
 }
 
 bool DecodedInstruction::IsExtrq() const {

@@ -1,3 +1,4 @@
+#include <cstring>
 #include "prx/libScePlayerInvitationDialog/libScePlayerInvitationDialog.h"
 
 #include <mutex>
@@ -63,6 +64,13 @@ std::int32_t APS5_VABI scePlayerInvitationDialogTerminate(void) {
     std::lock_guard lock(g_dialog_mutex);
     APS5_LOG_OUT("status=%d", status());
     g_dialog_status = PlayerInvitationDialogStatus::None;
+    return 0;
+}
+
+std::int32_t APS5_VABI scePlayerInvitationDialogGetResult(void* result) {
+    if (result == nullptr) return static_cast<std::int32_t>(0x80B80003u);
+    const std::int32_t canceled = 1;
+    std::memcpy(result, &canceled, sizeof(canceled));
     return 0;
 }
 

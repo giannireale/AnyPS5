@@ -51,18 +51,20 @@ struct OwnedImage {
 
 class Texture {
 public:
-    Texture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, VkComponentMapping components, std::span<const std::byte> snapshot);
+    Texture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, VkComponentMapping components, std::span<const std::byte> snapshot, bool depthCompare = false);
     Texture(const Context& context, const std::shared_ptr<ResidentColor>& source, const GuestTextureResource& descriptor, VkComponentMapping components);
     // A view of a storage image's own VkImage: the sampled texture follows the image's content, so a
     // compute pass writing it and the next pass sampling it share one image and copy nothing.
     // CanCopyFrom says whether the two descriptors address the same surface compatibly.
     Texture(const Context& context, const std::shared_ptr<StorageTexture>& source, const GuestTextureResource& descriptor, VkComponentMapping components);
+    Texture(const Context& context, VkImage depthImage, VkFormat depthFormat, VkImageAspectFlags aspect, VkComponentMapping components);
     static bool CanCopyFrom(const StorageTexture& source, const GuestTextureResource& descriptor);
     ~Texture();
     Texture(const Texture&) = delete;
     Texture& operator=(const Texture&) = delete;
 
     VkImageView View() const;
+    VkImageView FirstLayerView() const { return firstLayerView; }
     // The layout the image is kept in while sampled.
     VkImageLayout Layout() const { return layout; }
     VkDeviceSize AllocationBytes() const { return allocationBytes; }
@@ -77,6 +79,7 @@ public:
 
 private:
     void release() noexcept;
+    void createFirstLayerView(const GuestTextureResource& descriptor, VkImageViewCreateInfo viewInfo);
 
     // Held by value: cached textures outlive the Context of the draw that created them.
     Context context;
@@ -85,6 +88,7 @@ private:
     VkImage image = VK_NULL_HANDLE;
     std::shared_ptr<OwnedImage> owned;
     VkImageView view = VK_NULL_HANDLE;
+    VkImageView firstLayerView = VK_NULL_HANDLE;
     VkImageLayout layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkDeviceSize allocationBytes = 0;
     std::shared_ptr<ResidentColor> source;
@@ -108,10 +112,11 @@ public:
     // The image holds every mip of the surface; one storage view per written mip is made on demand,
     // so successive mip writes of a chain share one image and one write-back.
     VkImageView View(std::uint32_t mip);
+    VkImageView FirstLayerView(std::uint32_t mip);
     // Render targets live in the same images: draws attach mip 0 through a view of the color
     // buffer's format and mark the image dirty like a storage write.
     bool Attachable() const { return attachable; }
-    VkImageView AttachmentView(VkFormat format);
+    VkImageView AttachmentView(VkFormat format, std::uint32_t mip = 0);
     void WriteBack();
     // Deferred write-back (APS5_EAGER_WRITEBACK=1 stores at once instead).
     void MarkDirty();
@@ -213,6 +218,8 @@ public:
         std::size_t inside = 0;
     };
     static FillCoverage ClassifyFill(std::uint64_t address, std::size_t bytes);
+    static std::size_t NoteKeysFill(std::uint64_t address, std::size_t bytes, std::uint8_t key);
+    static std::size_t ClearByKeysFill(std::uint64_t address, std::size_t bytes, std::uint8_t key);
     // Results pending in images lying wholly inside the range are dead (a fill overwrites every
     // byte of them): they are dropped instead of stored. Returns how many images were.
     static std::size_t DiscardPendingInside(std::uint64_t address, std::size_t bytes);
@@ -255,6 +262,7 @@ public:
     // (ProvedClearKeys): Refresh's own key rule for the fast revalidation. Under
     // GuestMemory::GpuMutex only, as Refresh is; never from a build's stage A.
     DccKeys UploadedKeys() const { return uploadedKeys; }
+    DccKeys FilledKeys() const { return filledKeys; }
     DccKeyProof& KeyProof() const { return keyProof; }
     // Brings the image up to date with guest memory before another use; returns whether its content
     // was still current (nothing uploaded).
@@ -360,9 +368,10 @@ private:
     bool skippedResultsInside(std::uint64_t address, std::size_t bytes) const;
     std::uint64_t borrowUnits(StorageTexture& source, const std::vector<bool>& units);
     void forgetBorrowed(std::uint32_t first, std::uint32_t count);
+    bool clearByKeysFill(DccKeys keys, std::uint8_t key);
     bool overlaps(std::uint64_t address, std::size_t bytes) const;
     bool pendingUnitInside(std::uint64_t address, std::size_t bytes) const;
-    VkImageView createView(std::uint32_t mip) const;
+    VkImageView createView(std::uint32_t mip, bool firstLayer = false) const;
     void release() noexcept;
 
     Context context;
@@ -376,6 +385,7 @@ private:
     std::vector<std::byte> original;
     // DCC keys the image content was uploaded under: a fast-cleared surface starts as its clear value.
     DccKeys uploadedKeys = DccKeys::Uncompressed;
+    DccKeys filledKeys = DccKeys::Uncompressed;
     mutable DccKeyProof keyProof;
     // Write generation `original` is known current at (the oldest of layerGeneration).
     std::uint64_t generation = 0;
@@ -402,8 +412,9 @@ private:
     VkImageView view = VK_NULL_HANDLE;
     std::uint32_t defaultMip = 0;
     std::map<std::uint32_t, VkImageView> extraViews;
+    std::map<std::uint32_t, VkImageView> firstLayerViews;
     bool attachable = false;
-    std::map<VkFormat, VkImageView> attachmentViews;
+    std::map<std::pair<VkFormat, std::uint32_t>, VkImageView> attachmentViews;
     VkFormat storageFormat = VK_FORMAT_UNDEFINED;
     // Results are on the GPU only (guarded by the pending-write registry lock).
     bool dirty = false;

@@ -1,3 +1,6 @@
+#include <algorithm>
+#include <array>
+#include <cstdint>
 #include <cstring>
 #include <mutex>
 #include <stdexcept>
@@ -31,7 +34,19 @@ extern "C" {
 
 int APS5_VABI sceVideoOutOpen(int userId, int busType, int index, const void* param) try {
     if (param != nullptr) {
-        throw std::runtime_error(std::string(__func__) + ": param not implemented");
+        std::array<std::uint32_t, VIDEO_OUT_OPEN_PARAM_SIZE / sizeof(std::uint32_t)> words{};
+        std::memcpy(words.data(), param, sizeof(words));
+        if (words[0] != VIDEO_OUT_OPEN_PARAM_SIZE) {
+            throw std::runtime_error(std::string(__func__) + ": unsupported param size");
+        }
+        // Unity titles (DREDGE) pass 1 in the last word; its meaning is unknown and no observed
+        // behaviour depends on it, so only that value is accepted and ignored.
+        const bool knownLastWord = words[3] == 0 || words[3] == 1;
+        if (words[1] != 0 || words[2] != 0 || !knownLastWord) {
+            std::string text = std::string(__func__) + ": param options not implemented:";
+            for (const auto word : words) text += " " + std::to_string(word);
+            throw std::runtime_error(text);
+        }
     }
     if (userId != 255 && userId != 0) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_VALUE");
@@ -177,8 +192,10 @@ int APS5_VABI sceVideoOutConfigureOutput(int handle, uint64_t mode, const VideoO
     if (supported < 0) {
         return supported;
     }
+    // The title asks for the high refresh mode even after the query reported it unsupported and
+    // falls back on this error, as on the console.
     if (supported == 0 && mode == VIDEO_OUT_OUTPUT_MODE_119_88HZ) {
-        throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_UNAVAILABLE_OUTPUT_MODE");
+        return VIDEO_OUT_ERROR_UNAVAILABLE_OUTPUT_MODE;
     }
     auto cfg = VideoOutDriver::Get().GetConfig(handle);
     if (cfg == nullptr) {
@@ -245,6 +262,18 @@ int APS5_VABI sceVideoOutAdjustColor(int handle, const VideoOutColorSettings* se
     return 0;
 } catch (const ProcessShutdown&) {
     LibcAwaitExit_nid_postfix();
+}
+
+int APS5_VABI sceVideoOutVrrPegToFixedRate(int handle) {
+    (void)handle;
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceVideoOutVrrUnpegFromFixedRate(int handle) {
+    (void)handle;
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
 }
 
 }

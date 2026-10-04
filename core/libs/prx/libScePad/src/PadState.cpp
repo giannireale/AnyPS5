@@ -170,7 +170,7 @@ PadData Pad::ReadState() {
 
     data.connected = true;
     data.connected_count = 1;
-    data.timestamp = timestamp;
+    data.timestamp = now;
 
     std::uint8_t touchNum = 0;
     for (int i = 0; i < 2; ++i) {

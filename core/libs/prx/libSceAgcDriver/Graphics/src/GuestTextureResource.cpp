@@ -88,7 +88,6 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     requireValidDstSel(dstSelZ);
     requireValidDstSel(dstSelW);
 
-    Require(minLod == 0, "guest texture descriptor uses a nonzero minimum LOD clamp which is not implemented");
     // The LOD warning threshold and mip statistics counters are texture-streaming feedback: the GPU
     // reports which mips were wanted. Nothing is reported back here, which only affects what the title
     // chooses to stream, not what this access returns.
@@ -103,7 +102,6 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     Require(!prtDefColor, "guest texture descriptor uses a partially resident default color which is not implemented");
     Require(arrayPitch == 0, "guest texture descriptor uses a nonzero array pitch which is not implemented");
     Require(!msaaDepth, "guest texture descriptor uses MSAA which is not implemented");
-    // DCC block sizes only apply with metadata compression, which is rejected above.
     static_cast<void>(maxUncompBlkSize);
     static_cast<void>(maxCompBlkSize);
     // Surfaces are always written uncompressed here (render targets and storage images bypass DCC), so
@@ -177,7 +175,13 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     result.dstSelW = static_cast<std::uint8_t>(dstSelW);
     result.dccAddress = metaCompress ? metaAddr << 8u : 0u;
     result.dccAlphaOnMsb = dccAlphaPos;
+    result.minLod = minLod;
     return result;
+}
+
+float EffectiveMinLod(const GuestTextureResource& resource) {
+    if (resource.minLod <= resource.baseLevel * 256u) return 0.0f;
+    return std::min(static_cast<float>(resource.minLod) / 256.0f, static_cast<float>(resource.lastLevel));
 }
 
 bool MatchesGuestDimension(ShaderRecompiler::DescriptorImageShape shape, TextureDimension dimension) {

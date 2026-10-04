@@ -40,17 +40,12 @@ public:
     Pipeline(const Pipeline&) = delete;
     Pipeline& operator=(const Pipeline&) = delete;
     VkPipelineLayout Layout() const;
-    // The framebuffer of these attachment views. A resident target's view (`owners[i]` set) is stable
-    // while its StorageTexture lives, so framebuffers made of resident views are kept in the pipeline
-    // and reused when every owner is still the same object; any other set is built per call.
     std::shared_ptr<Framebuffer> AcquireFramebuffer(std::span<const VkImageView> targets, std::span<const std::shared_ptr<StorageTexture>> owners, VkExtent2D extent);
     // Begins the render pass on the framebuffer, binds the pipeline and sets viewport and scissor.
     void Begin(VkCommandBuffer commands, const Framebuffer& framebuffer, VkExtent2D extent, const VkViewport& viewport, const VkRect2D& scissor) const;
     // The same inside a render pass another pipeline of the same attachments began (compatible by
     // construction: the attachment formats alone decide).
     void Continue(VkCommandBuffer commands, const VkViewport& viewport, const VkRect2D& scissor) const;
-    void PushConstants(VkCommandBuffer commands, std::span<const CompiledShader> shaders) const;
-    // The same from an assembled block (a draw recipe's, made by AssemblePushConstants once).
     void PushConstants(VkCommandBuffer commands, VkShaderStageFlags stages, std::span<const std::byte, PipelinePushConstantBytes> bytes) const;
     // Forgets the Vulkan objects without destroying them: for entries of a device that is already gone.
     void Abandon() noexcept;
@@ -69,6 +64,7 @@ private:
     VkRenderPass renderPass = VK_NULL_HANDLE;
     VkPipeline pipeline = VK_NULL_HANDLE;
     std::size_t attachments = 0;
+    std::size_t colorAttachments = 0;
     std::vector<CachedFramebuffer> framebuffers;
 };
 

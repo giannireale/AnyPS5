@@ -185,6 +185,9 @@ public:
     // compiled shader's descriptors. A recipe hit refreshes the template iff the two differ.
     std::uint64_t DataWordsHash() const { return dataWordsHash; }
     static std::uint64_t DataWordsHash(const CompiledShader& shader);
+    void PatchPushConstants(std::span<std::byte, PipelinePushConstantBytes> bytes) const {
+        for (const auto& [position, adjustment] : pushPatches) bytes[position] = static_cast<std::byte>(adjustment);
+    }
     // Whether RefreshData would record anything for `shader` (the per-word compare; verification).
     bool DataWordsDiffer(const CompiledShader& shader) const;
     // Why the fast proof of a Revalidate left the object to the full walk (the [rescache]
@@ -237,7 +240,17 @@ private:
         bool written = true;
         // Data buffers: the words the buffer holds once the recorded work ran (see RefreshData).
         std::vector<std::uint32_t> dataWords;
+        std::uint32_t adjustment = 0;
+        std::int32_t pushByte = -1;
+        std::int64_t dataAllocation = -1;
+        std::uint32_t dataByte = 0;
     };
+    struct DataPatch {
+        std::size_t allocation;
+        std::uint32_t byte;
+        std::uint32_t adjustment;
+    };
+    void writeDataWords(VkCommandBuffer commands, std::size_t allocation, std::span<const std::uint32_t> words) const;
 
     struct Binding {
         VkDescriptorSetLayoutBinding layout;
@@ -308,7 +321,7 @@ private:
     void forgetDeferredInputs();
     void release() noexcept;
     void prepareAddressBindings(std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots);
-    VkDescriptorBufferInfo descriptor(const Allocation& allocation) const;
+    VkDescriptorBufferInfo descriptor(Allocation& allocation);
     void noteReusable();
     void reportDescriptorCaches() const;
     // What a sampled texture was proved current against when the build (or the last full Revalidate)
@@ -383,8 +396,10 @@ private:
     // notes (counted in MarkGpuWrites for the [buffers] line).
     std::size_t readOnlyBuffers = 0;
     std::vector<std::shared_ptr<Texture>> textures;
+    std::vector<bool> textureFirstLayer;
     std::vector<std::shared_ptr<StorageTexture>> storageTextures;
     std::vector<std::uint32_t> storageMips;
+    std::vector<bool> storageFirstLayer;
     std::vector<bool> storageWritten;
     std::vector<std::shared_ptr<Sampler>> samplers;
     bool reusable = false;
@@ -400,6 +415,8 @@ private:
     // FNV-1a offset basis: the hash of no data buffers (DataWordsHash).
     std::uint64_t dataWordsHash = 14695981039346656037ull;
     void rehashDataWords();
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> pushPatches;
+    std::vector<DataPatch> dataPatches;
     BuildTiming timing;
     // Build state carried from stage A to stage B: the bindings in plan order, the image bindings
     // still to look up (index into `bindings`; the DescriptorBinding lives in the compiled shader),

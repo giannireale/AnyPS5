@@ -46,8 +46,7 @@ int APS5_VABI sceImeSetTextGeometry(TextAreaMode mode, const TextGeometry* geome
 }
 
 int APS5_VABI sceImeUpdate(EventHandler handler) {
- (void)handler;
- NotImplemented_nid_no_patch(__func__);
+ if (!handler) APS5_INVALID_ARG_EX;
  return 0;
 }
 

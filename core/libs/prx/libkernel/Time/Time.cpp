@@ -436,10 +436,12 @@ int APS5_VABI sceKernelClockGettime(KernelClockid clock_id, KernelTimespec* tp) 
     return clock_gettime_nid_postfix(static_cast<int>(clock_id), tp);
 }
 
-int APS5_VABI sceKernelConvertLocaltimeToUtc(int64_t local_time, int64_t reserved, int64_t* utc_time, KernelTimezone* timezone, int32_t* dst_seconds) {
+int APS5_VABI sceKernelConvertLocaltimeToUtc(int64_t local_time, int64_t reserved, int64_t* utc_time, KernelTimesec* timezone, int32_t* dst_seconds) {
     (void)reserved;
     if (utc_time != nullptr) *utc_time = local_time;
-    if (timezone != nullptr) *timezone = {0, 0};
+    // libc mktime reads west_sec and dst_sec at offsets 8 and 12, as it does for
+    // ConvertUtcToLocaltime. A KernelTimezone only initializes the first 8 bytes.
+    if (timezone != nullptr) *timezone = {local_time, 0u, 0u};
     if (dst_seconds != nullptr) *dst_seconds = 0;
     return 0;
 }
@@ -481,9 +483,8 @@ uint64_t APS5_VABI sceKernelGetTscFrequency(void) {
 }
 
 unsigned int APS5_VABI sceKernelSleep(unsigned int seconds) {
- (void)seconds;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    TimedWait::SleepNanos(static_cast<std::uint64_t>(seconds) * 1000000000ULL);
+    return 0;
 }
 
 }

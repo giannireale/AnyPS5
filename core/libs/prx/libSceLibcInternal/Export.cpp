@@ -13,4 +13,11 @@ void APS5_VABI sceLibcHeapGetTraceInfo_nid_postfix(Info* info) {
     LibcHeapTraceInfo_nid_no_patch(info);
 }
 
+std::int32_t APS5_VABI sceLibcInternalBacktraceForGame(const void*, const void*, const void*, const void*) {
+    return 0;
+}
+std::int32_t APS5_VABI sceLibcInternalHeapErrorReportForGame(const void*, const void*, const void*, const void*) {
+    return 0;
+}
+
 }

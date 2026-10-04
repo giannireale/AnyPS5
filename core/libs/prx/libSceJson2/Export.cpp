@@ -1,3 +1,4 @@
+#include "prx/libc/include/general/ExportMacros.hpp"
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
@@ -734,4 +735,30 @@ int APS5_VABI _ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(Value* out, const char*
     return 0;
 }
 
+// sce::Json InitParameter2/Initializer and Object::size, used only by the PSN plugins' setup.
+void* APS5_VABI sceJson2Mangled0(void* self) {
+    std::memset(self, 0, 32);
+    return self;
 }
+void APS5_VABI sceJson2Mangled1(void* self, void* allocator, void* context) {
+    (void)self; (void)allocator; (void)context;
+}
+void APS5_VABI sceJson2Mangled2(void* self, std::size_t size) {
+    (void)self; (void)size;
+}
+std::int32_t APS5_VABI sceJson2Mangled3(void* self, const void* parameter) {
+    (void)self; (void)parameter;
+    return 0;
+}
+std::size_t APS5_VABI sceJson2Mangled4(const void* self) {
+    (void)self;
+    return 0;
+}
+
+}
+
+APS5_EXPORT("WSOuge5IsCg", sceJson2Mangled0); // _ZN3sce4Json14InitParameter2C1Ev
+APS5_EXPORT("I2QC8PYhJWY", sceJson2Mangled1); // _ZN3sce4Json14InitParameter212setAllocatorEPNS0_12MemAllocatorEPv
+APS5_EXPORT("Eu95jmqn5Rw", sceJson2Mangled2); // _ZN3sce4Json14InitParameter217setFileBufferSizeEm
+APS5_EXPORT("IXW-z8pggfg", sceJson2Mangled3); // _ZN3sce4Json11Initializer10initializeEPKNS0_14InitParameter2E
+APS5_EXPORT("fSGHm9RjN5U", sceJson2Mangled4); // _ZNK3sce4Json6Object4sizeEv

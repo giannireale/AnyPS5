@@ -1,9 +1,11 @@
 #include <elfpatcher/general/GuestModuleWriter.hpp>
 #include <elfpatcher/windows/WindowsTrampolineBuilder.hpp>
+#include <elfpatcher/windows/WindowsImportBuilder.hpp>
 #include <elfpatcher/windows/WindowsLoadImage.hpp>
 #include <elfpatcher/windows/WindowsTlsBuilder.hpp>
 #include <elfpatcher/windows/WindowsPeWriter.hpp>
 #include <elfpatcher/windows/WindowsRelocationBuilder.hpp>
+#include <elfpatcher/windows/WindowsTrampolineBuilder.hpp>
 #include <io/BufferUtils.hpp>
 #include <algorithm>
 #include <map>
@@ -13,7 +15,7 @@ namespace Elfpatcher {
 
 std::vector<std::uint8_t> GuestModuleWriter::WriteWindows(const Relinker::GuestImage& guest, Domain::GuestRuntime& runtime) const {
     using namespace Windows;
-    WindowsLoadImage image(guest.Bytes, guest.Headers);
+    WindowsLoadImage image(guest.Bytes, guest.Headers, false);
     std::vector<std::uint32_t> relocations;
     std::vector<std::pair<std::uint64_t, std::uint32_t>> tlsModules;
     std::map<std::uint64_t, std::uint64_t> targets;
@@ -77,10 +79,10 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteWindows(const Relinker::GuestI
     apply(guest.Dynamic.RelaPltData);
     auto sections = image.BuildSections();
     auto nextRva = image.GetEndRva();
-    WindowsTrampolineBuilder().Build(guest.Trampolines, image, sections, nextRva);
     std::array<PeDirectory, 16> directories{};
     std::uint32_t tlsIndex = 0;
     directories[9] = WindowsTlsBuilder().Build(guest.Bytes, guest.Headers, image, sections, relocations, nextRva, &tlsIndex);
+    WindowsTrampolineBuilder().Build(guest.Trampolines, image, sections, nextRva);
     for (const auto& [target, rva] : tlsModules) {
         if (tlsIndex == 0) throw Domain::RelinkerException("Guest TLS relocation has no TLS block", target);
         bool written = false;
@@ -119,6 +121,15 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteWindows(const Relinker::GuestI
         nextRva = AlignRva(nextRva + tlsExports.Data.size());
         sections.push_back(std::move(tlsExports));
     }
+    if (runtime.DeferInit && guest.Init != 0 && guest.InitArray.empty()) {
+        if (!exports.emplace("__aps5_module_init", image.GetRva(guest.Init)).second) throw Domain::RelinkerException("Guest module already exports __aps5_module_init");
+        PeSection dependencies{".aps5dep", nextRva, SectionRead | 0x40u, {}};
+        for (const auto& name : runtime.DeferredDependencies) Io::AppendString(dependencies.Data, name);
+        dependencies.Data.push_back(0);
+        exports.emplace("__aps5_module_deps", nextRva);
+        nextRva = AlignRva(nextRva + dependencies.Data.size());
+        sections.push_back(std::move(dependencies));
+    }
     if (exports.size() > 65535) throw Domain::RelinkerException("Too many guest PE exports");
     PeSection exportSection{".edata", nextRva, SectionRead | 0x40u, std::vector<std::uint8_t>(40)};
     auto& data = exportSection.Data;
@@ -148,6 +159,13 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteWindows(const Relinker::GuestI
     directories[0] = {nextRva, CheckedRva(data.size())};
     nextRva = AlignRva(nextRva + data.size());
     sections.push_back(std::move(exportSection));
+    if (tlsIndex != 0) {
+        auto imports = WindowsImportBuilder().Build(nextRva);
+        directories[1] = imports.Directory;
+        directories[12] = imports.AddressTable;
+        nextRva = AlignRva(nextRva + imports.Section.Data.size());
+        sections.push_back(std::move(imports.Section));
+    }
     auto relocationData = WindowsRelocationBuilder().BuildBaseRelocations(relocations);
     if (!relocationData.empty()) {
         directories[5] = {nextRva, CheckedRva(relocationData.size())};
@@ -156,6 +174,8 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteWindows(const Relinker::GuestI
     }
     const auto entry = nextRva;
     sections.push_back({".dllmain", entry, SectionRead | SectionExecute | 0x20u, {0xb8, 1, 0, 0, 0, 0xc3}});
+    for (const auto slot : guest.InitArray) runtime.InitArrayRvas.push_back(image.GetRva(slot, 8));
+    for (const auto slot : guest.FiniArray) runtime.FiniArrayRvas.push_back(image.GetRva(slot, 8));
     runtime.InitRva = guest.Init == 0 ? 0 : image.GetRva(guest.Init);
     runtime.FiniRva = guest.Fini == 0 ? 0 : image.GetRva(guest.Fini);
     auto result = WindowsPeWriter().Write(sections, entry, directories);

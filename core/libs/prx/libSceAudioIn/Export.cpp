@@ -29,4 +29,10 @@ int APS5_VABI sceAudioInOpen(int user_id, uint32_t type, uint32_t index, uint32_
  return 0;
 }
 
+int APS5_VABI sceAudioInClose(int handle) {
+    (void)handle;
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 }

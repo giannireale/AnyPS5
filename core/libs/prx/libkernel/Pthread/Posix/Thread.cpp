@@ -3,6 +3,7 @@
 #include "SceTypes.hpp"
 #include "../include/ThreadLifecycle.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libkernel/KernelErrors.hpp"
 #include "../include/Pthread.hpp"
 #include "Common.hpp"
 #include <thread>
@@ -78,6 +79,18 @@ int APS5_VABI pthread_setschedparam_nid_postfix(Pthread thread, int policy, cons
     (void)policy;
     if (!param) return PosixThread::GUEST_EINVAL;
     return PosixThread::ToErrno(scePthreadSetprio(thread, param->sched_priority));
+}
+
+int APS5_VABI scePthreadGetschedparam(Pthread thread, int* policy, KernelSchedParam* param) {
+    if (!policy || !param) return SCE_KERNEL_ERROR_EINVAL;
+    *policy = GUEST_SCHED_FIFO;
+    return scePthreadGetprio(thread, &param->sched_priority);
+}
+
+int APS5_VABI scePthreadSetschedparam(Pthread thread, int policy, const KernelSchedParam* param) {
+    (void)policy;
+    if (!param) return SCE_KERNEL_ERROR_EINVAL;
+    return scePthreadSetprio(thread, param->sched_priority);
 }
 
 void APS5_VABI pthread_yield_nid_postfix(void) {

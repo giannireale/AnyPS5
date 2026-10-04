@@ -65,4 +65,17 @@ int APS5_VABI sceNpCommerceDialogTerminate() {
  return 0;
 }
 
+int APS5_VABI sceNpCommerceHidePsStoreIcon(void) {
+ return 0;
+}
+
+int APS5_VABI sceNpCommerceShowPsStoreIcon(int pos) {
+ (void)pos;
+ return 0;
+}
+
+std::int32_t APS5_VABI sceNpCommerceSetPsStoreIconLayout(const void*, const void*, const void*, const void*) {
+    return 0;
+}
+
 }

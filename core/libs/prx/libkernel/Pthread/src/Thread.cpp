@@ -41,6 +41,12 @@ static std::atomic<thread_dtors_func_t> threadDtors{nullptr};
 static std::atomic<get_thread_atexit_count_func_t> threadAtexitCount{nullptr};
 static std::atomic<thread_atexit_report_func_t> threadAtexitReport{nullptr};
 static thread_local PthreadPrivate* currentThread = nullptr;
+
+PthreadPrivate* PthreadExchangeCurrent(PthreadPrivate* thread) {
+    auto* previous = currentThread;
+    currentThread = thread;
+    return previous;
+}
 static thread_local bool threadFinishing = false;
 #ifndef _WIN32
 static thread_local std::unique_ptr<PthreadPrivate> adoptedThread;
@@ -210,11 +216,12 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
 #ifdef _WIN32
     SYSTEM_INFO system{};
     GetSystemInfo(&system);
-    if (p->stackSize < 16384 || p->stackSize % system.dwPageSize != 0 || p->stackSize > std::numeric_limits<unsigned>::max())
+    const std::size_t nativeStack = (p->stackSize + system.dwPageSize - 1) / system.dwPageSize * system.dwPageSize;
+    if (p->stackSize < 16384 || nativeStack > std::numeric_limits<unsigned>::max())
         throw std::runtime_error("scePthreadCreate: invalid Windows stack size");
     auto native = std::make_unique<NativeThreadArgs>(NativeThreadArgs{std::move(args), start.get_future(), {}});
     auto initialized = native->initialized.get_future();
-    const auto handle = _beginthreadex(nullptr, static_cast<unsigned>(p->stackSize), StartNativeThread, native.get(), 0, nullptr);
+    const auto handle = _beginthreadex(nullptr, static_cast<unsigned>(nativeStack), StartNativeThread, native.get(), 0, nullptr);
     if (handle == 0)
         throw std::system_error(errno, std::generic_category(), "Creating guest thread");
     p->nativeHandle = reinterpret_cast<void*>(handle);
@@ -324,6 +331,13 @@ Pthread APS5_VABI scePthreadSelf() {
             throw std::system_error(GetLastError(), std::system_category(), "Adopting guest thread");
         adopted->nativeHandle = handle;
         adopted->threadId = std::this_thread::get_id();
+        // Report the real stack of the adopted (main) thread: a conservative collector reads the
+        // bounds through pthread_attr_getstack and would otherwise not scan this stack at all.
+        ULONG_PTR stackLow = 0;
+        ULONG_PTR stackHigh = 0;
+        GetCurrentThreadStackLimits(&stackLow, &stackHigh);
+        adopted->stackAddress = reinterpret_cast<void*>(stackLow);
+        adopted->stackSize = static_cast<std::size_t>(stackHigh - stackLow);
         adopted->_detached = true;
         adopted->references.store(1, std::memory_order_relaxed);
         currentThread = adopted.release();
@@ -443,8 +457,7 @@ int APS5_VABI scePthreadOnce(int32_t* once, void (APS5_VABI* init)(void)) {
 extern "C" {
 
 void APS5_VABI __pthread_cxa_finalize_nid_postfix(void* argument) {
-    (void)argument;
-    NotImplemented_nid_no_patch(__func__);
+    CxaFinalize_nid_no_patch(argument);
 }
 
 }

@@ -3,6 +3,7 @@
 #include "Recompiler.hpp"
 #include <atomic>
 #include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -12,7 +13,9 @@ void DispatchInstruction(IrBuilder& builder, const RdnaInstruction& instruction,
     throw std::runtime_error("DispatchInstruction not implemented");
 }
 
-void TranslationContext::TranslateInstruction(const RdnaInstruction& instruction) {
+void TranslationContext::TranslateInstruction(const RdnaInstruction& decoded) {
+    RdnaInstruction instruction = decoded;
+    instruction.destination = destinationOperand(decoded);
     currentOpcode = instruction.op;
     currentProgramCounter = instruction.programCounter;
     if (instruction.op == RdnaOpcode::Unknown || instruction.op == RdnaOpcode::Count) {
@@ -79,6 +82,22 @@ void SetDebugProbeActive(bool active) {
 
 bool DebugProbeActive() {
     return g_debugProbeActive.load();
+}
+
+bool RayTracingStrict() {
+    static const bool strict = [] {
+        const char* text = std::getenv("APS5_RAYTRACING");
+        return text != nullptr && std::strcmp(text, "strict") == 0;
+    }();
+    return strict;
+}
+
+bool RayTracingMiss() {
+    static const bool miss = [] {
+        const char* text = std::getenv("APS5_RAYTRACING");
+        return text != nullptr && std::strcmp(text, "miss") == 0;
+    }();
+    return miss;
 }
 
 DebugProbe DebugProbeConfig() {

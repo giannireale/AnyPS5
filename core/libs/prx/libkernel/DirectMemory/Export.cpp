@@ -4,13 +4,14 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
-#include "DirectMemory.hpp"
+#include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 #else
 #include <fstream>
+#include <pthread.h>
 #include <sstream>
 #endif
 #include <algorithm>
@@ -19,6 +20,7 @@
 #include <iterator>
 #include <map>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 
 namespace {
@@ -134,21 +136,12 @@ int APS5_VABI sceKernelAvailableDirectMemorySize(int64_t search_start, int64_t s
 }
 
 int APS5_VABI sceKernelDirectMemoryQuery(int64_t offset, int flags, void* info, size_t info_size) {
- (void)flags;
+ constexpr int SCE_KERNEL_DMQ_FIND_NEXT = 1;
  if (!info || offset < 0) return SCE_KERNEL_ERROR_EINVAL;
  struct DirectMemoryQueryInfo { int64_t start; int64_t end; int memory_type; };
  if (info_size < sizeof(DirectMemoryQueryInfo)) return SCE_KERNEL_ERROR_EINVAL;
  auto* q = static_cast<DirectMemoryQueryInfo*>(info);
- DirectMemoryBlock block{};
- if (DirectMemoryQueryBlock(static_cast<uint64_t>(offset), &block)) {
-  q->start = static_cast<int64_t>(block.start);
-  q->end = static_cast<int64_t>(block.end);
-  q->memory_type = block.memoryType;
- } else {
-  q->start = offset & ~static_cast<int64_t>(PS5_PAGE_SIZE - 1);
-  q->end = q->start + PS5_PAGE_SIZE;
-  q->memory_type = -1;
- }
+ if (!DirectMemoryFind(offset, (flags & SCE_KERNEL_DMQ_FIND_NEXT) != 0, &q->start, &q->end, &q->memory_type)) return SCE_KERNEL_ERROR_EACCES;
  return 0;
 }
 
@@ -196,14 +189,23 @@ int APS5_VABI sceKernelMunmap(uint64_t vaddr, size_t len) {
 }
 
 int APS5_VABI sceKernelReleaseDirectMemory(int64_t start, size_t len) {
- if (start < 0 || len == 0) return SCE_KERNEL_ERROR_EINVAL;
- DirectMemoryFree(start, len);
+ if (start < 0 || len == 0 || (static_cast<uint64_t>(start) & (PS5_PAGE_SIZE - 1)) != 0 ||
+     (len & (PS5_PAGE_SIZE - 1)) != 0 || static_cast<uint64_t>(start) >= DIRECT_MEMORY_SIZE ||
+     len > DIRECT_MEMORY_SIZE - static_cast<uint64_t>(start)) return SCE_KERNEL_ERROR_EINVAL;
+ try {
+  DirectMemoryFree(start, len);
+ } catch (const std::invalid_argument& error) {
+  const char* trace = std::getenv("APS5_TRACE_DIRECT_ERRORS");
+  if (trace != nullptr && std::strcmp(trace, "1") == 0) {
+   std::fprintf(stderr, "[memory-error] release direct phys=0x%llx len=0x%zx: %s\n", static_cast<unsigned long long>(start), len, error.what());
+  }
+  return SCE_KERNEL_ERROR_EINVAL;
+ }
  return 0;
 }
 
 int APS5_VABI sceKernelReserveVirtualRange(void** addr, size_t len, int flags, size_t alignment) {
- (void)flags;
- return DoReserveVirtual(addr, len, alignment);
+ return DoReserveVirtual(addr, len, flags, alignment);
 }
 
 int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInfo* info, uint64_t info_size) {
@@ -226,16 +228,42 @@ int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInf
   info->start = best->allocationAddress;
   info->end = best->allocationAddress + best->allocationBytes;
   info->protection = (best->readable ? 1 : 0) | (best->writable ? 2 : 0) | (!best->releasable ? 4 : 0);
-  info->is_direct = best->releasable ? 1u : 0u;
+  int recorded = 0;
+  if (GuestProtection(std::max<uintptr_t>(address, info->start), &recorded)) info->protection = recorded;
+  std::uintptr_t directStart = 0;
+  std::uintptr_t directEnd = 0;
+  std::uint64_t physicalOffset = 0;
+  int memoryType = 0;
+  const bool direct = QueryDirectMapping(std::max<uintptr_t>(address, info->start), &directStart, &directEnd, &physicalOffset, &memoryType);
+  info->is_direct = direct ? 1u : 0u;
+  info->is_flexible = !direct && best->releasable ? 1u : 0u;
+  if (direct) {
+   info->start = std::max(info->start, directStart);
+   info->end = std::min(info->end, directEnd);
+   info->memory_type = memoryType;
+  }
   info->is_committed = 1;
   ApplyRangeName(std::max<uintptr_t>(address, info->start), info);
+  if (direct) info->offset = physicalOffset + info->start - directStart;
   return 0;
  }
  // Memory the registry does not know (the title's own heap blocks, stacks): the host's committed
  // region around the address is the honest extent; unmapped memory is an error, as on the PS5.
  #ifdef _WIN32
  MEMORY_BASIC_INFORMATION host{};
- if (VirtualQuery(addr, &host, sizeof(host)) == 0 || host.State != MEM_COMMIT) return SCE_KERNEL_ERROR_EACCES;
+ if (VirtualQuery(addr, &host, sizeof(host)) == 0 || host.State == MEM_FREE) return SCE_KERNEL_ERROR_EACCES;
+ // sceKernelReserveVirtualRange registers its range without access, so the lease above skips it.
+ // Titles (Unity's virtual allocator) query a reservation before committing into it and expect it
+ // reported as present and uncommitted rather than as unmapped.
+ if (host.State != MEM_COMMIT || host.Protect == PAGE_NOACCESS) {
+  const auto page = address & ~static_cast<uintptr_t>(PS5_PAGE_SIZE - 1);
+  if (!GuestAllocations::Mutation().Covers(reinterpret_cast<const void*>(page), PS5_PAGE_SIZE)) return SCE_KERNEL_ERROR_EACCES;
+  info->start = reinterpret_cast<uintptr_t>(host.BaseAddress);
+  info->end = info->start + host.RegionSize;
+  info->is_committed = 0;
+  ApplyRangeName(address, info);
+  return 0;
+ }
  info->start = reinterpret_cast<uintptr_t>(host.BaseAddress);
  info->end = info->start + host.RegionSize;
  const bool writable = (host.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY)) != 0;
@@ -272,35 +300,46 @@ int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInf
 // ---------------------------------------------------------------------------
 
 int APS5_VABI sceKernelCheckedReleaseDirectMemory(int64_t start, size_t len) {
- (void)start;
- (void)len;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return sceKernelReleaseDirectMemory(start, len);
 }
 
 int APS5_VABI sceKernelMtypeprotect(const void* addr, size_t len, int type, int prot) {
- (void)addr;
- (void)len;
  (void)type;
- (void)prot;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return DoMprotect(addr, len, prot);
 }
 
 int APS5_VABI sceKernelQueryMemoryProtection(void* addr, void** start, void** end, int* prot) {
- (void)addr;
- (void)start;
- (void)end;
- (void)prot;
- NotImplemented_nid_no_patch(__func__);
+ VirtualQueryInfo info{};
+ const int result = sceKernelVirtualQuery(addr, 0, &info, sizeof(info));
+ if (result != 0) return result;
+ if (start) *start = reinterpret_cast<void*>(info.start);
+ if (end) *end = reinterpret_cast<void*>(info.end);
+ if (prot) *prot = info.protection;
  return 0;
 }
 
+// Answers for the calling thread's stack, which is what titles ask about (Unity's garbage collector
+// locates the bounds of the stack it is scanning from); other threads' stacks are not tracked.
 int APS5_VABI sceKernelIsStack(void* addr, void** start, void** end) {
- (void)addr;
- (void)start;
- (void)end;
- NotImplemented_nid_no_patch(__func__);
+ if (!start || !end) return SCE_KERNEL_ERROR_EINVAL;
+ #ifdef _WIN32
+ ULONG_PTR low = 0;
+ ULONG_PTR high = 0;
+ GetCurrentThreadStackLimits(&low, &high);
+ #else
+ pthread_attr_t attributes;
+ if (pthread_getattr_np(pthread_self(), &attributes) != 0) return SCE_KERNEL_ERROR_EINVAL;
+ void* base = nullptr;
+ size_t size = 0;
+ pthread_attr_getstack(&attributes, &base, &size);
+ pthread_attr_destroy(&attributes);
+ const auto low = reinterpret_cast<uintptr_t>(base);
+ const auto high = low + size;
+ #endif
+ const auto address = reinterpret_cast<uintptr_t>(addr);
+ if (address < low || address >= high) return SCE_KERNEL_ERROR_EINVAL;
+ *start = reinterpret_cast<void*>(low);
+ *end = reinterpret_cast<void*>(high);
  return 0;
 }
 

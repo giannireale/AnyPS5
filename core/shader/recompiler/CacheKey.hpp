@@ -30,8 +30,11 @@ public:
         append(key, request.context.compute);
         append(key, request.context.pixel);
         append(key, request.context.vertex);
+        appendMesh(key, request);
         append(key, request.target);
         append(key, DebugProbeActive());
+        append(key, RayTracingStrict());
+        append(key, RayTracingMiss());
     }
 
     // A hash over every field Build appends except the code, the target and the probe flag: the
@@ -48,6 +51,7 @@ public:
         append(key, request.context.compute);
         append(key, request.context.pixel);
         append(key, request.context.vertex);
+        appendMesh(key, request);
         std::uint64_t hash = 0xcbf29ce484222325ull;
         for (const auto value : key) {
             hash ^= value;
@@ -70,6 +74,14 @@ public:
     }
 
 private:
+    static void appendMesh(std::vector<std::uint64_t>& key, const RecompileRequest& request) {
+        if (request.shader.stage != ShaderStage::Mesh) return;
+        const auto* mesh = request.graphics && request.graphics->mesh ? &*request.graphics->mesh : nullptr;
+        append(key, mesh != nullptr);
+        if (mesh == nullptr) return;
+        for (const auto value : {mesh->inputPrimitive, mesh->primitivesPerGroup, mesh->verticesPerGroup, mesh->maxVertices, mesh->maxPrimitives, mesh->threadsPerGroup, mesh->ldsSizeDwords, mesh->provokingVertex, mesh->esgsItemSize}) append(key, value);
+    }
+
     template<typename TValue>
     static void append(std::vector<std::uint64_t>& key, TValue value) requires (std::is_integral_v<TValue> || std::is_enum_v<TValue>) {
         key.push_back(static_cast<std::uint64_t>(value));
@@ -103,6 +115,7 @@ private:
         append(key, value.groupIdEnable);
         append(key, value.tgSizeEnable);
         append(key, value.threadIdComponentCount);
+        append(key, value.PartialGroups());
     }
 
     static void append(std::vector<std::uint64_t>& key, const ShaderPixelStageInfo& value) {
@@ -110,8 +123,9 @@ private:
         if (value.interpolatorCount > value.interpolatorSettings.size()) throw std::runtime_error("Shader cache: invalid interpolator count");
         for (std::uint32_t i = 0; i < value.interpolatorCount; ++i) append(key, value.interpolatorSettings[i]);
         append(key, value.wave32);
-        append(key, value.perspectiveCenterVgpr);
+        append(key, value.inputAddr);
         append(key, value.hasPerspectiveCenterVgpr);
+        append(key, value.perspectiveCentroid);
         append(key, value.posX);
         append(key, value.posY);
         append(key, value.posZ);
@@ -120,6 +134,7 @@ private:
         append(key, value.ancillary);
         append(key, value.sampleShading);
         append(key, value.noPerspective);
+        append(key, value.linearCentroid);
         append(key, value.pixelKillEnable);
         append(key, value.depthExportEnable);
         append(key, value.sampleMaskExportEnable);

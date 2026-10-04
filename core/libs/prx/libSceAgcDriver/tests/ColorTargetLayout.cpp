@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetTransfer.hpp"
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <cstring>
 #include <span>
 #include <vector>
@@ -27,7 +28,8 @@ void RunColorTargetLayoutTests() {
     reject([] { DecodeColorTileMode(0xcdc6c000); });
     reject([] { DecodeColorTileMode(0x09014000); });
     reject([] { ColorTargetLayout(0, 1, ColorTileMode::RenderTarget); });
-    reject([] { ColorTargetLayout(63, 1, ColorTileMode::Linear); });
+    const ColorTargetLayout padded(63, 2, ColorTileMode::Linear);
+    Require(padded.Bytes() == 512 && padded.LinearBytes() == 504 && padded.Offset(0, 1) == 256, "linear rows are not padded to 256 bytes");
     const ColorTargetLayout screen(3840, 2160, ColorTileMode::RenderTarget);
     Require(screen.Bytes() == 33423360 && screen.LinearBytes() == 33177600 && screen.Alignment() == 65536, "4K color backing layout is incorrect");
     const ColorTargetLayout layout(257, 129, ColorTileMode::RenderTarget);
@@ -57,9 +59,8 @@ void RunColorTargetLayoutTests() {
     }
     reject([&] { layout.Detile(std::span(tiled).first(4), restored); });
     reject([&] { layout.Tile(std::span(linear).first(4), tiled); });
-    static std::array<std::byte, 131071> guestStorage{};
-    const auto guestAddress = (reinterpret_cast<std::uintptr_t>(guestStorage.data()) + 65535) & ~std::uintptr_t{65535};
-    auto guest = std::span<std::byte, 65536>(reinterpret_cast<std::byte*>(guestAddress), 65536);
+    static std::vector<std::byte> storage(2 * 65536);
+    const std::span guest(reinterpret_cast<std::byte*>((reinterpret_cast<std::uintptr_t>(storage.data()) + 0xffffu) & ~std::uintptr_t{0xffffu}), 65536);
     std::fill(guest.begin(), guest.end(), std::byte{0x6b});
     ColorTarget target{reinterpret_cast<std::uintptr_t>(guest.data()), {2, 2}, VK_FORMAT_R8G8B8A8_UNORM, guest.size(), 0xe4, ColorTileMode::RenderTarget};
     std::array<std::byte, 16> pixels{};

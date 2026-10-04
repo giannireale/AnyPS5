@@ -13,6 +13,7 @@ enum class SystemInstruction {
     Monitorx,
     Mwaitx,
     Clzero,
+    Clzero32,
     Mcommit
 };
 

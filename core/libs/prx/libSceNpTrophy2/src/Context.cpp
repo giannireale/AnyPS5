@@ -30,4 +30,15 @@ int APS5_VABI sceNpTrophy2RegisterContext(int context, int handle, uint64_t opti
     return SCE_NP_TROPHY2_OK;
 }
 
+std::int32_t APS5_VABI sceNpTrophy2ShowTrophyList(const void*, const void*, const void*, const void*) {
+    return SCE_NP_TROPHY2_OK;
+}
+std::int32_t APS5_VABI sceNpTrophy2UnregisterUnlockCallback(const void*, const void*, const void*, const void*) {
+    return SCE_NP_TROPHY2_OK;
+}
+// Reward icons are not available offline.
+std::int32_t APS5_VABI sceNpTrophy2GetRewardIcon(const void*, const void*, const void*, const void*) {
+    return static_cast<std::int32_t>(0x80551600u);
+}
+
 }

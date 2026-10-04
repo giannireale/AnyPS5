@@ -93,4 +93,24 @@ int APS5_VABI sceAjmBatchCancel(uint32_t context, uint32_t batch) {
     return 0;
 }
 
+// Batch decoding is not emulated yet: batches complete immediately with no output.
+std::int32_t APS5_VABI sceAjmBatchInitialize(const void*, const void*, const void*, const void*) {
+    return 0;
+}
+std::int32_t APS5_VABI sceAjmBatchJobDecode(const void*, const void*, const void*, const void*) {
+    return 0;
+}
+std::int32_t APS5_VABI sceAjmBatchJobGetCodecInfo(const void*, const void*, const void*, const void*) {
+    return 0;
+}
+std::int32_t APS5_VABI sceAjmBatchJobInitialize(const void*, const void*, const void*, const void*) {
+    return 0;
+}
+std::int32_t APS5_VABI sceAjmBatchJobSetGaplessDecode(const void*, const void*, const void*, const void*) {
+    return 0;
+}
+std::int32_t APS5_VABI sceAjmBatchStart(const void*, const void*, const void*, const void*) {
+    return 0;
+}
+
 }

@@ -1,9 +1,11 @@
 #ifdef _WIN32
 #include <windows.h>
+#include "prx/libc/include/GuestArena.hpp"
 #include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
+#include <cstring>
 #include <cstdio>
 #include <cstdarg>
 #include <cstdlib>
@@ -233,8 +235,69 @@ bool HandleSse4a(EXCEPTION_POINTERS* info) {
     return true;
 }
 
+bool g_traceFmodWrites = false;
+std::atomic<unsigned> g_fmodWrites{0};
+
+struct FmodRedZone {
+    std::uint8_t bytes[128]{};
+    bool valid = false;
+};
+
+bool IsTracedFmodWrite(const EXCEPTION_POINTERS* info) {
+    if (!g_traceFmodWrites || g_fmodWrites.load(std::memory_order_relaxed) >= 32) return false;
+    const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    const auto rip = static_cast<std::uintptr_t>(info->ContextRecord->Rip);
+    return rip >= base && rip - base >= 0x17f5cf0 && rip - base < 0x17f66a0;
+}
+
+FmodRedZone CaptureFmodRedZone(const EXCEPTION_POINTERS* info) {
+    FmodRedZone result;
+    if (!IsTracedFmodWrite(info) || info->ContextRecord->Rsp < sizeof(result.bytes)) return result;
+    SIZE_T read = 0;
+    result.valid = ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(info->ContextRecord->Rsp - sizeof(result.bytes)), result.bytes, sizeof(result.bytes), &read) && read == sizeof(result.bytes);
+    return result;
+}
+
+void TraceFmodWrite(const EXCEPTION_POINTERS* info, const FmodRedZone& before, const FmodRedZone& after) {
+    if (!g_traceFmodWrites) return;
+    const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    const auto rip = static_cast<std::uintptr_t>(info->ContextRecord->Rip);
+    if (rip < base || rip - base < 0x17f5cf0 || rip - base >= 0x17f66a0) return;
+    const auto count = g_fmodWrites.fetch_add(1, std::memory_order_relaxed);
+    if (count >= 32) return;
+    Report("[fmod-write] #%u thread %lu rva=0x%llx address=0x%llx rsp=0x%llx rsi=0x%llx\n",
+           count + 1, GetCurrentThreadId(), static_cast<unsigned long long>(rip - base),
+           static_cast<unsigned long long>(info->ExceptionRecord->ExceptionInformation[1]),
+           static_cast<unsigned long long>(info->ContextRecord->Rsp),
+           static_cast<unsigned long long>(info->ContextRecord->Rsi));
+    const auto* tib = reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
+    Report("[fmod-redzone] #%u context=0x%llx exception=0x%llx stack-limit=0x%llx stack-base=0x%llx before=%u after=%u\n", count + 1,
+           static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(info->ContextRecord)),
+           static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(info->ExceptionRecord)),
+           static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(tib->StackLimit)),
+           static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(tib->StackBase)), before.valid, after.valid);
+    if (before.valid && after.valid) {
+        for (unsigned offset = 8; offset <= 128; offset += 8) {
+            std::uint64_t a = 0, b = 0;
+            std::memcpy(&a, before.bytes + 128 - offset, sizeof(a));
+            std::memcpy(&b, after.bytes + 128 - offset, sizeof(b));
+            Report("[fmod-redzone] #%u rsp-0x%02x before=%016llx after=%016llx\n", count + 1, offset,
+                   static_cast<unsigned long long>(a), static_cast<unsigned long long>(b));
+        }
+    }
+}
+
 LONG WINAPI ReportCrash(EXCEPTION_POINTERS* info) {
     static std::atomic<bool> reported{false};
+    const auto* fault = info->ExceptionRecord;
+    if (fault->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && fault->NumberParameters >= 2 && fault->ExceptionInformation[0] == 1) {
+        const auto before = CaptureFmodRedZone(info);
+        if (GuestArena::GuestArenaHandleWrite_nid_postfix(fault->ExceptionInformation[1])) {
+            const auto after = CaptureFmodRedZone(info);
+            TraceFmodWrite(info, before, after);
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+    }
     if (HandleWatch(info)) return EXCEPTION_CONTINUE_EXECUTION;
     if (HandleSse4a(info)) return EXCEPTION_CONTINUE_EXECUTION;
     const auto* record = info->ExceptionRecord;
@@ -361,6 +424,7 @@ struct ExitReporter {
 } g_exitReporter;
 
 const bool g_crashReportInstalled = [] {
+    g_traceFmodWrites = IsEnvironmentSet("APS5_TRACE_FMOD_WRITE_FAULTS");
     g_sse4aEmulation = !IsEnvironmentSet("APS5_NO_SSE4A_EMULATION");
     g_sse4aTrace = IsEnvironmentSet("APS5_TRACE_SSE4A");
     AddVectoredExceptionHandler(1, ReportCrash);
