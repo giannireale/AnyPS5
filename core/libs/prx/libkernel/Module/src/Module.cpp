@@ -1,10 +1,19 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstddef>
+#include <cstring>
+#include <stdexcept>
+#include <string>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
+#ifdef _WIN32
+#include <windows.h>
+#include <psapi.h>
+#else
+#include <fstream>
+#endif
 
 #include <cstring>
 #include <stdexcept>
@@ -98,9 +107,34 @@ int APS5_VABI sceKernelGetModuleInfoForUnwind(uint64_t addr, int flags, ModuleIn
  }
  return 0;
 #else
- (void)addr;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+  std::ifstream maps("/proc/self/maps");
+  if (!maps) throw std::runtime_error("sceKernelGetModuleInfoForUnwind: failed to open /proc/self/maps");
+  std::string line;
+  while (std::getline(maps, line)) {
+    std::uint64_t start = 0;
+    std::uint64_t end = 0;
+    char perms[8] = {};
+    std::uint64_t offset = 0;
+    unsigned int devMajor = 0;
+    unsigned int devMinor = 0;
+    std::uint64_t inode = 0;
+    char path[4096] = {};
+    int parsed = std::sscanf(line.c_str(), "%llx-%llx %7s %llx %x:%x %llu %4095s",
+      (unsigned long long*)&start, (unsigned long long*)&end, perms,
+      (unsigned long long*)&offset, &devMajor, &devMinor, (unsigned long long*)&inode, path);
+    if (parsed < 7 || addr < start || addr >= end) continue;
+    info->st_size = sizeof(ModuleInfoForUnwind);
+    std::strncpy(info->name, parsed >= 8 ? path : "", sizeof(info->name) - 1);
+    info->name[sizeof(info->name) - 1] = '\0';
+    info->eh_frame_hdr_addr = 0;
+    info->eh_frame_addr = 0;
+    info->eh_frame_size = 0;
+    info->seg0_addr = start;
+    info->seg0_size = end - start;
+    return 0;
+  }
+  return SCE_KERNEL_ERROR_ESRCH;
+
 #endif
 }
 

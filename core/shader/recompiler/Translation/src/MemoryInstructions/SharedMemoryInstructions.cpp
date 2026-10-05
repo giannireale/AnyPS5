@@ -171,13 +171,14 @@ bool TranslationContext::dsWrite2(const RdnaInstruction& inst) {
     return true;
 }
 
-bool TranslationContext::dsMinmaxF32(const RdnaInstruction& inst, IrOpcode opcode) {
+bool TranslationContext::dsAtomic2(const RdnaInstruction& inst, IrOpcode opcode, bool returnsValue) {
     const MemoryInfo memory = sharedMemoryInfoFromInstruction(inst);
     const IrU32 address = readU32(inst.source0);
     const IrU32 data0 = readU32(inst.source1);
     const IrU32 data1 = readU32(inst.source2);
     IrValue& active = ir.GetExec();
-    (void)ir.Emit(opcode, IrType::Void, {&address.Value(), &data0.Value(), &data1.Value(), &active}, addMemoryInfo(memory, inst.programCounter));
+    IrValue& old = ir.Emit(opcode, IrOpcodeType(opcode), {&address.Value(), &data0.Value(), &data1.Value(), &active}, addMemoryInfo(memory, inst.programCounter));
+    if (returnsValue) writeOperand(inst.destination, &old);
     return true;
 }
 
@@ -223,6 +224,16 @@ bool TranslationContext::dsBpermuteB32(const RdnaInstruction& inst) {
     const IrU32 value = readU32(inst.source1);
     IrValue& active = ir.GetExec();
     IrValue& result = ir.Emit(IrOpcode::BpermuteU32, IrOpcodeType(IrOpcode::BpermuteU32), {&value.Value(), &address, &active});
+    writeOperand(inst.destination, &result);
+    return true;
+}
+
+bool TranslationContext::dsPermuteB32(const RdnaInstruction& inst) {
+    const IrU32 index = readU32(inst.source0);
+    IrValue& address = ir.IAdd(index.Value(), ir.Constant(inst.memoryOffset));
+    const IrU32 value = readU32(inst.source1);
+    IrValue& active = ir.GetExec();
+    IrValue& result = ir.Emit(IrOpcode::PermuteU32, IrOpcodeType(IrOpcode::PermuteU32), {&value.Value(), &address, &active});
     writeOperand(inst.destination, &result);
     return true;
 }

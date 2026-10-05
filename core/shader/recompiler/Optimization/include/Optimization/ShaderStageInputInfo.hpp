@@ -109,13 +109,14 @@ struct ShaderMeshInputInfo: ShaderWorkgroupInputInfo {
             case 2:
             case 3: return 2;
             case 4:
+            case 5:
             case 6: return 3;
             default: throw std::runtime_error("unsupported mesh input primitive");
         }
     }
     [[nodiscard]] std::uint32_t InputPrimitiveStep() const {
         const auto size = InputPrimitiveSize();
-        return inputPrimitive == 3 || inputPrimitive == 6 ? 1u : size;
+        return inputPrimitive == 3 || inputPrimitive == 5 || inputPrimitive == 6 ? 1u : size;
     }
     [[nodiscard]] std::uint32_t InputPrimitiveCount(std::uint32_t vertices) const {
         const auto size = InputPrimitiveSize();

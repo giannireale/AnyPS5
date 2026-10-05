@@ -41,17 +41,18 @@ void sampleWithOffset() {
     const struct {
         std::uint32_t opcode;
         const char* name;
+        RdnaOpcode decodedOpcode;
         std::uint32_t flags;
         std::uint32_t components;
     } cases[] = {
-        {0x3au, "image_sample_c_d_o", RdnaImageSampleFlagCompare | RdnaImageSampleFlagDerivative | RdnaImageSampleFlagOffset, 8},
-        {0x3cu, "image_sample_c_l_o", RdnaImageSampleFlagCompare | RdnaImageSampleFlagLod | RdnaImageSampleFlagOffset, 5},
-        {0x3du, "image_sample_c_b_o", RdnaImageSampleFlagCompare | RdnaImageSampleFlagBias | RdnaImageSampleFlagOffset, 5},
-        {0x3fu, "image_sample_c_lz_o", RdnaImageSampleFlagCompare | RdnaImageSampleFlagLevelZero | RdnaImageSampleFlagOffset, 4},
+        {0x3au, "image_sample_c_d_o", RdnaOpcode::ImageSampleCDO, RdnaImageSampleFlagCompare | RdnaImageSampleFlagDerivative | RdnaImageSampleFlagOffset, 8},
+        {0x3cu, "image_sample_c_l_o", RdnaOpcode::ImageSampleCLO, RdnaImageSampleFlagCompare | RdnaImageSampleFlagLod | RdnaImageSampleFlagOffset, 5},
+        {0x3du, "image_sample_c_b_o", RdnaOpcode::ImageSampleCBO, RdnaImageSampleFlagCompare | RdnaImageSampleFlagBias | RdnaImageSampleFlagOffset, 5},
+        {0x3fu, "image_sample_c_lz_o", RdnaOpcode::ImageSampleCLzO, RdnaImageSampleFlagCompare | RdnaImageSampleFlagLevelZero | RdnaImageSampleFlagOffset, 4},
     };
     for (const auto& entry : cases) {
         const auto instruction = decode(entry.opcode);
-        require(instruction.op == RdnaOpcode::ImageSample, "shadow sample with offset decoded to the wrong opcode");
+        require(instruction.op == entry.decodedOpcode, "shadow sample with offset decoded to the wrong opcode");
         require(instruction.imageSampleFlags == entry.flags, "shadow sample with offset decoded the wrong address flags");
         require(instruction.imageAddressComponents == entry.components, "shadow sample with offset decoded the wrong address component count");
         require(std::string(GetRdnaImageSampleOpcodeName(entry.opcode)) == entry.name, "shadow sample with offset reported the wrong name");
@@ -103,7 +104,7 @@ void atomics() {
     require(decode(0x11u).op == RdnaOpcode::ImageAtomicAdd, "IMAGE_ATOMIC_ADD regressed");
     require(decode(0x15u).op == RdnaOpcode::ImageAtomicUmin, "IMAGE_ATOMIC_UMIN regressed");
     requireFailure([] { (void)decode(0x13u); }, "reserved atomic opcode 0x13 was accepted");
-    requireFailure([] { (void)decode(0x1bu); }, "IMAGE_ATOMIC_INC was accepted without an implementation");
+    require(decode(0x1bu).op == RdnaOpcode::ImageAtomicInc, "IMAGE_ATOMIC_INC decoded to the wrong opcode");
 }
 
 void unchanged() {
@@ -113,7 +114,7 @@ void unchanged() {
     require(sample.op == RdnaOpcode::ImageSample && sample.imageAddressComponents == 2u, "IMAGE_SAMPLE regressed");
     const auto oneDimensional = decode(0x3fu, 1u, Dim1D);
     require(oneDimensional.imageAddressComponents == 3u, "1D shadow sample with offset decoded the wrong address component count");
-    requireFailure([] { (void)decode(0x39u); }, "an unimplemented LOD-clamped variant was accepted");
+    require(decode(0x39u).op == RdnaOpcode::ImageSampleCClO, "LOD-clamped shadow sample with offset decoded the wrong opcode");
 }
 
 }

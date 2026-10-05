@@ -1,6 +1,7 @@
 #include "Translation/ScalarInstructions.hpp"
 #include "Translation/TranslationContext.hpp"
 #include <stdexcept>
+#include <string>
 
 namespace ShaderRecompiler {
 
@@ -51,8 +52,25 @@ bool TranslationContext::emitScalar(const RdnaInstruction& inst) {
         scalarSelect64(inst, inst.destination);
         return true;
     case RdnaOpcode::SSetregB32:
+    case RdnaOpcode::SVersion:
         emitControlNop();
         return true;
+    case RdnaOpcode::SSetregImm32B32: {
+        const std::uint32_t field = inst.source1.value;
+        const std::uint32_t offset = (field >> 6u) & 0x1fu;
+        const std::uint32_t size = ((field >> 11u) & 0x1fu) + 1u;
+        const std::uint64_t written = static_cast<std::uint64_t>(inst.source0.value) & ((std::uint64_t{1} << size) - 1u);
+        if ((field & 0x3fu) != 1u || offset + size > 4u || written != 0u) {
+            throw std::runtime_error("s_setreg_imm32_b32 at pc " + std::to_string(inst.programCounter) + " writes a hardware register field other than round to nearest even in MODE");
+        }
+        emitControlNop();
+        return true;
+    }
+    case RdnaOpcode::SCmovkI32: {
+        const IrU32 previous = readU32(inst.destination);
+        writeRawU32(inst.destination, IrU32(ir.Select(ir.GetScc(), ir.Constant(inst.source0.value), previous.Value())));
+        return true;
+    }
     case RdnaOpcode::SWaitcnt:
         emitWaitcnt();
         return true;
@@ -275,6 +293,15 @@ bool TranslationContext::emitScalar(const RdnaInstruction& inst) {
         }
         return true;
     }
+    case RdnaOpcode::SBcnt0I32B64: {
+        const std::array<IrU32, 2> source = extractU64(readU64(sourceAt(inst, 0u)));
+        auto& low = ir.Emit(IrOpcode::BitCount32, IrType::U32, {&ir.BitwiseNot(source[0].Value())});
+        auto& high = ir.Emit(IrOpcode::BitCount32, IrType::U32, {&ir.BitwiseNot(source[1].Value())});
+        auto& result = ir.IAdd(low, high);
+        writeOperand(inst.destination, &result);
+        ir.SetScc(ir.INotEqual(result, ir.Constant(0u)));
+        return true;
+    }
     case RdnaOpcode::SBcnt1I32B32:
         return simpleInteger(inst, IrOpcode::BitCount32, IrType::U32, false, false, true);
     case RdnaOpcode::SBcnt1I32B64:
@@ -303,12 +330,18 @@ bool TranslationContext::emitScalar(const RdnaInstruction& inst) {
         return composedIntegerBinary(inst, IrOpcode::BitwiseOr32, false, true, true);
     case RdnaOpcode::SXnorB32:
         return composedIntegerBinary(inst, IrOpcode::BitwiseXor32, false, true, true);
+    case RdnaOpcode::SFf0I32B64:
+        return sFfI32B64(inst, true);
     case RdnaOpcode::SFf1I32B64:
-        return sFf1I32B64(inst);
+        return sFfI32B64(inst, false);
     case RdnaOpcode::SFlbitI32B32:
         return vFfbh32(inst, false);
+    case RdnaOpcode::SFlbitI32:
+        return vFfbh32(inst, true);
     case RdnaOpcode::SFlbitI32B64:
-        return sFlbitI32B64(inst);
+        return sFlbitI32B64(inst, false);
+    case RdnaOpcode::SFlbitI32I64:
+        return sFlbitI32B64(inst, true);
     case RdnaOpcode::SBitset0B32:
         return sBitsetB32(inst, false);
     case RdnaOpcode::SBitset1B32:
@@ -319,8 +352,16 @@ bool TranslationContext::emitScalar(const RdnaInstruction& inst) {
         return sBitsetB64(inst, true);
     case RdnaOpcode::SBitreplicateB64B32:
         return sBitreplicateB64B32(inst);
+    case RdnaOpcode::SQuadmaskB32:
+        return sQuadmask(inst, false);
     case RdnaOpcode::SQuadmaskB64:
-        return sQuadmaskB64(inst);
+        return sQuadmask(inst, true);
+    case RdnaOpcode::SMovrelsB32:
+    case RdnaOpcode::SMovrelsB64:
+    case RdnaOpcode::SMovreldB32:
+    case RdnaOpcode::SMovreldB64:
+    case RdnaOpcode::SMovrelsd2B32:
+        return sMovrel(inst);
     case RdnaOpcode::SBfmB32:
         return bfmB32(inst);
     case RdnaOpcode::SBfmB64:
@@ -347,6 +388,7 @@ bool TranslationContext::emitScalar(const RdnaInstruction& inst) {
         return packB16(inst, true, true);
     case RdnaOpcode::SNop:
     case RdnaOpcode::SSleep:
+    case RdnaOpcode::SWakeup:
     case RdnaOpcode::SSetprio:
     case RdnaOpcode::STrap:
     case RdnaOpcode::SClause:
@@ -355,6 +397,8 @@ bool TranslationContext::emitScalar(const RdnaInstruction& inst) {
     case RdnaOpcode::SDecperflevel:
         emitControlNop();
         return true;
+    case RdnaOpcode::SDenormMode:
+        throw std::runtime_error("s_denorm_mode " + std::to_string(inst.source0.value) + " at pc " + std::to_string(inst.programCounter) + ": the recompiler does not model denormal modes");
     case RdnaOpcode::SWaitcntDepctr:
     case RdnaOpcode::SWaitIdle:
         emitWaitcnt();

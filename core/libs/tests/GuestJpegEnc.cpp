@@ -3,6 +3,7 @@
 #include "Decoder/Jpeg.hpp"
 #include <cstdint>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <stdexcept>
 #include <vector>
@@ -14,7 +15,8 @@ std::int32_t APS5_VABI sceJpegEncDelete(void*);
 std::int32_t APS5_VABI sceJpegEncEncode(void*, const JpegEncEncodeParam*, JpegEncOutputInfo*);
 }
 
-static void Require(bool value) { if (!value) std::abort(); }
+static void Check(bool value, int line) { if (!value) { std::fprintf(stderr, "JPEG encode check failed at line %d\n", line); std::abort(); } }
+#define Require(value) Check((value), __LINE__)
 
 alignas(4) static unsigned char image[16 * 16 * 4];
 static unsigned char jpeg[4096];
@@ -29,11 +31,17 @@ static int AverageError(const std::vector<std::uint8_t>& expected, const std::ve
     return static_cast<int>(total / static_cast<long>(expected.size()));
 }
 
-static std::vector<std::uint8_t> DecodeOutput(const JpegEncOutputInfo& info) {
+static std::vector<std::uint8_t> DecodeOutput(const JpegEncOutputInfo& info, std::uint32_t channels = 3) {
     Require(IsJpeg(jpeg, info.size));
     const auto decoded = Decoder::Jpeg::Decode({jpeg, info.size});
     Require(decoded.has_value());
-    Require(decoded->width == 16 && decoded->height == 16 && decoded->channels == 3);
+    Require(decoded->width == 16 && decoded->height == 16 && decoded->channels == channels);
+    if (channels == 1) {
+        std::vector<std::uint8_t> rgb(decoded->pixels.size() * 3);
+        for (std::size_t i = 0; i < decoded->pixels.size(); ++i)
+            for (std::size_t c = 0; c < 3; ++c) rgb[i * 3 + c] = decoded->pixels[i];
+        return rgb;
+    }
     return decoded->pixels;
 }
 
@@ -216,7 +224,7 @@ int main() {
     y8.sampling_type = 0;
     info = {};
     Require(sceJpegEncEncode(handle, &y8, &info) == 0);
-    Require(AverageError(expectedGray, DecodeOutput(info)) < 6);
+    Require(AverageError(expectedGray, DecodeOutput(info, 1)) < 6);
 
     std::memset(jpeg, 0, sizeof(jpeg));
     Require(sceJpegEncEncode(handle, &rgba, nullptr) == 0);

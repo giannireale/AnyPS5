@@ -245,4 +245,48 @@ int APS5_VABI sceHttpSetChunkedTransferEnabled(int id, int enable) {
     return 0;
 }
 
+
+APS5_EXPORT("i9mhafzkEi8", sceHttpUnknown00);
+int APS5_VABI sceHttpUnknown00(void) {
+    NotImplemented_nid_no_patch("i9mhafzkEi8");
+    return 0;
+}
+
+APS5_EXPORT("vO4B-42ef-k", sceHttpUnknown01);
+int APS5_VABI sceHttpUnknown01(void) {
+    NotImplemented_nid_no_patch("vO4B-42ef-k");
+    return 0;
+}
+
+int APS5_VABI sceHttpCreateRequest2(int conn_id, const char* method, const char* path, uint64_t content_length) {
+    (void)conn_id;
+    (void)method;
+    (void)path;
+    (void)content_length;
+    return g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+}
+
+int APS5_VABI sceHttpsEnableOption(int id, uint32_t ssl_flags) {
+    (void)id;
+    (void)ssl_flags;
+    return 0;
+}
+
+int APS5_VABI sceHttpsLoadCert(int http_ctx_id, int num, void* ca_list, void* cert, void* key) {
+    (void)http_ctx_id;
+    (void)num;
+    (void)ca_list;
+    (void)cert;
+    (void)key;
+    return 0;
+}
+
+int APS5_VABI sceHttpGetLastErrno(int request_id, int* errno_out) {
+    (void)request_id;
+    if (errno_out == nullptr) {
+        return ERROR_INVALID_VALUE;
+    }
+    *errno_out = 0;
+    return 0;
+}
 }

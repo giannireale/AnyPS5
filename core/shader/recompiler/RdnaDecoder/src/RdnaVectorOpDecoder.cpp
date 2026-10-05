@@ -56,6 +56,7 @@ constexpr Vop2OpcodeInfo vop2Opcodes[] = {
     {0x0au, RdnaOpcode::VMulHiI32I24, Vop2SdwaProfile::IntegerFullDestination},
     {0x0bu, RdnaOpcode::VMulU32U24, Vop2SdwaProfile::IntegerFullDestination},
     {0x0cu, RdnaOpcode::VMulHiU32U24, Vop2SdwaProfile::IntegerFullDestination},
+    {0x0du, RdnaOpcode::VDot4cI32I8},
     {0x0fu, RdnaOpcode::VMinF32},
     {0x10u, RdnaOpcode::VMaxF32},
     {0x11u, RdnaOpcode::VMinI32},
@@ -98,6 +99,9 @@ constexpr Vop2OpcodeInfo vop2Opcodes[] = {
     {0x39u, RdnaOpcode::VMaxF16, Vop2SdwaProfile::Float16},
     {0x3au, RdnaOpcode::VMinF16, Vop2SdwaProfile::Float16},
     {0x3cu, RdnaOpcode::VPkFmacF16},
+    {0x06u, RdnaOpcode::VMacLegacyF32},
+    {0x07u, RdnaOpcode::VMulLegacyF32},
+    {0x3bu, RdnaOpcode::VLdexpF16},
 };
 
 constexpr VectorOpcodeInfo vop1Opcodes[] = {
@@ -117,12 +121,26 @@ constexpr VectorOpcodeInfo vop1Opcodes[] = {
     {0x12u, RdnaOpcode::VCvtF32Ubyte1},
     {0x13u, RdnaOpcode::VCvtF32Ubyte2},
     {0x14u, RdnaOpcode::VCvtF32Ubyte3},
+    {0x1bu, RdnaOpcode::VPipeflush},
     {0x2au, RdnaOpcode::VRcpF32},
     {0x20u, RdnaOpcode::VFractF32},
     {0x21u, RdnaOpcode::VTruncF32},
     {0x22u, RdnaOpcode::VCeilF32},
     {0x23u, RdnaOpcode::VRndneF32},
     {0x24u, RdnaOpcode::VFloorF32},
+    {0x03u, RdnaOpcode::VCvtI32F64},
+    {0x04u, RdnaOpcode::VCvtF64I32},
+    {0x0fu, RdnaOpcode::VCvtF32F64},
+    {0x10u, RdnaOpcode::VCvtF64F32},
+    {0x15u, RdnaOpcode::VCvtU32F64},
+    {0x16u, RdnaOpcode::VCvtF64U32},
+    {0x17u, RdnaOpcode::VTruncF64},
+    {0x18u, RdnaOpcode::VCeilF64},
+    {0x19u, RdnaOpcode::VRndneF64},
+    {0x1au, RdnaOpcode::VFloorF64},
+    {0x3cu, RdnaOpcode::VFrexpExpI32F64},
+    {0x3du, RdnaOpcode::VFrexpMantF64},
+    {0x3eu, RdnaOpcode::VFractF64},
     {0x25u, RdnaOpcode::VExpF32},
     {0x27u, RdnaOpcode::VLogF32},
     {0x2bu, RdnaOpcode::VRcpIflagF32},
@@ -137,8 +155,11 @@ constexpr VectorOpcodeInfo vop1Opcodes[] = {
     {0x3bu, RdnaOpcode::VFfbhI32},
     {0x3fu, RdnaOpcode::VFrexpExpI32F32},
     {0x40u, RdnaOpcode::VFrexpMantF32},
+    {0x41u, RdnaOpcode::VClrexcp},
     {0x42u, RdnaOpcode::VMovreldB32},
     {0x43u, RdnaOpcode::VMovrelsB32},
+    {0x44u, RdnaOpcode::VMovrelsdB32},
+    {0x48u, RdnaOpcode::VMovrelsd2B32},
     {0x50u, RdnaOpcode::VCvtF16U16},
     {0x51u, RdnaOpcode::VCvtF16I16},
     {0x52u, RdnaOpcode::VCvtU16F16},
@@ -155,6 +176,13 @@ constexpr VectorOpcodeInfo vop1Opcodes[] = {
     {0x5fu, RdnaOpcode::VFractF16},
     {0x60u, RdnaOpcode::VSinF16},
     {0x61u, RdnaOpcode::VCosF16},
+    {0x59u, RdnaOpcode::VFrexpMantF16},
+    {0x5au, RdnaOpcode::VFrexpExpI16F16},
+    {0x62u, RdnaOpcode::VSatPkU8I16},
+    {0x63u, RdnaOpcode::VCvtNormI16F16},
+    {0x64u, RdnaOpcode::VCvtNormU16F16},
+    {0x65u, RdnaOpcode::VSwapB32},
+    {0x68u, RdnaOpcode::VSwaprelB32},
 };
 
 constexpr VectorOpcodeInfo vop3EncodedVop1Opcodes[] = {
@@ -174,12 +202,26 @@ constexpr VectorOpcodeInfo vop3EncodedVop1Opcodes[] = {
     {0x12u, RdnaOpcode::VCvtF32Ubyte1},
     {0x13u, RdnaOpcode::VCvtF32Ubyte2},
     {0x14u, RdnaOpcode::VCvtF32Ubyte3},
+    {0x1bu, RdnaOpcode::VPipeflush},
     {0x2au, RdnaOpcode::VRcpF32},
     {0x20u, RdnaOpcode::VFractF32},
     {0x21u, RdnaOpcode::VTruncF32},
     {0x22u, RdnaOpcode::VCeilF32},
     {0x23u, RdnaOpcode::VRndneF32},
     {0x24u, RdnaOpcode::VFloorF32},
+    {0x03u, RdnaOpcode::VCvtI32F64},
+    {0x04u, RdnaOpcode::VCvtF64I32},
+    {0x0fu, RdnaOpcode::VCvtF32F64},
+    {0x10u, RdnaOpcode::VCvtF64F32},
+    {0x15u, RdnaOpcode::VCvtU32F64},
+    {0x16u, RdnaOpcode::VCvtF64U32},
+    {0x17u, RdnaOpcode::VTruncF64},
+    {0x18u, RdnaOpcode::VCeilF64},
+    {0x19u, RdnaOpcode::VRndneF64},
+    {0x1au, RdnaOpcode::VFloorF64},
+    {0x3cu, RdnaOpcode::VFrexpExpI32F64},
+    {0x3du, RdnaOpcode::VFrexpMantF64},
+    {0x3eu, RdnaOpcode::VFractF64},
     {0x25u, RdnaOpcode::VExpF32},
     {0x27u, RdnaOpcode::VLogF32},
     {0x2bu, RdnaOpcode::VRcpIflagF32},
@@ -194,8 +236,11 @@ constexpr VectorOpcodeInfo vop3EncodedVop1Opcodes[] = {
     {0x3bu, RdnaOpcode::VFfbhI32},
     {0x3fu, RdnaOpcode::VFrexpExpI32F32},
     {0x40u, RdnaOpcode::VFrexpMantF32},
+    {0x41u, RdnaOpcode::VClrexcp},
     {0x42u, RdnaOpcode::VMovreldB32},
     {0x43u, RdnaOpcode::VMovrelsB32},
+    {0x44u, RdnaOpcode::VMovrelsdB32},
+    {0x48u, RdnaOpcode::VMovrelsd2B32},
     {0x50u, RdnaOpcode::VCvtF16U16},
     {0x51u, RdnaOpcode::VCvtF16I16},
     {0x52u, RdnaOpcode::VCvtU16F16},
@@ -212,6 +257,11 @@ constexpr VectorOpcodeInfo vop3EncodedVop1Opcodes[] = {
     {0x5fu, RdnaOpcode::VFractF16},
     {0x60u, RdnaOpcode::VSinF16},
     {0x61u, RdnaOpcode::VCosF16},
+    {0x59u, RdnaOpcode::VFrexpMantF16},
+    {0x5au, RdnaOpcode::VFrexpExpI16F16},
+    {0x62u, RdnaOpcode::VSatPkU8I16},
+    {0x63u, RdnaOpcode::VCvtNormI16F16},
+    {0x64u, RdnaOpcode::VCvtNormU16F16},
 };
 
 constexpr VopcOpcodeInfo vopcOpcodes[] = {
@@ -252,6 +302,7 @@ constexpr VopcOpcodeInfo vopcOpcodes[] = {
     {0x86u, RdnaOpcode::VCmpGeI32},
     {0x87u, RdnaOpcode::VCmpTI32},
     {0x88u, RdnaOpcode::VCmpClassF32},
+    {0x8fu, RdnaOpcode::VCmpClassF16},
     {0x89u, RdnaOpcode::VCmpLtI16},
     {0x8au, RdnaOpcode::VCmpEqI16},
     {0x8bu, RdnaOpcode::VCmpLeI16},
@@ -265,6 +316,7 @@ constexpr VopcOpcodeInfo vopcOpcodes[] = {
     {0x95u, RdnaOpcode::VCmpxNeI32},
     {0x96u, RdnaOpcode::VCmpxGeI32},
     {0x98u, RdnaOpcode::VCmpxClassF32},
+    {0x9fu, RdnaOpcode::VCmpxClassF16},
     {0x99u, RdnaOpcode::VCmpxLtI16},
     {0x9au, RdnaOpcode::VCmpxEqI16},
     {0x9bu, RdnaOpcode::VCmpxLeI16},
@@ -369,13 +421,49 @@ constexpr VopcOpcodeInfo vopcOpcodes[] = {
     {0xfau, RdnaOpcode::VCmpxNlgF16},
     {0xfcu, RdnaOpcode::VCmpxNleF16},
     {0xffu, RdnaOpcode::VCmpxTruF16},
+    {0x20u, RdnaOpcode::VCmpFF64, false},
+    {0x21u, RdnaOpcode::VCmpLtF64, false},
+    {0x22u, RdnaOpcode::VCmpEqF64, false},
+    {0x23u, RdnaOpcode::VCmpLeF64, false},
+    {0x24u, RdnaOpcode::VCmpGtF64, false},
+    {0x25u, RdnaOpcode::VCmpLgF64, false},
+    {0x26u, RdnaOpcode::VCmpGeF64, false},
+    {0x27u, RdnaOpcode::VCmpOF64, false},
+    {0x28u, RdnaOpcode::VCmpUF64, false},
+    {0x29u, RdnaOpcode::VCmpNgeF64, false},
+    {0x2au, RdnaOpcode::VCmpNlgF64, false},
+    {0x2bu, RdnaOpcode::VCmpNgtF64, false},
+    {0x2cu, RdnaOpcode::VCmpNleF64, false},
+    {0x2du, RdnaOpcode::VCmpNeqF64, false},
+    {0x2eu, RdnaOpcode::VCmpNltF64, false},
+    {0x2fu, RdnaOpcode::VCmpTruF64, false},
+    {0x30u, RdnaOpcode::VCmpxFF64, false},
+    {0x31u, RdnaOpcode::VCmpxLtF64, false},
+    {0x32u, RdnaOpcode::VCmpxEqF64, false},
+    {0x33u, RdnaOpcode::VCmpxLeF64, false},
+    {0x34u, RdnaOpcode::VCmpxGtF64, false},
+    {0x35u, RdnaOpcode::VCmpxLgF64, false},
+    {0x36u, RdnaOpcode::VCmpxGeF64, false},
+    {0x37u, RdnaOpcode::VCmpxOF64, false},
+    {0x38u, RdnaOpcode::VCmpxUF64, false},
+    {0x39u, RdnaOpcode::VCmpxNgeF64, false},
+    {0x3au, RdnaOpcode::VCmpxNlgF64, false},
+    {0x3bu, RdnaOpcode::VCmpxNgtF64, false},
+    {0x3cu, RdnaOpcode::VCmpxNleF64, false},
+    {0x3du, RdnaOpcode::VCmpxNeqF64, false},
+    {0x3eu, RdnaOpcode::VCmpxNltF64, false},
+    {0x3fu, RdnaOpcode::VCmpxTruF64, false},
+    {0xa8u, RdnaOpcode::VCmpClassF64, false},
+    {0xb8u, RdnaOpcode::VCmpxClassF64, false},
 };
 
 constexpr VectorOpcodeInfo vop3Opcodes[] = {
+    {0x140u, RdnaOpcode::VMadLegacyF32},
     {0x141u, RdnaOpcode::VMadF32},
     {0x142u, RdnaOpcode::VMadI32I24},
     {0x143u, RdnaOpcode::VMadU32U24},
     {0x176u, RdnaOpcode::VMadU64U32},
+    {0x177u, RdnaOpcode::VMadI64I32},
     {0x144u, RdnaOpcode::VCubeidF32},
     {0x145u, RdnaOpcode::VCubescF32},
     {0x146u, RdnaOpcode::VCubetcF32},
@@ -385,6 +473,7 @@ constexpr VectorOpcodeInfo vop3Opcodes[] = {
     {0x149u, RdnaOpcode::VBfeI32},
     {0x14au, RdnaOpcode::VBfiB32},
     {0x14eu, RdnaOpcode::VAlignbitB32},
+    {0x150u, RdnaOpcode::VMullitF32},
     {0x151u, RdnaOpcode::VMin3F32},
     {0x152u, RdnaOpcode::VMin3I32},
     {0x153u, RdnaOpcode::VMin3U32},
@@ -403,7 +492,15 @@ constexpr VectorOpcodeInfo vop3Opcodes[] = {
     {0x357u, RdnaOpcode::VMed3F16},
     {0x358u, RdnaOpcode::VMed3I16},
     {0x359u, RdnaOpcode::VMed3U16},
+    {0x35fu, RdnaOpcode::VDivFixupF16},
+    {0x15au, RdnaOpcode::VSadU8},
+    {0x15bu, RdnaOpcode::VSadHiU8},
+    {0x15cu, RdnaOpcode::VSadU16},
     {0x15du, RdnaOpcode::VSadU32},
+    {0x171u, RdnaOpcode::VMsadU8},
+    {0x172u, RdnaOpcode::VQsadPkU16U8},
+    {0x173u, RdnaOpcode::VMqsadPkU16U8},
+    {0x175u, RdnaOpcode::VMqsadU32U8},
     {0x15eu, RdnaOpcode::VCvtPkU8F32},
     {0x178u, RdnaOpcode::VXor3B32},
     {0x12fu, RdnaOpcode::VCvtPkrtzF16F32},
@@ -437,12 +534,24 @@ constexpr VectorOpcodeInfo vop3Opcodes[] = {
     {0x314u, RdnaOpcode::VLshlrevB16},
     {0x319u, RdnaOpcode::VSubrevI32},
     {0x344u, RdnaOpcode::VPermB32},
+    {0x14du, RdnaOpcode::VLerpU8},
     {0x345u, RdnaOpcode::VXadU32},
     {0x346u, RdnaOpcode::VLshlAddU32},
     {0x347u, RdnaOpcode::VAddLshlU32},
     {0x360u, RdnaOpcode::VReadlaneB32},
     {0x361u, RdnaOpcode::VWritelaneB32},
     {0x362u, RdnaOpcode::VLdexpF32},
+    {0x312u, RdnaOpcode::VCvtPknormI16F16},
+    {0x313u, RdnaOpcode::VCvtPknormU16F16},
+    {0x14cu, RdnaOpcode::VFmaF64},
+    {0x164u, RdnaOpcode::VAddF64},
+    {0x165u, RdnaOpcode::VMulF64},
+    {0x166u, RdnaOpcode::VMinF64},
+    {0x167u, RdnaOpcode::VMaxF64},
+    {0x168u, RdnaOpcode::VLdexpF64},
+    {0x15fu, RdnaOpcode::VDivFixupF32},
+    {0x16du, RdnaOpcode::VDivScaleF32},
+    {0x16fu, RdnaOpcode::VDivFmasF32},
     {0x363u, RdnaOpcode::VBfmB32},
     {0x364u, RdnaOpcode::VBcntU32B32},
     {0x365u, RdnaOpcode::VMbcntLoU32B32},
@@ -481,6 +590,12 @@ constexpr VectorOpcodeInfo vop3pOpcodes[] = {
     {0x10u, RdnaOpcode::VPkMulF16},
     {0x11u, RdnaOpcode::VPkMinF16},
     {0x12u, RdnaOpcode::VPkMaxF16},
+    {0x14u, RdnaOpcode::VDot2I32I16},
+    {0x15u, RdnaOpcode::VDot2U32U16},
+    {0x16u, RdnaOpcode::VDot4I32I8},
+    {0x17u, RdnaOpcode::VDot4U32U8},
+    {0x18u, RdnaOpcode::VDot8I32I4},
+    {0x19u, RdnaOpcode::VDot8U32U4},
     {0x20u, RdnaOpcode::VFmaF32},
     {0x21u, RdnaOpcode::VMadMixloF16},
     {0x22u, RdnaOpcode::VMadMixhiF16},
@@ -510,7 +625,7 @@ bool isVop2LiteralMadOpcode(std::uint32_t opcode) {
 }
 
 bool isUnsupportedVop3EncodedVop2Alias(std::uint32_t opcode) {
-    return isVop2LiteralMadOpcode(opcode) || opcode == 0x02u;
+    return isVop2LiteralMadOpcode(opcode) || opcode == 0x02u || opcode == 0x0du;
 }
 
 bool isVop3EncodedVopc(std::uint32_t opcode) {
@@ -555,6 +670,10 @@ RdnaOpcode lookupVintrpOpcode(std::uint32_t opcode) {
     }
 }
 
+bool isVop1WithoutOperands(RdnaOpcode opcode) {
+    return opcode == RdnaOpcode::VNop || opcode == RdnaOpcode::VPipeflush || opcode == RdnaOpcode::VClrexcp;
+}
+
 bool usesScalarDestination(RdnaOpcode opcode) {
     return opcode == RdnaOpcode::VReadfirstlaneB32 || opcode == RdnaOpcode::VReadlaneB32;
 }
@@ -564,7 +683,7 @@ bool isVop3BCarryOutOpcode(RdnaOpcode opcode) {
 }
 
 bool isVop3BMadU64Opcode(RdnaOpcode opcode) {
-    return opcode == RdnaOpcode::VMadU64U32;
+    return opcode == RdnaOpcode::VMadU64U32 || opcode == RdnaOpcode::VMadI64I32 || opcode == RdnaOpcode::VDivScaleF32;
 }
 
 bool isPermlaneOpcode(RdnaOpcode opcode) {
@@ -573,6 +692,7 @@ bool isPermlaneOpcode(RdnaOpcode opcode) {
 
 bool isNativeVop3F16TernaryOpcode(RdnaOpcode opcode) {
     return opcode == RdnaOpcode::VMin3F16 || opcode == RdnaOpcode::VMax3F16 || opcode == RdnaOpcode::VMed3F16 ||
+        opcode == RdnaOpcode::VDivFixupF16 ||
         opcode == RdnaOpcode::VFmaF16;
 }
 
@@ -605,6 +725,10 @@ bool isNativeVop3B16BinaryOpcode(RdnaOpcode opcode) {
 
 bool isVop1FloatSourceOpcode(RdnaOpcode opcode) {
     switch (opcode) {
+        case RdnaOpcode::VFrexpMantF16:
+        case RdnaOpcode::VFrexpExpI16F16:
+        case RdnaOpcode::VCvtNormI16F16:
+        case RdnaOpcode::VCvtNormU16F16:
         case RdnaOpcode::VMovB32:
         case RdnaOpcode::VCvtF32F16:
         case RdnaOpcode::VCvtU32F32:
@@ -623,6 +747,17 @@ bool isVop1FloatSourceOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::VCeilF32:
         case RdnaOpcode::VRndneF32:
         case RdnaOpcode::VFloorF32:
+        case RdnaOpcode::VCvtI32F64:
+        case RdnaOpcode::VCvtF32F64:
+        case RdnaOpcode::VCvtU32F64:
+        case RdnaOpcode::VCvtF64F32:
+        case RdnaOpcode::VTruncF64:
+        case RdnaOpcode::VCeilF64:
+        case RdnaOpcode::VRndneF64:
+        case RdnaOpcode::VFloorF64:
+        case RdnaOpcode::VFrexpExpI32F64:
+        case RdnaOpcode::VFrexpMantF64:
+        case RdnaOpcode::VFractF64:
         case RdnaOpcode::VExpF32:
         case RdnaOpcode::VLogF32:
         case RdnaOpcode::VRsqF32:
@@ -665,6 +800,16 @@ bool isVop1FloatResultOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::VCeilF32:
         case RdnaOpcode::VRndneF32:
         case RdnaOpcode::VFloorF32:
+        case RdnaOpcode::VCvtF64I32:
+        case RdnaOpcode::VCvtF64U32:
+        case RdnaOpcode::VCvtF32F64:
+        case RdnaOpcode::VCvtF64F32:
+        case RdnaOpcode::VTruncF64:
+        case RdnaOpcode::VCeilF64:
+        case RdnaOpcode::VRndneF64:
+        case RdnaOpcode::VFloorF64:
+        case RdnaOpcode::VFrexpMantF64:
+        case RdnaOpcode::VFractF64:
         case RdnaOpcode::VFrexpMantF32:
         case RdnaOpcode::VExpF32:
         case RdnaOpcode::VLogF32:
@@ -688,7 +833,50 @@ bool isVop1FloatResultOpcode(RdnaOpcode opcode) {
     }
 }
 
+bool isVopcFloat64CompareOpcode(RdnaOpcode opcode) {
+    switch (opcode) {
+        case RdnaOpcode::VCmpFF64:
+        case RdnaOpcode::VCmpLtF64:
+        case RdnaOpcode::VCmpEqF64:
+        case RdnaOpcode::VCmpLeF64:
+        case RdnaOpcode::VCmpGtF64:
+        case RdnaOpcode::VCmpLgF64:
+        case RdnaOpcode::VCmpGeF64:
+        case RdnaOpcode::VCmpOF64:
+        case RdnaOpcode::VCmpUF64:
+        case RdnaOpcode::VCmpNgeF64:
+        case RdnaOpcode::VCmpNlgF64:
+        case RdnaOpcode::VCmpNgtF64:
+        case RdnaOpcode::VCmpNleF64:
+        case RdnaOpcode::VCmpNeqF64:
+        case RdnaOpcode::VCmpNltF64:
+        case RdnaOpcode::VCmpTruF64:
+        case RdnaOpcode::VCmpClassF64:
+        case RdnaOpcode::VCmpxFF64:
+        case RdnaOpcode::VCmpxLtF64:
+        case RdnaOpcode::VCmpxEqF64:
+        case RdnaOpcode::VCmpxLeF64:
+        case RdnaOpcode::VCmpxGtF64:
+        case RdnaOpcode::VCmpxLgF64:
+        case RdnaOpcode::VCmpxGeF64:
+        case RdnaOpcode::VCmpxOF64:
+        case RdnaOpcode::VCmpxUF64:
+        case RdnaOpcode::VCmpxNgeF64:
+        case RdnaOpcode::VCmpxNlgF64:
+        case RdnaOpcode::VCmpxNgtF64:
+        case RdnaOpcode::VCmpxNleF64:
+        case RdnaOpcode::VCmpxNeqF64:
+        case RdnaOpcode::VCmpxNltF64:
+        case RdnaOpcode::VCmpxTruF64:
+        case RdnaOpcode::VCmpxClassF64: return true;
+        default: return false;
+    }
+}
+
 bool isVopcFloatCompareOpcode(RdnaOpcode opcode) {
+    if (isVopcFloat64CompareOpcode(opcode)) {
+        return true;
+    }
     switch (opcode) {
         case RdnaOpcode::VCmpFF32:
         case RdnaOpcode::VCmpLtF32:
@@ -755,7 +943,9 @@ bool isVopcFloatCompareOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::VCmpxNleF16:
         case RdnaOpcode::VCmpxTruF16:
         case RdnaOpcode::VCmpClassF32:
-        case RdnaOpcode::VCmpxClassF32: return true;
+        case RdnaOpcode::VCmpxClassF32:
+        case RdnaOpcode::VCmpClassF16:
+        case RdnaOpcode::VCmpxClassF16: return true;
         default: return false;
     }
 }
@@ -913,6 +1103,9 @@ void validateVop1Sdwa(const RdnaInstruction& instruction, std::uint32_t destinat
 }
 
 void decodeVop1Sdwa(std::uint32_t programCounter, std::span<const std::uint32_t> code, std::uint32_t wordIndex, std::uint32_t vdst, RdnaInstruction& instruction) {
+    if (static_cast<std::size_t>(wordIndex) + 1u >= code.size()) {
+        throw std::out_of_range("truncated VOP1 SDWA instruction");
+    }
     const auto modifier = code[wordIndex + 1u];
     const auto src0 = modifier & 0xffu;
     const auto dstSel = (modifier >> 8u) & 0x7u;
@@ -957,6 +1150,9 @@ void applyDppModifier(RdnaOperand& operand, std::uint32_t modifier) {
 }
 
 void decodeVop1Dpp(std::uint32_t programCounter, std::span<const std::uint32_t> code, std::uint32_t wordIndex, std::uint32_t vdst, RdnaInstruction& instruction) {
+    if (static_cast<std::size_t>(wordIndex) + 1u >= code.size()) {
+        throw std::out_of_range("truncated VOP1 DPP instruction");
+    }
     const auto modifier = code[wordIndex + 1u];
     const auto src0 = modifier & 0xffu;
     SetRdnaRawWords(instruction, code, wordIndex, 2);
@@ -1120,6 +1316,9 @@ void finalizeVop2Instruction(std::span<const std::uint32_t> code, std::uint32_t 
 }
 
 void decodeVop2Sdwa(std::uint32_t programCounter, std::span<const std::uint32_t> code, std::uint32_t wordIndex, std::uint32_t opcode, std::uint32_t vdst, std::uint32_t vsrc1, RdnaInstruction& instruction) {
+    if (static_cast<std::size_t>(wordIndex) + 1u >= code.size()) {
+        throw std::out_of_range("truncated VOP2 SDWA instruction");
+    }
     const auto modifier = code[wordIndex + 1u];
     const auto fields = decodeVop2SdwaFields(modifier);
     SetRdnaRawWords(instruction, code, wordIndex, 2);
@@ -1145,6 +1344,9 @@ void decodeVop2Sdwa(std::uint32_t programCounter, std::span<const std::uint32_t>
 }
 
 void decodeVop2Dpp(std::uint32_t programCounter, std::span<const std::uint32_t> code, std::uint32_t wordIndex, std::uint32_t opcode, std::uint32_t vdst, std::uint32_t vsrc1, RdnaInstruction& instruction) {
+    if (static_cast<std::size_t>(wordIndex) + 1u >= code.size()) {
+        throw std::out_of_range("truncated VOP2 DPP instruction");
+    }
     const auto modifier = code[wordIndex + 1u];
     const auto src0 = modifier & 0xffu;
     SetRdnaRawWords(instruction, code, wordIndex, 2);
@@ -1223,6 +1425,7 @@ bool isVopcCompareExec(RdnaOpcode opcode) {
         case RdnaOpcode::VCmpxNeI32:
         case RdnaOpcode::VCmpxGeI32:
         case RdnaOpcode::VCmpxClassF32:
+        case RdnaOpcode::VCmpxClassF16:
         case RdnaOpcode::VCmpxLtU32:
         case RdnaOpcode::VCmpxEqU32:
         case RdnaOpcode::VCmpxLeU32:
@@ -1280,12 +1483,32 @@ bool isVopcCompareExec(RdnaOpcode opcode) {
         case RdnaOpcode::VCmpxGeF16:
         case RdnaOpcode::VCmpxNgtF16:
         case RdnaOpcode::VCmpxNeqF16:
-        case RdnaOpcode::VCmpxNltF16: return true;
+        case RdnaOpcode::VCmpxNltF16:
+        case RdnaOpcode::VCmpxFF64:
+        case RdnaOpcode::VCmpxLtF64:
+        case RdnaOpcode::VCmpxEqF64:
+        case RdnaOpcode::VCmpxLeF64:
+        case RdnaOpcode::VCmpxGtF64:
+        case RdnaOpcode::VCmpxLgF64:
+        case RdnaOpcode::VCmpxGeF64:
+        case RdnaOpcode::VCmpxOF64:
+        case RdnaOpcode::VCmpxUF64:
+        case RdnaOpcode::VCmpxNgeF64:
+        case RdnaOpcode::VCmpxNlgF64:
+        case RdnaOpcode::VCmpxNgtF64:
+        case RdnaOpcode::VCmpxNleF64:
+        case RdnaOpcode::VCmpxNeqF64:
+        case RdnaOpcode::VCmpxNltF64:
+        case RdnaOpcode::VCmpxTruF64:
+        case RdnaOpcode::VCmpxClassF64: return true;
         default: return false;
     }
 }
 
 void decodeVopcSdwa(std::uint32_t programCounter, std::span<const std::uint32_t> code, std::uint32_t wordIndex, std::uint32_t vsrc1, RdnaInstruction& instruction) {
+    if (static_cast<std::size_t>(wordIndex) + 1u >= code.size()) {
+        throw std::out_of_range("truncated VOPC SDWA instruction");
+    }
     const auto modifier = code[wordIndex + 1u];
     const auto fields = decodeVopcSdwaFields(modifier);
     SetRdnaRawWords(instruction, code, wordIndex, 2);
@@ -1315,6 +1538,9 @@ void decodeVopcSdwa(std::uint32_t programCounter, std::span<const std::uint32_t>
 }
 
 void decodeVopcDpp(std::uint32_t programCounter, std::span<const std::uint32_t> code, std::uint32_t wordIndex, std::uint32_t opcode, std::uint32_t vsrc1, RdnaInstruction& instruction) {
+    if (static_cast<std::size_t>(wordIndex) + 1u >= code.size()) {
+        throw std::out_of_range("truncated VOPC DPP instruction");
+    }
     const auto modifier = code[wordIndex + 1u];
     const auto src0 = modifier & 0xffu;
     SetRdnaRawWords(instruction, code, wordIndex, 2);
@@ -1364,10 +1590,17 @@ std::uint32_t nativeVop3SourceCount(RdnaOpcode opcode) {
         case RdnaOpcode::VWritelaneB32:
         case RdnaOpcode::VCvtPkrtzF16F32:
         case RdnaOpcode::VLdexpF32:
+        case RdnaOpcode::VAddF64:
+        case RdnaOpcode::VMulF64:
+        case RdnaOpcode::VMinF64:
+        case RdnaOpcode::VMaxF64:
+        case RdnaOpcode::VLdexpF64:
         case RdnaOpcode::VBfmB32:
         case RdnaOpcode::VBcntU32B32:
         case RdnaOpcode::VCvtPknormI16F32:
         case RdnaOpcode::VCvtPknormU16F32:
+        case RdnaOpcode::VCvtPknormI16F16:
+        case RdnaOpcode::VCvtPknormU16F16:
         case RdnaOpcode::VCvtPkU16U32:
         case RdnaOpcode::VCvtPkI16I32: return 2;
         default: return 3;
@@ -1407,6 +1640,18 @@ bool isPackedVop3p(RdnaOpcode opcode) {
     }
 }
 
+bool isVop3pIntegerSaturate(RdnaOpcode opcode) {
+    switch (opcode) {
+        case RdnaOpcode::VPkMadI16:
+        case RdnaOpcode::VPkMadU16:
+        case RdnaOpcode::VPkAddI16:
+        case RdnaOpcode::VPkAddU16:
+        case RdnaOpcode::VPkSubI16:
+        case RdnaOpcode::VPkSubU16: return true;
+        default: return false;
+    }
+}
+
 bool isMadMixF16(RdnaOpcode opcode) {
     return opcode == RdnaOpcode::VMadMixloF16 || opcode == RdnaOpcode::VMadMixhiF16;
 }
@@ -1418,6 +1663,34 @@ void applyVop3pSourceModifiers(RdnaInstruction& instruction, std::uint32_t opSel
         sources[i]->opSelHi = ((opSelHi >> i) & 1u) != 0u;
         sources[i]->negate = ((neg >> i) & 1u) != 0u;
         sources[i]->negateHi = ((negHi >> i) & 1u) != 0u;
+    }
+}
+
+bool isVop3pIntegerDot2(RdnaOpcode opcode) {
+    return opcode == RdnaOpcode::VDot2I32I16 || opcode == RdnaOpcode::VDot2U32U16;
+}
+
+bool isVop3pIntegerDot(RdnaOpcode opcode) {
+    switch (opcode) {
+        case RdnaOpcode::VDot2I32I16:
+        case RdnaOpcode::VDot2U32U16:
+        case RdnaOpcode::VDot4I32I8:
+        case RdnaOpcode::VDot4U32U8:
+        case RdnaOpcode::VDot8I32I4:
+        case RdnaOpcode::VDot8U32U4: return true;
+        default: return false;
+    }
+}
+
+void applyVop3pIntegerDotModifiers(RdnaInstruction& instruction, std::uint32_t opSel, std::uint32_t opSelHi, std::uint32_t neg, std::uint32_t negHi) {
+    const std::uint32_t packedSources = isVop3pIntegerDot2(instruction.op) ? 0x3u : 0u;
+    if (neg != 0u || negHi != 0u || (opSel & ~packedSources) != 0u || (opSelHi | packedSources) != 0x7u) {
+        throw std::invalid_argument("VOP3P integer dot source modifiers are not implemented");
+    }
+    RdnaOperand* sources[] = {&instruction.source0, &instruction.source1};
+    for (std::uint32_t i = 0; i < 2u; ++i) {
+        sources[i]->opSel = ((opSel >> i) & 1u) != 0u;
+        sources[i]->opSelHi = ((opSelHi >> i) & 1u) != 0u;
     }
 }
 
@@ -1471,6 +1744,8 @@ bool supportsNativeVop3SourceModifiers(RdnaOpcode opcode) {
         return true;
     }
     switch (opcode) {
+        case RdnaOpcode::VMulLegacyF32:
+        case RdnaOpcode::VMacLegacyF32:
         case RdnaOpcode::VCndmaskB32:
         case RdnaOpcode::VAddF32:
         case RdnaOpcode::VSubF32:
@@ -1498,7 +1773,15 @@ bool supportsNativeVop3SourceModifiers(RdnaOpcode opcode) {
         case RdnaOpcode::VMin3F32:
         case RdnaOpcode::VMax3F32:
         case RdnaOpcode::VMed3F32:
-        case RdnaOpcode::VLdexpF32: return true;
+        case RdnaOpcode::VDivFmasF32:
+        case RdnaOpcode::VDivFixupF32:
+        case RdnaOpcode::VLdexpF32:
+        case RdnaOpcode::VFmaF64:
+        case RdnaOpcode::VAddF64:
+        case RdnaOpcode::VMulF64:
+        case RdnaOpcode::VMinF64:
+        case RdnaOpcode::VMaxF64:
+        case RdnaOpcode::VLdexpF64: return true;
         default: return false;
     }
 }
@@ -1520,6 +1803,12 @@ bool supportsNativeVop3ResultModifiers(RdnaOpcode opcode) {
         case RdnaOpcode::VFmaF16:
         case RdnaOpcode::VCvtPkrtzF16F32:
         case RdnaOpcode::VLdexpF32:
+        case RdnaOpcode::VFmaF64:
+        case RdnaOpcode::VAddF64:
+        case RdnaOpcode::VMulF64:
+        case RdnaOpcode::VMinF64:
+        case RdnaOpcode::VMaxF64:
+        case RdnaOpcode::VLdexpF64:
         case RdnaOpcode::VMin3F32:
         case RdnaOpcode::VMax3F32:
         case RdnaOpcode::VMed3F32: return true;
@@ -1557,7 +1846,8 @@ void checkNativeVop3Modifiers(RdnaOpcode opcode, bool permlane, bool carryInOut,
         return;
     }
     if (carryInOut || scalarDst) {
-        if (clamp != 0u || omod != 0u || neg != 0u) {
+        const bool floatCompare = scalarDst && isVopcFloatCompareOpcode(opcode);
+        if (clamp != 0u || omod != 0u || (neg != 0u && !floatCompare && opcode != RdnaOpcode::VDivScaleF32)) {
             throw std::invalid_argument("VOP3 source modifiers are not implemented");
         }
         return;
@@ -1568,7 +1858,7 @@ void checkNativeVop3Modifiers(RdnaOpcode opcode, bool permlane, bool carryInOut,
         }
         return;
     }
-    if (opcode == RdnaOpcode::VLdexpF32) {
+    if (opcode == RdnaOpcode::VLdexpF32 || opcode == RdnaOpcode::VLdexpF64) {
         if ((abs & ~1u) != 0u || opSel != 0u || (neg & ~1u) != 0u) {
             throw std::invalid_argument("VOP3 source modifiers are not implemented");
         }
@@ -1653,7 +1943,7 @@ RdnaInstruction DecodeRdnaVop1(std::uint32_t programCounter, std::span<const std
     instruction.op = lookupVectorOpcode(vop1Opcodes, opcode, "VOP1 opcode is not implemented");
     SetRdnaRawWords(instruction, code, wordIndex, 1);
 
-    if (instruction.op == RdnaOpcode::VNop) {
+    if (isVop1WithoutOperands(instruction.op)) {
         instruction.destination.kind = RdnaOperandKind::Null;
         instruction.sourceCount = 0;
         return instruction;
@@ -1720,6 +2010,9 @@ RdnaInstruction DecodeRdnaVopc(std::uint32_t programCounter, std::span<const std
 
     if (src0 == 249u) {
         instruction.op = lookupVectorOpcode(vopcOpcodes, opcode, "VOPC SDWA modifier is not supported for opcode");
+        if (isVopcFloat64CompareOpcode(instruction.op)) {
+            throw std::invalid_argument("VOPC SDWA modifier is not supported for opcode");
+        }
         instruction.destination.kind = isVopcCompareExec(instruction.op) ? RdnaOperandKind::ExecLo : RdnaOperandKind::VccLo;
         decodeVopcSdwa(programCounter, code, wordIndex, vsrc1, instruction);
         return instruction;
@@ -1778,6 +2071,11 @@ RdnaInstruction DecodeRdnaVop3(std::uint32_t programCounter, std::span<const std
 
     checkNativeVop3Modifiers(instruction.op, permlane, vop3bUsesSdst, scalarDst, abs, opSel, clamp, omod, neg);
 
+    if (isVop1WithoutOperands(instruction.op)) {
+        instruction.destination.kind = RdnaOperandKind::Null;
+        instruction.sourceCount = 0;
+        return instruction;
+    }
     if (compareExec) {
         instruction.destination.kind = RdnaOperandKind::ExecLo;
     } else if (scalarDst) {
@@ -1829,6 +2127,9 @@ RdnaInstruction DecodeRdnaVop3(std::uint32_t programCounter, std::span<const std
         instruction.source1 = DecodeRdnaScalarSource(src1, programCounter);
         instruction.source2 = DecodeRdnaScalarSource(src2, programCounter);
         instruction.sourceCount = 3;
+        if (instruction.op == RdnaOpcode::VDivScaleF32) {
+            applyNativeVop3SourceModifiers(instruction, 0u, neg);
+        }
         ReadRdnaLiteralOperands(code, wordIndex, instruction);
         return instruction;
     }
@@ -1898,12 +2199,16 @@ RdnaInstruction DecodeRdnaVop3p(std::uint32_t programCounter, std::span<const st
     if (instruction.sourceCount > 2u) {
         instruction.source2 = DecodeRdnaScalarSource(src2, programCounter);
     }
-    if (instruction.op == RdnaOpcode::VFmaF32 || isMadMixF16(instruction.op) || isPackedVop3p(instruction.op)) {
+    if (instruction.op == RdnaOpcode::VFmaF32 || isMadMixF16(instruction.op) || isPackedVop3p(instruction.op) || isVop3pIntegerSaturate(instruction.op)) {
         instruction.destination.clamp = clamp != 0u;
-    } else if (clamp != 0u) {
+    } else if (clamp != 0u && instruction.op != RdnaOpcode::VPkMulLoU16) {
         throw std::invalid_argument("VOP3P integer clamp is not implemented");
     }
-    applyVop3pSourceModifiers(instruction, opSel, opSelHi, neg, negHi);
+    if (isVop3pIntegerDot(instruction.op)) {
+        applyVop3pIntegerDotModifiers(instruction, opSel, opSelHi, neg, negHi);
+    } else {
+        applyVop3pSourceModifiers(instruction, opSel, opSelHi, neg, negHi);
+    }
     if (instruction.op == RdnaOpcode::VMadMixloF16) {
         applyVop3pMixAbsModifiers(instruction);
         instruction.destination.sdwaSel = 4;

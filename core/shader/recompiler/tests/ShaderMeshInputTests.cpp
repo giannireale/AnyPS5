@@ -27,7 +27,7 @@ void primitiveCounts() {
     };
     constexpr std::array cases{
         Case{1, 1, 1, 4, 7}, Case{2, 2, 2, 8, 3}, Case{3, 2, 1, 5, 6},
-        Case{4, 3, 3, 12, 2}, Case{6, 3, 1, 6, 5}
+        Case{4, 3, 3, 12, 2}, Case{5, 3, 1, 6, 5}, Case{6, 3, 1, 6, 5}
     };
     for (const auto& test : cases) {
         ShaderRecompiler::ShaderMeshInputInfo input;
@@ -62,7 +62,7 @@ void countLimits() {
     input.inputPrimitive = 6;
     require(input.InputVertexCount(maximum - 2) == maximum && input.InputPrimitiveCount(maximum) == maximum - 2, "large triangle strip count changed");
     reject([&] { static_cast<void>(input.InputVertexCount(maximum - 1)); });
-    for (const auto primitive : {0u, 5u, 7u, 9u, 10u, 18u, maximum}) {
+    for (const auto primitive : {0u, 7u, 9u, 10u, 18u, maximum}) {
         input.inputPrimitive = primitive;
         reject([&] { static_cast<void>(input.InputPrimitiveSize()); });
         reject([&] { static_cast<void>(input.InputPrimitiveStep()); });

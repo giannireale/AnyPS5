@@ -1,6 +1,7 @@
 #include "prx/libkernel/File/include/FileFlags.hpp"
 #include "prx/libkernel/File/include/NativeStat.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/GuestArena.hpp"
 #include "prx/libkernel/File/include/File.hpp"
 #include "prx/libkernel/File/include/DirectoryDescriptor.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
@@ -168,10 +169,13 @@ std::int64_t APS5_VABI sceKernelRead(int d, void* buf, std::size_t nbytes) {
     if (buf == nullptr) {
         throw std::invalid_argument(std::string(__func__) + ": buf is null");
     }
+    const GuestArena::HostWrite destination(buf, nbytes);
+    const bool validDestination = destination.Open();
+    if (!validDestination) errno = EFAULT;
 #ifdef _WIN32
-    if (ReadRandomDevice(d, buf, nbytes)) return static_cast<std::int64_t>(nbytes);
+    if (validDestination && ReadRandomDevice(d, buf, nbytes)) return static_cast<std::int64_t>(nbytes);
 #endif
-    auto n = NativeRead(d, buf, nbytes);
+    auto n = validDestination ? NativeRead(d, buf, nbytes) : -1;
     if (n < 0) {
         throw std::runtime_error(std::string(__func__) + ": read failed, fd=" + std::to_string(d) + ", errno=" + std::to_string(errno));
     }

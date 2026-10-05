@@ -6,6 +6,7 @@
 #include <cstring>
 
 static constexpr int SCE_AMPR_ERROR_BUFFER_FULL = 0x8002001C;
+static constexpr int SCE_KERNEL_ERROR_EINVAL = 0x80020016;
 
 static int Append(Apr::CommandBufferObject* buffer, const void* command, uint32_t bytes) {
     if (!buffer->base || bytes > buffer->size - buffer->offset) return SCE_AMPR_ERROR_BUFFER_FULL;
@@ -20,6 +21,29 @@ static int AppendCommand(Apr::CommandBufferObject* buffer, Apr::Opcode opcode, T
     if (!buffer) return static_cast<int>(0x80020016);
     command.header = {opcode, sizeof(command)};
     return Append(buffer, &command, sizeof(command));
+}
+
+static std::uint64_t MarkerBytes(const char* text) {
+    return sizeof(Apr::MarkerCommand) + ((std::strlen(text) + 8) & ~std::uint64_t{7});
+}
+
+static std::uint64_t MeasureMarker(const char* text) {
+    if (!text) return static_cast<std::uint32_t>(SCE_KERNEL_ERROR_EINVAL);
+    return MarkerBytes(text);
+}
+
+static int AppendMarker(Apr::CommandBufferObject* buffer, Apr::Opcode opcode, const char* text) {
+    if (!buffer || !text) return SCE_KERNEL_ERROR_EINVAL;
+    const std::uint64_t bytes = MarkerBytes(text);
+    if (!buffer->base || bytes > buffer->size - buffer->offset) return SCE_AMPR_ERROR_BUFFER_FULL;
+    const Apr::MarkerCommand command{{opcode, static_cast<std::uint32_t>(bytes)}};
+    std::uint8_t* destination = buffer->base + buffer->offset;
+    std::memset(destination, 0, bytes);
+    std::memcpy(destination, &command, sizeof(command));
+    std::memcpy(destination + sizeof(command), text, std::strlen(text));
+    buffer->offset += static_cast<std::uint32_t>(bytes);
+    ++buffer->numCommands;
+    return 0;
 }
 
 extern "C" {
@@ -182,19 +206,17 @@ int APS5_VABI sceAmprCommandBufferNopWithData() {
  return 0;
 }
 
-int APS5_VABI sceAmprCommandBufferPopMarker() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+int APS5_VABI sceAmprCommandBufferPopMarker(Apr::CommandBufferObject* buffer) {
+    return AppendCommand(buffer, Apr::Opcode::PopMarker, Apr::MarkerCommand{});
 }
 
-int APS5_VABI sceAmprCommandBufferPushMarker() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+int APS5_VABI sceAmprCommandBufferPushMarker(Apr::CommandBufferObject* buffer, const char* text) {
+    return AppendMarker(buffer, Apr::Opcode::PushMarker, text);
 }
 
-int APS5_VABI sceAmprCommandBufferPushMarkerWithColor() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+int APS5_VABI sceAmprCommandBufferPushMarkerWithColor(Apr::CommandBufferObject* buffer, const char* text, std::uint32_t color) {
+    (void)color;
+    return AppendMarker(buffer, Apr::Opcode::PushMarker, text);
 }
 
 int APS5_VABI sceAmprCommandBufferReset(Apr::CommandBufferObject* buffer) {
@@ -211,14 +233,13 @@ int APS5_VABI sceAmprCommandBufferSetBuffer(Apr::CommandBufferObject* buffer, vo
     return 0;
 }
 
-int APS5_VABI sceAmprCommandBufferSetMarker() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+int APS5_VABI sceAmprCommandBufferSetMarker(Apr::CommandBufferObject* buffer, const char* text) {
+    return AppendMarker(buffer, Apr::Opcode::SetMarker, text);
 }
 
-int APS5_VABI sceAmprCommandBufferSetMarkerWithColor() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+int APS5_VABI sceAmprCommandBufferSetMarkerWithColor(Apr::CommandBufferObject* buffer, const char* text, const std::uint32_t* color) {
+    if (!color) return SCE_KERNEL_ERROR_EINVAL;
+    return AppendMarker(buffer, Apr::Opcode::SetMarker, text);
 }
 
 int APS5_VABI sceAmprCommandBufferWaitOnAddress_04_00() {
@@ -290,19 +311,17 @@ int APS5_VABI sceAmprMeasureCommandSizeNopWithData() {
  return 0;
 }
 
-int APS5_VABI sceAmprMeasureCommandSizePopMarker() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+std::uint64_t APS5_VABI sceAmprMeasureCommandSizePopMarker() {
+    return sizeof(Apr::MarkerCommand);
 }
 
-int APS5_VABI sceAmprMeasureCommandSizePushMarker() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+std::uint64_t APS5_VABI sceAmprMeasureCommandSizePushMarker(const char* text) {
+    return MeasureMarker(text);
 }
 
-int APS5_VABI sceAmprMeasureCommandSizePushMarkerWithColor() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+std::uint64_t APS5_VABI sceAmprMeasureCommandSizePushMarkerWithColor(const char* text, std::uint32_t color) {
+    (void)color;
+    return MeasureMarker(text);
 }
 
 uint32_t APS5_VABI sceAmprMeasureCommandSizeReadFile(void) {
@@ -329,14 +348,13 @@ int APS5_VABI sceAmprMeasureCommandSizeResetGatherScatterState() {
  return 0;
 }
 
-int APS5_VABI sceAmprMeasureCommandSizeSetMarker() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+std::uint64_t APS5_VABI sceAmprMeasureCommandSizeSetMarker(const char* text) {
+    return MeasureMarker(text);
 }
 
-int APS5_VABI sceAmprMeasureCommandSizeSetMarkerWithColor() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+std::uint64_t APS5_VABI sceAmprMeasureCommandSizeSetMarkerWithColor(const char* text, std::uint32_t color) {
+    (void)color;
+    return MeasureMarker(text);
 }
 
 int APS5_VABI sceAmprMeasureCommandSizeWaitOnAddress_04_00() {

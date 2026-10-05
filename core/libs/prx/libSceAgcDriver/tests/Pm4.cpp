@@ -99,6 +99,29 @@ void testRegisters() {
     expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x9f, {0, 0, 0x80000000, 0}), 0x20); }, "compute");
 }
 
+void testRegisterFile() {
+    AgcDriver::Registers registers{{0x300, 3}, {0x10, 1}, {0x41, 2}};
+    check(registers.size() == 3 && !registers.contains(0x11) && registers.at(0x41) == 2, "register file lookup");
+    check(registers.find(0x12) == registers.end() && registers.find(0x10)->second == 1, "register file find");
+    check(!registers.emplace(0x10, 9).second && registers.at(0x10) == 1, "register file emplace replaced a value");
+    check(registers.insert_or_assign(0x10, 7).second == false && registers.at(0x10) == 7, "register file assignment");
+    check(registers.lower_bound(0x11)->first == 0x41 && registers.upper_bound(0x41)->first == 0x300 && registers.lower_bound(0x301) == registers.end(), "register file bounds");
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> order;
+    for (const auto& [offset, value] : registers) order.emplace_back(offset, value);
+    check(order == std::vector<std::pair<std::uint32_t, std::uint32_t>>{{0x10, 7}, {0x41, 2}, {0x300, 3}}, "register file order");
+    auto copy = registers;
+    copy[0x7000] = 5;
+    check(copy.size() == 4 && registers.size() == 3 && !registers.contains(0x7000) && !(copy == registers), "register file copy");
+    check(copy.erase(0x7000) == 1 && copy.erase(0x7000) == 0 && copy == registers, "register file erase");
+    bool threw = false;
+    try {
+        static_cast<void>(registers.at(0x42));
+    } catch (const std::out_of_range&) {
+        threw = true;
+    }
+    check(threw, "register file read an unset register");
+}
+
 void testContextAndBases() {
     AgcDriver::QueueState state;
     execute(state, makePacket(0x69, {0x10, 17}));
@@ -265,6 +288,9 @@ void testMemory() {
     check(data[0] == 11 && data[1] == 12, "WRITE_DATA increment failed");
     execute(state, makePacket(0x37, {0x10100, low(data.data()), high(data.data()), 21, 22}));
     check(data[0] == 22 && data[1] == 12, "WRITE_DATA fixed destination failed");
+    execute(state, makePacket(0x37, {0x40000100, low(data.data()), high(data.data()), 41, 42}));
+    check(data[0] == 41 && data[1] == 42, "WRITE_DATA from the PFP failed");
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x37, {0x80000100, low(data.data()), high(data.data()), 51}), 0); }, "engine");
     execute(state, makePacket(0x81, {4, 31, 32}));
     execute(state, makePacket(0x83, {4, 2, low(data.data()), high(data.data())}));
     check(data[0] == 31 && data[1] == 32, "constant RAM round trip failed");
@@ -313,6 +339,29 @@ void testCopies() {
     } catch (...) { VirtualFree(memory, 0, MEM_RELEASE); throw; }
     check(VirtualFree(memory, 0, MEM_RELEASE) != 0, "VirtualFree failed");
 #endif
+}
+
+void testMemoryCopyDecode() {
+    using AgcDriver::Pm4::DecodeMemoryCopy;
+    constexpr std::uint64_t source = 0x1120000000ull, destination = 0x403d7b400ull;
+    const auto packet = [&](std::uint32_t control, std::uint64_t from, std::uint64_t to, std::uint32_t command) {
+        return makePacket(0x50, {control, static_cast<std::uint32_t>(from), static_cast<std::uint32_t>(from >> 32u), static_cast<std::uint32_t>(to), static_cast<std::uint32_t>(to >> 32u), command});
+    };
+    const auto copy = DecodeMemoryCopy(packet(0x60000000, source, destination, 0xbdd800));
+    check(copy.has_value() && copy->source == source && copy->destination == destination && copy->bytes == 0xbdd800, "a memory-to-memory DMA_DATA did not decode as a copy");
+    check(DecodeMemoryCopy(packet(0x00000000, source, destination, 64)).has_value(), "a DMA_DATA with memory selectors 0 did not decode as a copy");
+    check(!DecodeMemoryCopy(packet(0x40000000, 0x44332211, destination, 64)).has_value(), "an immediate fill decoded as a copy");
+    check(!DecodeMemoryCopy(packet(0x60100000, source, 0x100, 64)).has_value(), "a DMA_DATA to the GDS decoded as a copy");
+    check(!DecodeMemoryCopy(packet(0x20000000, 0x100, destination, 64)).has_value(), "a DMA_DATA from the GDS decoded as a copy");
+    check(!DecodeMemoryCopy(packet(0x60000000, source, destination, 64 | (1u << 26u))).has_value(), "a register source decoded as a copy");
+    check(!DecodeMemoryCopy(packet(0x60000000, source, destination, 64 | (1u << 27u))).has_value(), "a register destination decoded as a copy");
+    check(!DecodeMemoryCopy(packet(0x60000000, source, destination, 64 | (1u << 28u))).has_value(), "a non-incrementing source decoded as a copy");
+    check(!DecodeMemoryCopy(packet(0x60000000, source, destination, 64 | (1u << 29u))).has_value(), "a non-incrementing destination decoded as a copy");
+    check(!DecodeMemoryCopy(packet(0x60000000, source, destination, 0)).has_value(), "an empty DMA_DATA decoded as a copy");
+    check(!DecodeMemoryCopy(packet(0x60000000, source, source + 32, 64)).has_value(), "overlapping ranges decoded as a copy");
+    check(!DecodeMemoryCopy(packet(0x60000000, source + 32, source, 64)).has_value(), "overlapping ranges below the source decoded as a copy");
+    check(DecodeMemoryCopy(packet(0x60000000, source, source + 64, 64)).has_value(), "adjacent ranges did not decode as a copy");
+    check(!DecodeMemoryCopy(makePacket(0x40, {0x10101, 0, 0, 0, 0})).has_value(), "a COPY_DATA decoded as a DMA_DATA copy");
 }
 
 void testMemorySynchronization() {
@@ -514,12 +563,14 @@ int main(int argc, char** argv) {
         testCatalog();
         testWriteChangedKeepsUntouchedBytes();
         testRegisters();
+        testRegisterFile();
         testContextAndBases();
         testIndexedDraw();
         testAutoDraw();
         testIndirectDraw();
         testMemory();
         testCopies();
+        testMemoryCopyDecode();
         testMemorySynchronization();
         testEventWrite();
         testAcquireMem();

@@ -119,6 +119,36 @@ void RunTextureTilingTests() {
     reject([] { ComputeMipLayout(TextureTileMode::kLinear, 1, 4, 4, 0); }, "mip count is out of range");
     reject([] { ComputeMipLayout(TextureTileMode::kLinear, 1, 4, 4, 17); }, "mip count is out of range");
 
+    {
+        GuestTextureResource volume{};
+        volume.width = 64;
+        volume.height = 64;
+        volume.depthOrLastArray = 31;
+        volume.mipCount = 3;
+        volume.tileMode = TextureTileMode::kStandard4KB;
+        volume.dimension = TextureDimension::k3D;
+        volume.format = 56;
+        const auto geometry = DescribeSurface(volume);
+        Require(geometry.thick && geometry.blockDepth == 8 && geometry.mips.size() == 3, "mipmapped 3D texture geometry changed");
+        Require(geometry.mips[2].tiledOffset == 0 && geometry.mips[2].tiledSize == 8192, "3D mip 2 must lead each slab");
+        Require(geometry.mips[1].tiledOffset == 8192 && geometry.mips[1].tiledSize == 32768, "3D mip 1 offset or size changed");
+        Require(geometry.mips[0].tiledOffset == 40960 && geometry.mips[0].tiledSize == 131072, "3D mip 0 must end each slab");
+        Require(geometry.layerBytes == 172032 && geometry.guestBytes == 172032ull * 4, "3D slabs must hold the whole mip chain");
+        Require(geometry.HasLayer(1, 15) && !geometry.HasLayer(1, 16) && !geometry.HasLayer(2, 8), "3D mips must halve their depth");
+        volume.width = 33;
+        volume.height = 20;
+        volume.depthOrLastArray = 11;
+        volume.mipCount = 2;
+        const auto odd = DescribeSurface(volume);
+        Require(odd.mips[1].width == 16 && odd.mips[1].blocksPerRow == 3 && odd.mips[1].tiledSize == 12288, "a 3D level must be padded from its size rounded up, as addrlib does");
+        Require(odd.mips[0].blocksPerRow == 5 && odd.mips[0].tiledOffset == 12288 && odd.mips[0].tiledSize == 40960, "3D mip 0 of a non-power-of-two volume changed");
+        volume.width = 8;
+        volume.height = 8;
+        volume.depthOrLastArray = 7;
+        volume.mipCount = 2;
+        reject([&] { DescribeSurface(volume); }, "3D texture mip tails are not implemented");
+    }
+
     reject([] { ComputeSurfaceSize({}, 1); }, "empty mip chain");
     reject([] { ComputeSurfaceSize(ComputeMipLayout(TextureTileMode::kLinear, 1, 4, 4, 1), 0); }, "zero array layers");
 }

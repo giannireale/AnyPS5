@@ -45,6 +45,10 @@ int APS5_VABI sceNpSessionSignalingGetConnectionInfo(void) {
     return SCE_NP_SESSION_SIGNALING_ERROR_UNAVAILABLE;
 }
 
+int APS5_VABI sceNpSessionSignalingGetConnectionFromPeerAddress2(void) {
+    return SCE_NP_SESSION_SIGNALING_ERROR_UNAVAILABLE;
+}
+
 int APS5_VABI sceNpSessionSignalingTerminate(void) {
     return 0;
 }
@@ -62,5 +66,4 @@ std::int32_t APS5_VABI sceNpSessionSignalingGetConnectionStatus(const void*, con
 std::int32_t APS5_VABI sceNpSessionSignalingGetLocalNetInfo(const void*, const void*, const void*, const void*) {
     return static_cast<std::int32_t>(0x80550006u);
 }
-
 }

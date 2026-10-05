@@ -249,7 +249,10 @@ void EmitDirectInstruction(SpirvValueEmitContext& ctx, const IrValue& inst) {
         case IrOpcode::ReferenceU32: return Invoke(EmitReferenceU32, ctx, inst);
         case IrOpcode::GetUserData: return Invoke(EmitGetUserData, ctx, inst);
         case IrOpcode::GetShaderBase: return Invoke(EmitGetShaderBase, ctx, inst);
+        case IrOpcode::ShaderClock: return Invoke(EmitShaderClock, ctx, inst);
+        case IrOpcode::RealtimeClock: return Invoke(EmitRealtimeClock, ctx, inst);
         case IrOpcode::MeshDrawParameter: return Invoke(EmitMeshDrawParameter, ctx, inst);
+        case IrOpcode::MeshArgument: return Invoke(EmitMeshArgument, ctx, inst);
         case IrOpcode::MeshAllocate: return Invoke(EmitMeshAllocate, ctx, inst);
         case IrOpcode::TessellationBase: return Invoke(EmitTessellationBase, ctx, inst);
         case IrOpcode::GetTessellationAttribute: return Invoke(EmitGetTessellationAttribute, ctx, inst);
@@ -395,6 +398,7 @@ void EmitDirectInstruction(SpirvValueEmitContext& ctx, const IrValue& inst) {
         case IrOpcode::FPAdd32: return Invoke(EmitFPAdd32, ctx, inst);
         case IrOpcode::FPSub32: return Invoke(EmitFPSub32, ctx, inst);
         case IrOpcode::FPFma32: return Invoke(EmitFPFma32, ctx, inst);
+        case IrOpcode::FPMad32: return Invoke(EmitFPMad32, ctx, inst);
         case IrOpcode::FPMul32: return Invoke(EmitFPMul32, ctx, inst);
         case IrOpcode::FPMin32: return Invoke(EmitFPMin32, ctx, inst);
         case IrOpcode::FPMax32: return Invoke(EmitFPMax32, ctx, inst);
@@ -415,10 +419,31 @@ void EmitDirectInstruction(SpirvValueEmitContext& ctx, const IrValue& inst) {
         case IrOpcode::FPCeil32: return Invoke(EmitFPCeil32, ctx, inst);
         case IrOpcode::FPTrunc32: return Invoke(EmitFPTrunc32, ctx, inst);
         case IrOpcode::FPFract32: return Invoke(EmitFPFract32, ctx, inst);
+        case IrOpcode::FPAdd64: return Invoke(EmitFPAdd64, ctx, inst);
+        case IrOpcode::FPMul64: return Invoke(EmitFPMul64, ctx, inst);
+        case IrOpcode::FPFma64: return Invoke(EmitFPFma64, ctx, inst);
+        case IrOpcode::FPMin64: return Invoke(EmitFPMin64, ctx, inst);
+        case IrOpcode::FPMax64: return Invoke(EmitFPMax64, ctx, inst);
+        case IrOpcode::FPSaturate64: return Invoke(EmitFPSaturate64, ctx, inst);
+        case IrOpcode::FPLdexp64: return Invoke(EmitFPLdexp64, ctx, inst);
+        case IrOpcode::FPRoundEven64: return Invoke(EmitFPRoundEven64, ctx, inst);
+        case IrOpcode::FPFloor64: return Invoke(EmitFPFloor64, ctx, inst);
+        case IrOpcode::FPCeil64: return Invoke(EmitFPCeil64, ctx, inst);
+        case IrOpcode::FPTrunc64: return Invoke(EmitFPTrunc64, ctx, inst);
+        case IrOpcode::FPFract64: return Invoke(EmitFPFract64, ctx, inst);
+        case IrOpcode::FPFrexpMant64: return Invoke(EmitFPFrexpMant64, ctx, inst);
+        case IrOpcode::FPFrexpExp64: return Invoke(EmitFPFrexpExp64, ctx, inst);
+        case IrOpcode::ConvertF32F64: return Invoke(EmitConvertF32F64, ctx, inst);
+        case IrOpcode::ConvertF64F32: return Invoke(EmitConvertF64F32, ctx, inst);
+        case IrOpcode::ConvertF64S32: return Invoke(EmitConvertF64S32, ctx, inst);
+        case IrOpcode::ConvertF64U32: return Invoke(EmitConvertF64U32, ctx, inst);
+        case IrOpcode::ConvertS32F64: return Invoke(EmitConvertS32F64, ctx, inst);
+        case IrOpcode::ConvertU32F64: return Invoke(EmitConvertU32F64, ctx, inst);
         case IrOpcode::LaneId: return Invoke(EmitLaneId, ctx, inst);
         case IrOpcode::WriteLane: return Invoke(EmitWriteLane, ctx, inst);
         case IrOpcode::Permlane16U32: return Invoke(EmitPermlane16U32, ctx, inst);
         case IrOpcode::BpermuteU32: return Invoke(EmitBpermuteU32, ctx, inst);
+        case IrOpcode::PermuteU32: return Invoke(EmitPermuteU32, ctx, inst);
         case IrOpcode::GetSrtResource: return Invoke(EmitGetSrtResource, ctx, inst);
         case IrOpcode::GetBufferResource: return Invoke(EmitGetBufferResource, ctx, inst);
         case IrOpcode::GetAddressResource: return Invoke(EmitGetAddressResource, ctx, inst);
@@ -461,6 +486,23 @@ void EmitDirectInstruction(SpirvValueEmitContext& ctx, const IrValue& inst) {
         case IrOpcode::BufferAtomicAnd32: return Invoke(EmitBufferAtomicAnd32, ctx, inst);
         case IrOpcode::BufferAtomicOr32: return Invoke(EmitBufferAtomicOr32, ctx, inst);
         case IrOpcode::BufferAtomicOr64: return Invoke(EmitBufferAtomicOr64, ctx, inst);
+        case IrOpcode::BufferAtomicInc32: return Invoke(EmitBufferAtomicInc32, ctx, inst);
+        case IrOpcode::BufferAtomicDec32: return Invoke(EmitBufferAtomicDec32, ctx, inst);
+        case IrOpcode::BufferAtomicIAdd64: return Invoke(EmitBufferAtomicIAdd64, ctx, inst);
+        case IrOpcode::BufferAtomicISub64: return Invoke(EmitBufferAtomicISub64, ctx, inst);
+        case IrOpcode::BufferAtomicSMin64: return Invoke(EmitBufferAtomicSMin64, ctx, inst);
+        case IrOpcode::BufferAtomicUMin64: return Invoke(EmitBufferAtomicUMin64, ctx, inst);
+        case IrOpcode::BufferAtomicSMax64: return Invoke(EmitBufferAtomicSMax64, ctx, inst);
+        case IrOpcode::BufferAtomicUMax64: return Invoke(EmitBufferAtomicUMax64, ctx, inst);
+        case IrOpcode::BufferAtomicAnd64: return Invoke(EmitBufferAtomicAnd64, ctx, inst);
+        case IrOpcode::BufferAtomicXor64: return Invoke(EmitBufferAtomicXor64, ctx, inst);
+        case IrOpcode::BufferAtomicCmpSwap64: return Invoke(EmitBufferAtomicCmpSwap64, ctx, inst);
+        case IrOpcode::BufferAtomicFCmpSwap32: return Invoke(EmitBufferAtomicFCmpSwap32, ctx, inst);
+        case IrOpcode::BufferAtomicFCmpSwap64: return Invoke(EmitBufferAtomicFCmpSwap64, ctx, inst);
+        case IrOpcode::BufferAtomicFMin64: return Invoke(EmitBufferAtomicFMin64, ctx, inst);
+        case IrOpcode::BufferAtomicFMax64: return Invoke(EmitBufferAtomicFMax64, ctx, inst);
+        case IrOpcode::BufferAtomicInc64: return Invoke(EmitBufferAtomicInc64, ctx, inst);
+        case IrOpcode::BufferAtomicDec64: return Invoke(EmitBufferAtomicDec64, ctx, inst);
         case IrOpcode::BufferAtomicXor32: return Invoke(EmitBufferAtomicXor32, ctx, inst);
         case IrOpcode::BufferAtomicFMin32: return Invoke(EmitBufferAtomicFMin32, ctx, inst);
         case IrOpcode::BufferAtomicFMax32: return Invoke(EmitBufferAtomicFMax32, ctx, inst);
@@ -490,6 +532,12 @@ void EmitDirectInstruction(SpirvValueEmitContext& ctx, const IrValue& inst) {
         case IrOpcode::SharedAtomicAnd32: return Invoke(EmitSharedAtomicAnd32, ctx, inst);
         case IrOpcode::SharedAtomicOr32: return Invoke(EmitSharedAtomicOr32, ctx, inst);
         case IrOpcode::SharedAtomicXor32: return Invoke(EmitSharedAtomicXor32, ctx, inst);
+        case IrOpcode::SharedAtomicRsub32: return Invoke(EmitSharedAtomicRsub32, ctx, inst);
+        case IrOpcode::SharedAtomicFAdd32: return Invoke(EmitSharedAtomicFAdd32, ctx, inst);
+        case IrOpcode::SharedAtomicCmpst32: return Invoke(EmitSharedAtomicCmpst32, ctx, inst);
+        case IrOpcode::SharedAtomicCmpstF32: return Invoke(EmitSharedAtomicCmpstF32, ctx, inst);
+        case IrOpcode::SharedAtomicMskor32: return Invoke(EmitSharedAtomicMskor32, ctx, inst);
+        case IrOpcode::SharedAtomicWrap32: return Invoke(EmitSharedAtomicWrap32, ctx, inst);
         case IrOpcode::DataAppend: return Invoke(EmitDataAppend, ctx, inst);
         case IrOpcode::DataConsume: return Invoke(EmitDataConsume, ctx, inst);
         case IrOpcode::SwizzleU32: return Invoke(EmitSwizzleU32, ctx, inst);
@@ -511,6 +559,12 @@ void EmitDirectInstruction(SpirvValueEmitContext& ctx, const IrValue& inst) {
         case IrOpcode::ImageAtomicAnd32: return Invoke(EmitImageAtomicAnd32, ctx, inst);
         case IrOpcode::ImageAtomicOr32: return Invoke(EmitImageAtomicOr32, ctx, inst);
         case IrOpcode::ImageAtomicXor32: return Invoke(EmitImageAtomicXor32, ctx, inst);
+        case IrOpcode::ImageAtomicCmpSwap32: return Invoke(EmitImageAtomicCmpSwap32, ctx, inst);
+        case IrOpcode::ImageAtomicInc32: return Invoke(EmitImageAtomicInc32, ctx, inst);
+        case IrOpcode::ImageAtomicDec32: return Invoke(EmitImageAtomicDec32, ctx, inst);
+        case IrOpcode::ImageAtomicFCmpSwap32: return Invoke(EmitImageAtomicFCmpSwap32, ctx, inst);
+        case IrOpcode::ImageAtomicFMin32: return Invoke(EmitImageAtomicFMin32, ctx, inst);
+        case IrOpcode::ImageAtomicFMax32: return Invoke(EmitImageAtomicFMax32, ctx, inst);
         case IrOpcode::GetAttribute: return Invoke(EmitGetAttribute, ctx, inst);
         case IrOpcode::GetInterpolationParameter: return Invoke(EmitGetInterpolationParameter, ctx, inst);
         case IrOpcode::SetAttribute: return Invoke(EmitSetAttribute, ctx, inst);
@@ -575,9 +629,16 @@ void EmitStructuredBlock(SpirvValueEmitContext& ctx, StructuredFunctionState& fu
                 ldsRead |= access != SharedAccess::Write;
             }
         }
+        const bool shared = state.laneCount == 2u && inst->Type() != IrType::Void && !IrOpcodeHasSideEffects(inst->Opcode()) && state.sharedLaneValues.contains(inst);
         for (std::uint32_t half = 0; half < state.laneCount; half++) {
             if (half != 0 && ctx.otherHalf == nullptr) {
                 ctx.Fail(*inst, "requires a second lane context");
+            }
+            if (half != 0 && shared) {
+                if (const auto found = ctx.definitions.find(inst); found != ctx.definitions.end()) {
+                    ctx.otherHalf->Define(*inst, found->second);
+                    continue;
+                }
             }
             SpirvValueEmitContext& lane = half == 0 ? ctx : *ctx.otherHalf;
             state.laneHalf = half;

@@ -172,6 +172,8 @@ void Amd64OnlyConverter::_convertSegment(
             break;
         }
         case Amd64OnlyLowering::Trampoline: {
+            const auto consumedBefore = consumed;
+            try {
             std::size_t siteLength = match.Length;
             auto stub = substitution;
             std::vector<TrampolineFixup> fixups;
@@ -215,6 +217,10 @@ void Amd64OnlyConverter::_convertSegment(
                         throw CodegenException("AMD-only instruction too short for a jump is followed by an instruction that cannot move", ph.Offset + following.Offset);
                     }
                     siteLength += following.Length;
+                    if (info.FlowKind == ControlFlowKind::Return && substitution.Optional)
+                        throw CodegenException("Optional AMD-only instruction cannot absorb a return", ph.Offset + following.Offset);
+                    if (info.FlowKind == ControlFlowKind::Return && siteLength < Amd64OnlySubstitutionTable::kJmpRel32.Size)
+                        throw CodegenException("AMD-only instruction too short for a jump cannot absorb instructions after a return", ph.Offset + following.Offset);
                 }
                 const std::span<const std::uint8_t> trailing(trailingBytes);
                 auto relocated = _atFileOffset(fileOffset, [&] { return _matcher->MatchSequence(sequence, trailing); });
@@ -256,8 +262,16 @@ void Amd64OnlyConverter::_convertSegment(
                 std::move(incoming)
             });
             replacementLength = stub.StubBody.size();
+            } catch (const CodegenException&) {
+                if (!substitution.Optional) throw;
+                consumed = consumedBefore;
+                ++result.KeptCount;
+                result.Reports.push_back({substitution.InstructionName, fileOffset, match.Length, 0, Amd64OnlyLowering::Kept});
+                continue;
+            }
             break;
         }
+        case Amd64OnlyLowering::Kept:
         case Amd64OnlyLowering::Unsupported:
             throw CodegenException("AMD-only instruction without Intel lowering: " + substitution.InstructionName +
                 (substitution.InstructionName == "RDPRU" ? " reads AMD performance counters that no Intel processor exposes, so no lowering can preserve its result" : ""), fileOffset);
@@ -275,7 +289,7 @@ ConvertResult Amd64OnlyConverter::Convert(
     std::vector<std::uint8_t> fileBytes,
     const std::vector<Domain::ProgramHeader>& codeSegments
 ) const {
-    ConvertResult result{{}, 0, {}, {}};
+    ConvertResult result{};
     for (const auto& ph : codeSegments)
         _convertSegment(fileBytes, ph, result);
     result.Bytes = std::move(fileBytes);

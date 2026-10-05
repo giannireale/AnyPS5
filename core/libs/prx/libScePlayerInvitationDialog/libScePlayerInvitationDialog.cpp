@@ -2,6 +2,7 @@
 #include "prx/libScePlayerInvitationDialog/libScePlayerInvitationDialog.h"
 
 #include <mutex>
+#include "prx/libc/include/General.hpp"
 #include "prx/libc/include/general/LogMacros.hpp"
 
 namespace {

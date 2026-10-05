@@ -383,7 +383,7 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             // CACHE_POLICY (bits 26:25) only hints the GPU L2 policy of the write; the emulated write
             // lands in guest memory either way.
             constexpr std::uint32_t writeDataCachePolicy = 0x06000000u;
-            require((packet[1] & ~(0x00110f00u | writeDataCachePolicy)) == 0, "WRITE_DATA engine or reserved fields are not implemented");
+            require((packet[1] & ~(0x40110f00u | writeDataCachePolicy)) == 0, "WRITE_DATA engine or reserved fields are not implemented");
             const auto destination = (packet[1] >> 8u) & 0xfu;
             require(destination == 1 || destination == 2 || (queue != 0 && destination == 5), "WRITE_DATA register or GDS destination is not implemented");
             require((packet[2] & 3u) == 0, "misaligned WRITE_DATA destination");
@@ -520,6 +520,16 @@ std::optional<StoreWrite> ResolveStore(std::span<const std::uint32_t> packet, co
         }
         default: return std::nullopt;
     }
+}
+
+std::optional<MemoryCopy> DecodeMemoryCopy(std::span<const std::uint32_t> packet) {
+    if (packet.size() != 7 || ((packet[0] >> 8u) & 0xffu) != 0x50) return std::nullopt;
+    if (!memorySelector(dmaSource(packet)) || !memorySelector(dmaDestination(packet))) return std::nullopt;
+    const std::size_t bytes = packet[6] & 0x3ffffffu;
+    const auto source = address(packet[2], packet[3]);
+    const auto destination = address(packet[4], packet[5]);
+    if (bytes == 0 || (source < destination + bytes && destination < source + bytes)) return std::nullopt;
+    return MemoryCopy{source, destination, bytes};
 }
 
 bool UsesGpuCacheBarrier(std::span<const std::uint32_t> packet) {

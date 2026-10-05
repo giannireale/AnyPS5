@@ -96,6 +96,20 @@ bool TranslationContext::flatLoad(const RdnaInstruction& inst) {
     return true;
 }
 
+bool TranslationContext::globalLoadAddtid(const RdnaInstruction& inst) {
+    MemoryInfo memory = flatMemoryInfoFromInstruction(inst);
+    memory.addressIsFull = false;
+    const IrU32 baseLow = readU32(inst.source0);
+    const IrU32 baseHigh = readU32(offsetOperand(inst.source0, 1u));
+    IrValue* resource = getAddressResource(&baseLow.Value(), &baseHigh.Value());
+    IrValue& lane = ir.Emit(IrOpcode::LaneId, IrOpcodeType(IrOpcode::LaneId), {});
+    IrValue& laneOffset = ir.ShiftLeftLogical(lane, ir.Constant(2u));
+    IrValue& active = ir.GetExec();
+    IrValue& loaded = ir.Emit(IrOpcode::LoadAddressU32, IrOpcodeType(IrOpcode::LoadAddressU32), {resource, &laneOffset, &ir.Constant(0u), &active}, addMemoryInfo(memory, inst.programCounter));
+    writeOperand(inst.destination, &loaded);
+    return true;
+}
+
 bool TranslationContext::flatStore(const RdnaInstruction& inst) {
     const MemoryInfo memory = flatMemoryInfoFromInstruction(inst);
     IrOpcode opcode;

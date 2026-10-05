@@ -95,4 +95,5 @@ int main() {
     Require(result64.load() == 0);
     thread64.join();
     Require(KernelSyncOnAddressTestAccess::WaiterCount(&blockedValue64) == 0);
+
 }

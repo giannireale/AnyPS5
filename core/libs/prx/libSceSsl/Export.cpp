@@ -70,6 +70,11 @@ int APS5_VABI sceSslGetMemoryPoolStats(int ssl_ctx_id, void* stats) {
     return 0;
 }
 
+int APS5_VABI sceSslLoadCert() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 int APS5_VABI sceSslGetSubjectName(int ssl_ctx_id, const void* cert) {
     (void)ssl_ctx_id;
     (void)cert;

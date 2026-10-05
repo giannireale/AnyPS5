@@ -14,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <span>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -116,7 +117,7 @@ public:
     // Render targets live in the same images: draws attach mip 0 through a view of the color
     // buffer's format and mark the image dirty like a storage write.
     bool Attachable() const { return attachable; }
-    VkImageView AttachmentView(VkFormat format, std::uint32_t mip = 0);
+    VkImageView AttachmentView(VkFormat format, std::uint32_t mip = 0, std::uint32_t depthSlice = 0);
     void WriteBack();
     // Deferred write-back (APS5_EAGER_WRITEBACK=1 stores at once instead).
     void MarkDirty();
@@ -264,6 +265,7 @@ public:
     DccKeys UploadedKeys() const { return uploadedKeys; }
     DccKeys FilledKeys() const { return filledKeys; }
     DccKeyProof& KeyProof() const { return keyProof; }
+    bool ServesKeysAt(std::uint64_t dccAddress) const;
     // Brings the image up to date with guest memory before another use; returns whether its content
     // was still current (nothing uploaded).
     // Keeps the image current with guest memory (see GuestMemory::CollectWrites).
@@ -387,6 +389,12 @@ private:
     DccKeys uploadedKeys = DccKeys::Uncompressed;
     DccKeys filledKeys = DccKeys::Uncompressed;
     mutable DccKeyProof keyProof;
+    struct ForeignKeyProof {
+        std::uint64_t dccAddress = 0;
+        DccKeyProof proof;
+    };
+    mutable std::array<ForeignKeyProof, 4> foreignKeyProofs{};
+    mutable std::uint32_t nextForeignKeyProof = 0;
     // Write generation `original` is known current at (the oldest of layerGeneration).
     std::uint64_t generation = 0;
     std::uint32_t trackedLayers = 1;
@@ -414,7 +422,7 @@ private:
     std::map<std::uint32_t, VkImageView> extraViews;
     std::map<std::uint32_t, VkImageView> firstLayerViews;
     bool attachable = false;
-    std::map<std::pair<VkFormat, std::uint32_t>, VkImageView> attachmentViews;
+    std::map<std::tuple<VkFormat, std::uint32_t, std::uint32_t>, VkImageView> attachmentViews;
     VkFormat storageFormat = VK_FORMAT_UNDEFINED;
     // Results are on the GPU only (guarded by the pending-write registry lock).
     bool dirty = false;

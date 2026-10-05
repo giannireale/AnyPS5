@@ -12,7 +12,8 @@ namespace Codegen {
 enum class Amd64OnlyLowering : std::uint8_t {
     InPlace,
     Trampoline,
-    Unsupported
+    Unsupported,
+    Kept
 };
 
 struct Amd64OnlyMatch {
@@ -24,6 +25,7 @@ struct Amd64OnlyMatch {
     std::size_t ReturnBranchOffset;
     std::size_t TrailingOffset = 0;
     std::vector<PendingRipFixup> RipFixups;
+    bool Optional = false;
 };
 
 struct Amd64OnlySubstitutionReport {

@@ -61,9 +61,9 @@ static void CommitArenaRange(void* addr, size_t len, DWORD winProt) {
     GuestArena::GuestArenaCommit_nid_postfix(addr, len, winProt, PS5_PAGE_SIZE);
 }
 
-static void* mmap_aligned(size_t len, int prot, size_t alignment) {
+static void* mmap_aligned(size_t len, int prot, size_t alignment, std::uintptr_t hint = 0) {
     auto& arena = KernelArena::Get();
-    void* result = arena.Allocate(len, alignment);
+    void* result = GuestArena::GuestArenaAllocateAtOrAbove_nid_postfix(hint, len, alignment);
     if (prot != PROT_NONE) {
         try {
             CommitArenaRange(result, len, WinProtFromPosix(prot));
@@ -143,7 +143,7 @@ constexpr int GuestMapNoCoalesceFlag = 0x400000;
 constexpr int ObservedFlexibleMappingFlag = 0x8000;
 
 constexpr int SupportedMapFlags() {
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
     return GuestMapFixedFlag | GuestMapNoOverwriteFlag | GuestMapNoCoalesceFlag;
 #else
     return GuestMapFixedFlag | GuestMapNoCoalesceFlag;
@@ -409,6 +409,32 @@ void* MapPlaced(void* addr, size_t len, int prot, int flags, size_t alignment, i
     flags &= ~additionalSupportedFlags;
     if ((flags & GuestMapFixedFlag) != 0) {
         ValidateRange(addr, len, alignment);
+#ifdef _WIN32
+        if ((flags & GuestMapNoOverwriteFlag) != 0) {
+            const auto start = reinterpret_cast<std::uintptr_t>(addr);
+            auto cursor = start;
+            while (cursor - start < len) {
+                MEMORY_BASIC_INFORMATION info{};
+                if (VirtualQuery(reinterpret_cast<LPCVOID>(cursor), &info, sizeof(info)) != sizeof(info))
+                    throw std::system_error(EINVAL, std::generic_category(), "No-overwrite range query failed");
+                if (info.State == MEM_FREE) {
+                    cursor = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+                    continue;
+                }
+                const auto regionEnd = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+                if (regionEnd <= cursor) throw std::system_error(EINVAL, std::generic_category(), "No-overwrite range query failed");
+                const auto usedEnd = std::min(regionEnd, start + len);
+                const auto usedBegin = std::max(reinterpret_cast<std::uintptr_t>(info.BaseAddress), start);
+                if (info.State != MEM_RESERVE || !GuestArena::GuestArenaContains_nid_postfix(reinterpret_cast<void*>(usedBegin), usedEnd - usedBegin)) {
+                    char busy[160];
+                    std::snprintf(busy, sizeof(busy), "No-overwrite range %p+0x%zx is occupied (state=0x%lx prot=0x%lx)", addr, len,
+                        (unsigned long)info.State, (unsigned long)info.Protect);
+                    throw std::system_error(EEXIST, std::generic_category(), busy);
+                }
+                cursor = usedEnd;
+            }
+        }
+#endif
 #if defined(__linux__)
         const int placement = (flags & GuestMapNoOverwriteFlag) != 0 ? MAP_FIXED_NOREPLACE : MAP_FIXED;
 #else
@@ -425,7 +451,7 @@ void* MapPlaced(void* addr, size_t len, int prot, int flags, size_t alignment, i
 #if defined(__linux__)
         return MapAtOrAbove(reinterpret_cast<std::uintptr_t>(addr), len, prot, alignment);
 #else
-        throw std::invalid_argument("Non-fixed mapping address hints are not implemented");
+        return mmap_aligned(len, prot, alignment, reinterpret_cast<std::uintptr_t>(addr));
 #endif
     }
 #ifdef _WIN32
