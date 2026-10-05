@@ -53,7 +53,8 @@ void sampleWithOffset() {
     for (const auto& entry : cases) {
         const auto instruction = decode(entry.opcode);
         require(instruction.op == entry.decodedOpcode, "shadow sample with offset decoded to the wrong opcode");
-        require(instruction.imageSampleFlags == entry.flags, "shadow sample with offset decoded the wrong address flags");
+        const auto gradients = (entry.flags & RdnaImageSampleFlagDerivative) != 0 ? 2u << RdnaImageSampleGradientCountShift : 0u;
+        require(instruction.imageSampleFlags == (entry.flags | gradients), "shadow sample with offset decoded the wrong address flags");
         require(instruction.imageAddressComponents == entry.components, "shadow sample with offset decoded the wrong address component count");
         require(std::string(GetRdnaImageSampleOpcodeName(entry.opcode)) == entry.name, "shadow sample with offset reported the wrong name");
         require(instruction.family == RdnaInstructionFamily::MIMG && instruction.wordCount == 2, "shadow sample with offset decoded the wrong instruction shape");

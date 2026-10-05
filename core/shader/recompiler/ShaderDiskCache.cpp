@@ -1,6 +1,7 @@
 #include "ShaderDiskCache.hpp"
 #include "CacheKey.hpp"
 #include "ShaderCacheDirectory.hpp"
+#include "ThreadOwned.hpp"
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -603,7 +604,8 @@ public:
     bool Load(std::span<const std::byte> key, CompiledVariant& variant) {
         const auto started = std::chrono::steady_clock::now();
         const auto name = EntryName(key);
-        thread_local std::vector<std::byte> file;
+        thread_local std::vector<std::byte>* fileSlot = nullptr;
+        auto& file = ThreadOwned(fileSlot);
         bool loaded = false;
         if (!ReadWholeFile(directory / name, file)) {
             misses.fetch_add(1, std::memory_order_relaxed);
@@ -778,7 +780,8 @@ void BuildKey(const RecompileRequest& request, std::uint32_t hostSubgroupSize, c
     writer.Value(FileMagic);
     writer.Value(FormatVersion);
     writer.Value(SourceVersion());
-    thread_local std::vector<std::uint64_t> memoryKey;
+    thread_local std::vector<std::uint64_t>* memoryKeySlot = nullptr;
+    auto& memoryKey = ThreadOwned(memoryKeySlot);
     RecompileCacheKey::Build(request, memoryKey);
     writer.Values(std::span<const std::uint64_t>(memoryKey));
     writer.Values(request.shader.code);

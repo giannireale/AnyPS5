@@ -650,6 +650,11 @@ int APS5_VABI sceNetEpollCreate(const char* name, int flags) {
     return id;
 }
 
+int APS5_VABI sceNetGetMemoryPoolStats() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 int APS5_VABI sceNetEpollDestroy(int eid) {
     std::lock_guard<std::mutex> lk(g_mutex);
     if (g_epolls.erase(eid) == 0) {

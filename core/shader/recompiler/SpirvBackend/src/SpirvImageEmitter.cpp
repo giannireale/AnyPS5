@@ -827,9 +827,8 @@ void EmitGatherOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access, con
     if (dimension == RdnaImageDimension::Dim1DArray) {
         ctx.Fail(access.inst, "has an unsupported 1D-array gather");
     }
-    if (!HasFlag(mem, RdnaImageSampleFlagLevelZero) && state.program.Resources().stage != IrShaderStage::Pixel) {
-        ctx.Fail(access.inst, "uses an implicit-LOD gather outside a pixel shader");
-    }
+    // ImageGather uses the base level outside fragment execution; unlike
+    // ImageSampleImplicitLod it does not require fragment derivatives.
     const auto sampled = MakeSampledImage(state, mem.resource, mem.sampler, access.slot);
     const auto sample = state.module.AllocateId();
     std::vector<std::uint32_t> words;
@@ -1231,35 +1230,41 @@ void EmitImageBvhIntersectRay(SpirvValueEmitContext& ctx, const IrValue& inst) {
         const IrValue* address = ctx.ImageAddress(inst.Argument(1));
         const auto component = [&](std::uint32_t index) { return ctx.Arg(*address, index); };
         const bool a16 = (ctx.Memory(inst).imageSampleFlags & RdnaImageSampleFlagA16) != 0u;
+        const bool node64 = ctx.Memory(inst).addressIsFull;
+        const std::uint32_t ray = node64 ? 2u : 1u;
 
-        const auto node = component(0);
-        const auto type = op(spv::OpBitwiseAnd, u32, node, uint(7u));
-        const auto nodeIndex = op(spv::OpShiftRightLogical, u64, widen(node), BdaConstant(state, 3u));
+        const auto nodeLow = component(0);
+        const auto node = node64 ? pair(nodeLow, component(1)) : widen(nodeLow);
+        const auto type = op(spv::OpBitwiseAnd, u32, nodeLow, uint(7u));
+        const auto nodeIndex = op(spv::OpShiftRightLogical, u64, node, BdaConstant(state, 3u));
         const auto baseUnits = pair(word[0], op(spv::OpBitwiseAnd, u32, word[1], uint(0xffu)));
         const auto lastNode = pair(word[2], op(spv::OpBitwiseAnd, u32, word[3], uint(0x3ffu)));
         const auto boxGrow = op(spv::OpBitwiseAnd, u32, op(spv::OpShiftRightLogical, u32, word[1], uint(23u)), uint(0xffu));
         const auto boxSort = op(spv::OpINotEqual, boolean, op(spv::OpBitwiseAnd, u32, word[1], uint(0x80000000u)), uint(0u));
         const auto barycentrics = op(spv::OpINotEqual, boolean, op(spv::OpBitwiseAnd, u32, word[3], uint(1u << 24u)), uint(0u));
-        const auto nodeAddress = op(spv::OpIAdd, u64, op(spv::OpShiftLeftLogical, u64, baseUnits, BdaConstant(state, 8u)), op(spv::OpShiftLeftLogical, u64, widen(op(spv::OpBitwiseAnd, u32, node, uint(~7u))), BdaConstant(state, 3u)));
-        const auto present = op(spv::OpINotEqual, boolean, baseUnits, BdaConstant(state, 0u));
-        const auto valid = both(present, op(spv::OpULessThanEqual, boolean, nodeIndex, lastNode));
+        const auto nodeAddress = op(spv::OpIAdd, u64, op(spv::OpShiftLeftLogical, u64, baseUnits, BdaConstant(state, 8u)), op(spv::OpShiftLeftLogical, u64, op(spv::OpBitwiseAnd, u64, node, BdaConstant(state, ~std::uint64_t{7u})), BdaConstant(state, 3u)));
+        const auto within = [&](spv::Op compare) {
+            const auto inRange = op(compare, boolean, nodeIndex, lastNode);
+            return node64 ? inRange : both(op(spv::OpINotEqual, boolean, baseUnits, BdaConstant(state, 0u)), inRange);
+        };
+        const auto valid = within(spv::OpULessThanEqual);
         const auto isTriangle = both(valid, op(spv::OpULessThanEqual, boolean, type, uint(1u)));
         const auto isBox16 = both(valid, op(spv::OpIEqual, boolean, type, uint(4u)));
-        const auto isBox32 = both(both(present, op(spv::OpULessThan, boolean, nodeIndex, lastNode)), op(spv::OpIEqual, boolean, type, uint(5u)));
+        const auto isBox32 = both(within(spv::OpULessThan), op(spv::OpIEqual, boolean, type, uint(5u)));
 
-        const auto extent = asFloat(component(1));
+        const auto extent = asFloat(component(ray));
         std::array<std::uint32_t, 3> origin{};
         std::array<std::uint32_t, 3> direction{};
         std::array<std::uint32_t, 3> inverse{};
         for (std::uint32_t axis = 0; axis < 3u; ++axis) {
-            origin[axis] = asFloat(component(2u + axis));
+            origin[axis] = asFloat(component(ray + 1u + axis));
             if (!a16) {
-                direction[axis] = asFloat(component(5u + axis));
-                inverse[axis] = asFloat(component(8u + axis));
+                direction[axis] = asFloat(component(ray + 4u + axis));
+                inverse[axis] = asFloat(component(ray + 7u + axis));
                 continue;
             }
             const auto half = [&](std::uint32_t index) {
-                const auto packed = component(5u + index / 2u);
+                const auto packed = component(ray + 4u + index / 2u);
                 return EmitF16BitsToF32(state, index % 2u == 0u ? op(spv::OpBitwiseAnd, u32, packed, uint(0xffffu)) : op(spv::OpShiftRightLogical, u32, packed, uint(16u)));
             };
             direction[axis] = half(axis);

@@ -61,6 +61,7 @@ bool TranslationContext::imageBvhIntersectRay(const RdnaInstruction& inst) {
     memory.kind = ResourceKind::Global;
     memory.dataDwords = 4u;
     memory.imageSampleFlags = inst.imageA16 ? RdnaImageSampleFlagA16 : 0u;
+    memory.addressIsFull = inst.op == RdnaOpcode::ImageBvh64IntersectRay;
     IrValue* descriptor = constructU32x4(inst.source1, 4u);
     IrValue* address = makeImageAddress(inst, inst.source0);
     IrValue& result = ir.Emit(IrOpcode::ImageBvhIntersectRay, IrOpcodeType(IrOpcode::ImageBvhIntersectRay), {descriptor, address, &ir.GetExec()}, addMemoryInfo(memory, inst.programCounter));

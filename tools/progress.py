@@ -52,6 +52,8 @@ OPCODE_VARIANTS = {
     "VMacF32": ("V_FMAC_F32",),
     "VMadmkF32": ("V_FMAMK_F32",),
     "VMadakF32": ("V_FMAAK_F32",),
+    "VMacLegacyF32": ("V_FMAC_LEGACY_F32",),
+    "VMadLegacyF32": ("V_FMA_LEGACY_F32",),
     "ImageSample": ("IMAGE_SAMPLE_L", "IMAGE_SAMPLE_B", "IMAGE_SAMPLE_C_LZ", "IMAGE_SAMPLE_L_O", "IMAGE_SAMPLE_D_CL_O"),
 }
 REPORT_ROWS = 100

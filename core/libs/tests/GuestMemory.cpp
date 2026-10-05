@@ -31,6 +31,7 @@
 #include <unistd.h>
 #endif
 #ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #endif
 
@@ -62,6 +63,7 @@ int APS5_VABI sceKernelAioInitializeImpl(void*, std::int32_t);
 int APS5_VABI sceKernelAioSubmitReadCommands(KernelAioRwRequest*, std::int32_t, std::int32_t, std::int32_t*);
 int APS5_VABI sceKernelAioWaitRequest(std::int32_t, std::int32_t*, std::uint32_t*);
 int APS5_VABI sceKernelAioDeleteRequest(std::int32_t, std::int32_t*);
+int APS5_VABI sceKernelMlock_nid_postfix(void*, std::uint64_t);
 }
 
 static void Require(bool condition, std::source_location location = std::source_location::current()) {
@@ -230,7 +232,39 @@ static void CheckFixedVirtualReservation() {
     void* fixed = requested;
     Require(sceKernelReserveVirtualRange(&fixed, page * 2, 0x400010, 0) == 0);
     Require(fixed == requested);
-    Require(sceKernelMunmap(fixed, page * 2) == 0);
+    void* again = requested;
+    Require(sceKernelReserveVirtualRange(&again, page * 2, 0x400010, 0) == 0);
+    Require(again == requested);
+    std::int64_t phys = 0;
+    Require(sceKernelAllocateDirectMemory(0, 0x7fffffffffll, page * 2, 0, 0, &phys) == 0);
+    void* mapped = requested;
+    Require(sceKernelMapDirectMemory(&mapped, page * 2, 3, 0x10, phys, 0) == 0);
+    Require(mapped == requested);
+    static_cast<unsigned char*>(mapped)[0] = 11;
+    VirtualQueryInfo before{};
+    Require(sceKernelVirtualQuery(mapped, 0, &before, sizeof(before)) == 0);
+    Require(before.is_direct);
+    void* reserved = requested;
+    Require(sceKernelReserveVirtualRange(&reserved, page * 2, 0x10, 0) == 0);
+    Require(reserved == requested);
+    VirtualQueryInfo after{};
+    Require(sceKernelVirtualQuery(reserved, 0, &after, sizeof(after)) == 0);
+    Require(!after.is_direct && after.protection == 0);
+    void* remapped = requested;
+    Require(sceKernelMapDirectMemory(&remapped, page * 2, 3, 0x10, phys, 0) == 0);
+    Require(remapped == requested);
+    VirtualQueryInfo revived{};
+    Require(sceKernelVirtualQuery(remapped, 0, &revived, sizeof(revived)) == 0);
+    Require(revived.is_direct);
+    bool refused = false;
+    try {
+        refused = sceKernelReserveVirtualRange(&reserved, page * 2, 0x90, 0) != 0;
+    } catch (const std::exception&) {
+        refused = true;
+    }
+    Require(refused);
+    Require(sceKernelMunmap(reserved, page * 2) == 0);
+    Require(sceKernelReleaseDirectMemory(phys, page * 2) == 0);
     void* pooled = nullptr;
     Require(sceKernelMemoryPoolReserve(requested, page * 2, 0, 0x10, &pooled) == 0);
     Require(pooled == requested);
@@ -259,6 +293,56 @@ static void CheckNoOverwriteRejectsHostOccupiedMapping() {
     Require(sceKernelReleaseDirectMemory(phys, page) == 0);
 }
 #endif
+
+#if defined(__linux__)
+static std::size_t LockedKilobytes() {
+    std::ifstream status("/proc/self/status");
+    std::string line;
+    while (std::getline(status, line)) {
+        if (line.rfind("VmLck:", 0) == 0) return std::strtoull(line.c_str() + 6, nullptr, 10);
+    }
+    return 0;
+}
+#endif
+
+static void CheckMlock() {
+    constexpr std::size_t page = 0x4000;
+#ifdef _WIN32
+    constexpr std::size_t length = 0x400000;
+#else
+    constexpr std::size_t length = 0x10000;
+#endif
+    constexpr int outOfMemory = static_cast<int>(0x8002000cu);
+    constexpr int invalid = static_cast<int>(0x80020016u);
+    void* mapped = nullptr;
+    Require(sceKernelMapFlexibleMemory(&mapped, length, 3, 0) == 0);
+    auto* bytes = static_cast<unsigned char*>(mapped);
+    Require(sceKernelMlock_nid_postfix(mapped, 0) == 0);
+#if defined(__linux__)
+    const auto lockedBefore = LockedKilobytes();
+#endif
+    Require(sceKernelMlock_nid_postfix(bytes + 1, length - page) == 0);
+#ifdef _WIN32
+    SIZE_T minimum = 0;
+    SIZE_T maximum = 0;
+    DWORD limits = 0;
+    Require(GetProcessWorkingSetSizeEx(GetCurrentProcess(), &minimum, &maximum, &limits) && minimum >= length && maximum > minimum);
+    Require(VirtualUnlock(mapped, length));
+    Require(!VirtualUnlock(mapped, length) && GetLastError() == ERROR_NOT_LOCKED);
+#elif defined(__linux__)
+    Require(LockedKilobytes() - lockedBefore == length / 1024);
+#endif
+    Require(sceKernelMlock_nid_postfix(mapped, length) == 0);
+    Require(sceKernelMlock_nid_postfix(mapped, length) == 0);
+    bytes[length - 1] = 7;
+    Require(sceKernelMlock_nid_postfix(reinterpret_cast<void*>(std::numeric_limits<std::uintptr_t>::max() - page + 1), page * 2) == invalid);
+    void* reserved = nullptr;
+    Require(sceKernelReserveVirtualRange(&reserved, page, 0, 0) == 0);
+    Require(sceKernelMlock_nid_postfix(reserved, page) == outOfMemory);
+    Require(sceKernelMunmap(reserved, page) == 0);
+    Require(sceKernelMunmap(mapped, length) == 0);
+    Require(sceKernelMlock_nid_postfix(mapped, page) == outOfMemory);
+}
 
 static void CheckSharedDirectMemoryLifecycle() {
     constexpr std::size_t page = 0x4000;
@@ -703,6 +787,7 @@ int main() {
     CheckDirectMemoryFollowsPhysicalPages();
     CheckDirectReleaseErrors();
     CheckFixedVirtualReservation();
+    CheckMlock();
     CheckSharedDirectMemoryLifecycle();
     CheckHeapAfterMappingReuse();
 #ifdef _WIN32

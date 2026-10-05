@@ -66,6 +66,16 @@ bool TranslationContext::emitScalar(const RdnaInstruction& inst) {
         emitControlNop();
         return true;
     }
+    case RdnaOpcode::SGetregB32: {
+        const std::uint32_t field = inst.source0.value;
+        const std::uint32_t offset = (field >> 6u) & 0x1fu;
+        const std::uint32_t size = ((field >> 11u) & 0x1fu) + 1u;
+        if ((field & 0x3fu) != 1u || offset + size > 4u) {
+            throw std::runtime_error("s_getreg_b32 at pc " + std::to_string(inst.programCounter) + " reads hardware register " + std::to_string(field & 0x3fu) + " bits " + std::to_string(offset) + ".." + std::to_string(offset + size - 1u) + ": only the MODE round mode fields are modeled");
+        }
+        writeRawU32(inst.destination, IrU32(ir.Constant(0u)));
+        return true;
+    }
     case RdnaOpcode::SCmovkI32: {
         const IrU32 previous = readU32(inst.destination);
         writeRawU32(inst.destination, IrU32(ir.Select(ir.GetScc(), ir.Constant(inst.source0.value), previous.Value())));
@@ -105,10 +115,10 @@ bool TranslationContext::emitScalar(const RdnaInstruction& inst) {
         sSaveexec(inst, IrOpcode::LogicalXor, false, false, false, true);
         return true;
     case RdnaOpcode::SAndn1WrexecB32:
-        sSaveexec(inst, IrOpcode::LogicalAnd, false, true, false, false, false);
+        sSaveexec(inst, IrOpcode::LogicalAnd, false, true, false, false, true);
         return true;
     case RdnaOpcode::SAndn2WrexecB32:
-        sSaveexec(inst, IrOpcode::LogicalAnd, true, false, false, false, false);
+        sSaveexec(inst, IrOpcode::LogicalAnd, true, false, false, false, true);
         return true;
     case RdnaOpcode::SAndSaveexecB64:
         sSaveexec(inst, IrOpcode::LogicalAnd, false, false, true);
@@ -141,10 +151,10 @@ bool TranslationContext::emitScalar(const RdnaInstruction& inst) {
         sSaveexec(inst, IrOpcode::LogicalOr, false, true, true);
         return true;
     case RdnaOpcode::SAndn1WrexecB64:
-        sSaveexec(inst, IrOpcode::LogicalAnd, false, true, true, false, false);
+        sSaveexec(inst, IrOpcode::LogicalAnd, false, true, true, false, true);
         return true;
     case RdnaOpcode::SAndn2WrexecB64:
-        sSaveexec(inst, IrOpcode::LogicalAnd, true, false, true, false, false);
+        sSaveexec(inst, IrOpcode::LogicalAnd, true, false, true, false, true);
         return true;
     case RdnaOpcode::SAddU32:
         addU32(inst, false, false);
@@ -395,6 +405,12 @@ bool TranslationContext::emitScalar(const RdnaInstruction& inst) {
     case RdnaOpcode::SIcacheInv:
     case RdnaOpcode::SIncperflevel:
     case RdnaOpcode::SDecperflevel:
+        emitControlNop();
+        return true;
+    case RdnaOpcode::SRoundMode:
+        if (inst.source0.value != 0u) {
+            throw std::runtime_error("s_round_mode " + std::to_string(inst.source0.value) + " at pc " + std::to_string(inst.programCounter) + " selects a rounding mode other than round to nearest even");
+        }
         emitControlNop();
         return true;
     case RdnaOpcode::SDenormMode:

@@ -639,21 +639,15 @@ int DoReserveVirtual(void** addr, size_t len, int flags, size_t alignment) {
     ValidateOutput(addr);
     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
     const bool fixed = *addr != nullptr && (flags & GuestMapFixedFlag) != 0;
-    // A fixed reservation over the title's own mappings replaces them, as MAP_FIXED does (Unity's
-    // virtual allocator decommits a range by reserving it again); MAP_NO_OVERWRITE keeps the error.
-    constexpr int GuestMapNoOverwrite = 0x80;
-    if (fixed && (flags & GuestMapNoOverwrite) == 0) {
-        bool replaced = false;
-        {
-            GuestAllocations::Mutation probe;
-            replaced = probe.Covers(*addr, len);
-        }
-        if (replaced) {
-            const int unmapped = DoMunmap(*addr, len);
-            if (unmapped != 0) return unmapped;
-        }
-    }
     GuestAllocations::Mutation mutation;
+    if (fixed && mutation.Covers(*addr, len)) {
+        constexpr int GuestMapNoOverwrite = 0x80;
+        if ((flags & GuestMapNoOverwrite) == 0 && RemapFixedIntoRegistered(mutation, *addr, len, 0, GuestMapFixedFlag)) {
+            RecordProtection(*addr, len, 0);
+            return 0;
+        }
+        mutation.RequireAvailable(*addr, len);
+    }
     if (fixed) mutation.RequireAvailable(*addr, len);
     constexpr int GuestMapNoCoalesce = 0x400000;
     void* mapped = MapAligned(fixed ? *addr : nullptr, len, PROT_NONE, fixed ? GuestMapFixedFlag | (flags & GuestMapNoCoalesce) : 0, alignment);

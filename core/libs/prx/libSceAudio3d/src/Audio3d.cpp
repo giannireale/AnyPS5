@@ -5,6 +5,7 @@
 #include <mutex>
 #include <vector>
 #include "SceTypes.hpp"
+#include "prx/libc/include/General.hpp"
 
 namespace {
 
@@ -53,21 +54,17 @@ int APS5_VABI sceAudio3dInitialize(std::int64_t reserved) {
 }
 
 void APS5_VABI sceAudio3dGetDefaultOpenParameters(Audio3dOpenParameters* p) {
-    if (p == nullptr) return;
-    std::memset(p, 0, sizeof(Audio3dOpenParameters));
-    p->size_this = sizeof(Audio3dOpenParameters);
-    p->granularity = DefaultGranularity;
-    p->rate = DefaultRate;
-    p->max_objects = DefaultMaxObjects;
-    p->queue_depth = DefaultQueueDepth;
-    p->num_beds = DefaultNumBeds;
+    if (p == nullptr) APS5_INVALID_ARG_EX;
+    constexpr Audio3dOpenParameters defaults{0x20, 256, 0, 512, 2, 2, 0, 0};
+    static_assert(offsetof(Audio3dOpenParameters, num_beds) == 0x20);
+    std::memcpy(p, &defaults, defaults.size_this);
 }
 
 int APS5_VABI sceAudio3dPortOpen(int user_id, const Audio3dOpenParameters* parameters, std::uint32_t* id) {
     (void)user_id;
     if (parameters == nullptr || id == nullptr) return SCE_AUDIO3D_ERROR_INVALID_PARAMETER;
-    if (parameters->size_this != sizeof(Audio3dOpenParameters)) return SCE_AUDIO3D_ERROR_INVALID_PARAMETER;
-    if (parameters->granularity == 0 || parameters->rate == 0) return SCE_AUDIO3D_ERROR_INVALID_PARAMETER;
+    if (parameters->size_this != 0x20 && parameters->size_this != sizeof(Audio3dOpenParameters)) return SCE_AUDIO3D_ERROR_INVALID_PARAMETER;
+    if (parameters->granularity == 0) return SCE_AUDIO3D_ERROR_INVALID_PARAMETER;
     if (parameters->queue_depth == 0 || parameters->queue_depth > MaxQueueDepth) return SCE_AUDIO3D_ERROR_INVALID_PARAMETER;
     if (parameters->max_objects == 0) return SCE_AUDIO3D_ERROR_INVALID_PARAMETER;
     std::lock_guard lock(g_lock);
@@ -75,7 +72,9 @@ int APS5_VABI sceAudio3dPortOpen(int user_id, const Audio3dOpenParameters* param
     if (g_ports.size() >= MaxPorts) return SCE_AUDIO3D_ERROR_OUT_OF_RESOURCES;
     Port port;
     port.id = g_nextPort++;
-    port.parameters = *parameters;
+    std::memcpy(&port.parameters, parameters, parameters->size_this);
+    if (port.parameters.rate == 0) port.parameters.rate = DefaultRate;
+    if (parameters->size_this == 0x20) port.parameters.num_beds = DefaultNumBeds;
     const auto assigned = port.id;
     g_ports[assigned] = std::move(port);
     *id = assigned;

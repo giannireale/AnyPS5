@@ -215,4 +215,9 @@ int APS5_VABI sceHttp2CookieFlush(int lib_http2_ctx_id) {
     return 0;
 }
 
+int APS5_VABI sceHttp2GetMemoryPoolStats() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 }

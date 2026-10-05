@@ -319,6 +319,7 @@ EmbeddedFetchPlan EmbeddedVertexFetchAnalyzer::Analyze(const RdnaProgram& progra
                 dst.constant = inst.source0.value;
             }
             break;
+        case RdnaOpcode::SGetregB32:
         case RdnaOpcode::SCmovkI32:
             if (isScalarOperand(inst.destination)) {
                 clearScalarRange(sgprs, inst.destination, 1u);

@@ -258,6 +258,11 @@ int APS5_VABI sceHttpUnknown01(void) {
     return 0;
 }
 
+int APS5_VABI sceHttpParseResponseHeader(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 int APS5_VABI sceHttpCreateRequest2(int conn_id, const char* method, const char* path, uint64_t content_length) {
     (void)conn_id;
     (void)method;

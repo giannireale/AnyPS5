@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <stdexcept>
 
 extern "C" {
 int APS5_VABI sceAudio3dInitialize(std::int64_t reserved);
@@ -35,9 +36,12 @@ int main() {
     Require(sceAudio3dInitialize(1) != 0, "a non zero reserved argument was accepted");
 
     sceAudio3dGetDefaultOpenParameters(&parameters);
-    Require(parameters.size_this == sizeof(Audio3dOpenParameters), "the defaults do not carry their own size");
-    Require(parameters.granularity > 0 && parameters.rate > 0 && parameters.queue_depth > 0, "the defaults are unusable");
-    sceAudio3dGetDefaultOpenParameters(nullptr);
+    Require(parameters.size_this == 0x20, "the default ABI size is not 32 bytes");
+    Require(parameters.granularity > 0 && parameters.rate == 0 && parameters.queue_depth > 0, "the defaults are unusable");
+    bool invalidDestination = false;
+    try { sceAudio3dGetDefaultOpenParameters(nullptr); }
+    catch (const std::invalid_argument&) { invalidDestination = true; }
+    Require(invalidDestination, "a null default destination was accepted");
 
     Audio3dOpenParameters broken = parameters;
     broken.size_this = 8;
@@ -46,8 +50,8 @@ int main() {
     broken.queue_depth = 0;
     Require(sceAudio3dPortOpen(0, &broken, &port) != 0, "an empty queue was accepted");
     broken = parameters;
-    broken.rate = 0;
-    Require(sceAudio3dPortOpen(0, &broken, &port) != 0, "a zero sample rate was accepted");
+    broken.granularity = 0;
+    Require(sceAudio3dPortOpen(0, &broken, &port) != 0, "a zero granularity was accepted");
 
     Require(sceAudio3dPortOpen(0, &parameters, &port) == 0 && port != 0, "the port did not open");
 

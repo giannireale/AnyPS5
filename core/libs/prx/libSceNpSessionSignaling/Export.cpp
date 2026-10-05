@@ -66,4 +66,14 @@ std::int32_t APS5_VABI sceNpSessionSignalingGetConnectionStatus(const void*, con
 std::int32_t APS5_VABI sceNpSessionSignalingGetLocalNetInfo(const void*, const void*, const void*, const void*) {
     return static_cast<std::int32_t>(0x80550006u);
 }
+
+int APS5_VABI sceNpSessionSignalingGetMemoryInfo(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNpSessionSignalingGetConnectionStatistics(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
 }
