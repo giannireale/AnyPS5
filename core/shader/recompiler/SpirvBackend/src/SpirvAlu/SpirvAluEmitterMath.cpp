@@ -807,7 +807,17 @@ std::uint32_t EmitFPUnordEqual32(SpirvEmitterState& state, std::uint32_t arg0, s
 }
 
 std::uint32_t EmitFPOrdNotEqual32(SpirvEmitterState& state, std::uint32_t arg0, std::uint32_t arg1) {
-    return EmitNative<spv::OpFOrdNotEqual, IrType::U1>(state, arg0, arg1);
+    // Preserve ordered NaN semantics when a comparison feeds a subgroup ballot.
+    // Some drivers lose the ordered check in that path; classify the raw bits.
+    const auto isNan = [&](std::uint32_t value) {
+        const auto bits = Unary(state, spv::OpBitcast, TypeU32(state), value);
+        const auto magnitude = Binary(state, spv::OpBitwiseAnd, TypeU32(state), bits, ConstantU32(state, 0x7fffffffu));
+        return Binary(state, spv::OpUGreaterThan, TypeBool(state), magnitude, ConstantU32(state, 0x7f800000u));
+    };
+    const auto anyNan = Binary(state, spv::OpLogicalOr, TypeBool(state), isNan(arg0), isNan(arg1));
+    const auto ordered = Unary(state, spv::OpLogicalNot, TypeBool(state), anyNan);
+    const auto different = EmitNative<spv::OpFOrdNotEqual, IrType::U1>(state, arg0, arg1);
+    return Binary(state, spv::OpLogicalAnd, TypeBool(state), ordered, different);
 }
 
 std::uint32_t EmitFPUnordNotEqual32(SpirvEmitterState& state, std::uint32_t arg0, std::uint32_t arg1) {
