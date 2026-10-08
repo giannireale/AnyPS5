@@ -2654,6 +2654,7 @@ int main(int argc, char** argv) {
             unrestricted.depthRangeUnrestricted = true;
             AgcDriver::Graphics::ValidateDepthBounds(unrestricted, bounded);
         }
+        RunGuestLeaseWaitTests();
         stateTests();
         hardwareScreenOffsetTests();
         srgb8TargetTests();
