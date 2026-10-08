@@ -142,6 +142,7 @@ private:
         append(key, value.earlyZ);
         append(key, value.executeOnNoop);
         append(key, value.conservativeZExport);
+        append(key, value.orderedPixelShader);
         append(key, value.targetOutputMode);
         append(key, value.targetExportMapping);
     }
