@@ -430,7 +430,7 @@ void ShaderStageTests() {
         queue.context[0x2d5] = value;
         expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "reserved");
     }
-    for (const auto bit : {1u, 8u, 0x40u, 0x100u, 0x200u, 0x400u, 0x1000u, 0x4000u, 0x8000u, 0x80000u, 0x200000u, 0x800000u, 0x1000000u}) {
+    for (const auto bit : {1u, 8u, 0x40u, 0x100u, 0x200u, 0x400u, 0x1000u, 0x4000u, 0x80000u, 0x200000u, 0x800000u, 0x1000000u}) {
         queue.context[0x2d5] = 0x2000u | bit;
         expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "unsupported vertex");
     }
@@ -642,6 +642,33 @@ void DisabledColorTests() {
     queue.context[0x00b] = std::bit_cast<std::uint32_t>(1.0f);
     const auto depthOnly = AgcDriver::Graphics::DecodeState(queue);
     Require(!depthOnly.hasColorTarget && depthOnly.depth && depthOnly.depthTest && depthOnly.depthWrite && depthOnly.renderExtent.height == 64, "COLOR_INVALID discarded a depth-only draw");
+}
+
+void TuningFieldTests() {
+    auto queue = makeState();
+    queue.context[0x1b3] = 2;
+    queue.context[0x1b4] = 2;
+    const auto baseline = AgcDriver::Graphics::DecodeState(queue);
+    queue.context[0x292] = 0x22;
+    auto state = AgcDriver::Graphics::DecodeState(queue);
+    Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "ALTERNATE_RBS_PER_TILE was rejected");
+    Require(state.scissor.offset.x == baseline.scissor.offset.x && state.scissor.extent.width == baseline.scissor.extent.width && state.scissor.extent.height == baseline.scissor.extent.height, "ALTERNATE_RBS_PER_TILE changed the scissor");
+    queue.context[0x292] = 0x26;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "scan conversion mode");
+    queue.context[0x292] = 2;
+    queue.context[0x202] = 0xcc0011;
+    state = AgcDriver::Graphics::DecodeState(queue);
+    Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "DISABLE_DUAL_QUAD was rejected");
+    Require(state.hasColorTarget && state.blend.colorWriteMask == baseline.blend.colorWriteMask, "DISABLE_DUAL_QUAD changed color output");
+    queue.context[0x202] = 0xcc0013;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "copy ROP");
+    queue.context[0x202] = 0xcc0010;
+    for (const auto groups : {1u, 2u, 15u}) {
+        queue.context[0x2d5] = 0x2000u | (groups << 15u);
+        state = AgcDriver::Graphics::DecodeState(queue);
+        Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "MAX_PRIMGRP_IN_WAVE was rejected");
+        Require(state.stages.path == AgcDriver::Graphics::ShaderPath::Vertex && state.stages.vertexWaveSize == 64u, "MAX_PRIMGRP_IN_WAVE changed vertex routing");
+    }
 }
 
 void CompactedExportTests() {
@@ -2798,6 +2825,7 @@ int main(int argc, char** argv) {
         cmaskTests();
         ShaderStageTests();
         MeshShaderTranslationTests();
+        TuningFieldTests();
         PixelInputLayoutTests();
         ComputeScratchTests();
         InitialContextTests();
