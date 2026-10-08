@@ -6,124 +6,266 @@
 #include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libkernel/Pthread/include/Pthread.hpp"
 #include <array>
-#include <atomic>
 #include <cstring>
+#include <memory>
+#include <mutex>
+#include <stdexcept>
 #ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#endif
+
+extern "C" Pthread APS5_VABI scePthreadSelf();
+#ifdef _WIN32
+extern "C" void Aps5RedirectedEntryStub();
 #endif
 
 namespace {
 
-using GuestExceptionHandler = void (APS5_VABI*)(int signum, void* context);
-constexpr int kGuestSignals = 128;
-std::array<std::atomic<GuestExceptionHandler>, kGuestSignals> g_exceptionHandlers{};
-
-// The handler's context is the console's ucontext_t: the signal mask, 0x30 reserved bytes, then the
-// FreeBSD amd64 mcontext. PS5Util (Unity) reads the interrupted stack pointer at offset 0xf8.
 struct GuestMcontext {
-    std::uint64_t onstack, rdi, rsi, rdx, rcx, r8, r9, rax, rbx, rbp, r10, r11, r12, r13, r14, r15;
+    std::uint64_t onstack;
+    std::uint64_t rdi;
+    std::uint64_t rsi;
+    std::uint64_t rdx;
+    std::uint64_t rcx;
+    std::uint64_t r8;
+    std::uint64_t r9;
+    std::uint64_t rax;
+    std::uint64_t rbx;
+    std::uint64_t rbp;
+    std::uint64_t r10;
+    std::uint64_t r11;
+    std::uint64_t r12;
+    std::uint64_t r13;
+    std::uint64_t r14;
+    std::uint64_t r15;
     std::uint32_t trapno;
-    std::uint16_t fs, gs;
+    std::uint16_t fs;
+    std::uint16_t gs;
     std::uint64_t addr;
     std::uint32_t flags;
-    std::uint16_t es, ds;
-    std::uint64_t err, rip, cs, rflags, rsp, ss;
-    std::uint64_t len, fpformat, ownedfp;
-    alignas(16) std::uint8_t fpstate[512];
-    std::uint64_t fsbase, gsbase, xfpustate, xfpustateLength, spare[4];
+    std::uint16_t es;
+    std::uint16_t ds;
+    std::uint64_t err;
+    std::uint64_t rip;
+    std::uint64_t cs;
+    std::uint64_t rflags;
+    std::uint64_t rsp;
+    std::uint64_t ss;
+    std::uint64_t len;
+    std::uint64_t fpformat;
+    std::uint64_t ownedfp;
+    std::uint64_t lbrfrom;
+    std::uint64_t lbrto;
+    std::uint64_t aux1;
+    std::uint64_t aux2;
+    std::uint64_t fpstate[104];
+    std::uint64_t fsbase;
+    std::uint64_t gsbase;
+    std::uint64_t spare[6];
 };
 
 struct GuestUcontext {
-    std::uint8_t sigmask[16];
-    std::uint8_t reserved[0x30];
+    std::uint32_t sigmask[4];
+    std::int32_t reserved[12];
     GuestMcontext mcontext;
-    std::uint8_t tail[0x80];
+    GuestUcontext* link;
+    void* stackPointer;
+    std::uint64_t stackSize;
+    std::int32_t stackFlags;
+    std::int32_t stackAlign;
+    std::int32_t flags;
+    std::int32_t spare[4];
+    std::int32_t tail[3];
 };
-static_assert(offsetof(GuestUcontext, mcontext) + offsetof(GuestMcontext, rsp) == 0xf8, "guest ucontext rsp offset");
 
-#ifdef _WIN32
-void FillGuestContext(const CONTEXT& host, GuestUcontext& guest) {
-    std::memset(&guest, 0, sizeof(guest));
-    auto& m = guest.mcontext;
-    m.rdi = host.Rdi; m.rsi = host.Rsi; m.rdx = host.Rdx; m.rcx = host.Rcx; m.r8 = host.R8; m.r9 = host.R9;
-    m.rax = host.Rax; m.rbx = host.Rbx; m.rbp = host.Rbp; m.r10 = host.R10; m.r11 = host.R11; m.r12 = host.R12;
-    m.r13 = host.R13; m.r14 = host.R14; m.r15 = host.R15; m.rip = host.Rip; m.cs = host.SegCs;
-    m.rflags = host.EFlags; m.rsp = host.Rsp; m.ss = host.SegSs; m.len = sizeof(GuestMcontext);
-    std::memcpy(m.fpstate, &host.FltSave, sizeof(m.fpstate));
+static_assert(offsetof(GuestUcontext, mcontext) == 0x40);
+static_assert(offsetof(GuestUcontext, mcontext) + offsetof(GuestMcontext, rsp) == 0xf8);
+
+using GuestExceptionHandler = void (APS5_VABI *)(int, void*);
+
+constexpr std::array<int, 6> AllowedSignals{1, 4, 8, 10, 11, 30};
+
+std::mutex handlersLock;
+std::array<void*, 32> handlers{};
+
+bool Allowed(int signum) {
+    for (const int allowed : AllowedSignals)
+        if (allowed == signum) return true;
+    return false;
 }
 
-// Windows cannot interrupt a thread blocked in a non-alertable wait (winpthreads), so the handler is
-// not injected into the target: the target is suspended and stays suspended while a proxy host
-// thread runs the handler as the target (scePthreadSelf() and the interrupted registers), which is
-// what a signal handler observes on the console. The target resumes when the handler returns.
-struct RaisedSignal {
-    HANDLE target;
-    Pthread thread;
+GuestExceptionHandler Handler(int signum) {
+    std::lock_guard lock(handlersLock);
+    return reinterpret_cast<GuestExceptionHandler>(handlers[signum]);
+}
+
+#ifdef _WIN32
+constexpr std::size_t RedZone = 128;
+constexpr std::size_t HomeArea = 32;
+
+struct Delivery {
     GuestExceptionHandler handler;
     int signum;
-    GuestUcontext context;
-    GuestUcontext* stackContext;
+    CONTEXT context;
 };
 
-DWORD WINAPI DeliverRaisedSignal(void* parameter) {
-    auto* raised = static_cast<RaisedSignal*>(parameter);
-    PthreadExchangeCurrent(raised->thread);
-    raised->handler(raised->signum, raised->stackContext);
-    PthreadExchangeCurrent(nullptr);
-    ResumeThread(raised->target);
-    delete raised;
-    return 0;
+void Deliver(GuestExceptionHandler handler, int signum, CONTEXT& context) {
+    GuestUcontext ucontext{};
+    auto& m = ucontext.mcontext;
+    m.rdi = context.Rdi;
+    m.rsi = context.Rsi;
+    m.rdx = context.Rdx;
+    m.rcx = context.Rcx;
+    m.r8 = context.R8;
+    m.r9 = context.R9;
+    m.rax = context.Rax;
+    m.rbx = context.Rbx;
+    m.rbp = context.Rbp;
+    m.r10 = context.R10;
+    m.r11 = context.R11;
+    m.r12 = context.R12;
+    m.r13 = context.R13;
+    m.r14 = context.R14;
+    m.r15 = context.R15;
+    m.rip = context.Rip;
+    m.rsp = context.Rsp;
+    m.rflags = context.EFlags;
+    m.cs = context.SegCs;
+    m.ss = context.SegSs;
+    m.len = sizeof(GuestMcontext);
+    static_assert(sizeof(context.FltSave) <= sizeof(m.fpstate));
+    std::memcpy(m.fpstate, &context.FltSave, sizeof(context.FltSave));
+    handler(signum, &ucontext);
+    context.Rdi = m.rdi;
+    context.Rsi = m.rsi;
+    context.Rdx = m.rdx;
+    context.Rcx = m.rcx;
+    context.R8 = m.r8;
+    context.R9 = m.r9;
+    context.Rax = m.rax;
+    context.Rbx = m.rbx;
+    context.Rbp = m.rbp;
+    context.R10 = m.r10;
+    context.R11 = m.r11;
+    context.R12 = m.r12;
+    context.R13 = m.r13;
+    context.R14 = m.r14;
+    context.R15 = m.r15;
+    context.Rip = m.rip;
+    context.Rsp = m.rsp;
+    context.EFlags = static_cast<DWORD>(m.rflags);
+    std::memcpy(&context.FltSave, m.fpstate, sizeof(context.FltSave));
 }
-#endif
 
-int RaiseOnThread(Pthread thread, int signum, GuestExceptionHandler handler) {
-#ifdef _WIN32
+[[noreturn]] void RedirectedEntry(Delivery* delivery) {
+    CONTEXT context = delivery->context;
+    Deliver(delivery->handler, delivery->signum, context);
+    RtlRestoreContext(&context, nullptr);
+    std::abort();
+}
+
+bool StackWritable(DWORD64 low, DWORD64 high) {
+    for (DWORD64 address = low; address < high;) {
+        MEMORY_BASIC_INFORMATION info{};
+        if (VirtualQuery(reinterpret_cast<void*>(address), &info, sizeof(info)) != sizeof(info)) return false;
+        if (info.State != MEM_COMMIT || (info.Protect & PAGE_GUARD) != 0 || (info.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) == 0) return false;
+        address = reinterpret_cast<DWORD64>(info.BaseAddress) + info.RegionSize;
+    }
+    return true;
+}
+
+void CALLBACK WaitingEntry(ULONG_PTR parameter) {
+    auto* delivery = reinterpret_cast<Delivery*>(parameter);
+    const auto handler = delivery->handler;
+    const int signum = delivery->signum;
+    delete delivery;
+    CONTEXT context{};
+    RtlCaptureContext(&context);
+    Deliver(handler, signum, context);
+}
+
+static_assert(HomeArea + 8 == 40, "Aps5RedirectedEntryStub finds the delivery 40 bytes above its stack pointer");
+static_assert(offsetof(Delivery, context) == 16 && offsetof(CONTEXT, Rax) == 0x78 && offsetof(CONTEXT, Rbp) == 0xa0 && offsetof(CONTEXT, R15) == 0xf0, "Aps5RedirectedEntryStub stores the live registers into the delivery's context");
+
+bool Exited(HANDLE native) {
+    return WaitForSingleObject(native, 0) == WAIT_OBJECT_0;
+}
+
+bool RaiseOn(Pthread thread, GuestExceptionHandler handler, int signum) {
+    if (thread == scePthreadSelf()) {
+        CONTEXT context{};
+        RtlCaptureContext(&context);
+        Deliver(handler, signum, context);
+        return true;
+    }
     const auto native = static_cast<HANDLE>(thread->nativeHandle);
-    if (native == nullptr) return SCE_KERNEL_ERROR_ESRCH;
-    if (GetThreadId(native) == GetCurrentThreadId()) {
-        CONTEXT self{};
-        RtlCaptureContext(&self);
-        GuestUcontext context;
-        FillGuestContext(self, context);
-        handler(signum, &context);
-        return 0;
+    auto queued = std::make_unique<Delivery>(Delivery{handler, signum, {}});
+    if (SuspendThread(native) == static_cast<DWORD>(-1)) {
+        if (Exited(native)) return false;
+        throw std::runtime_error("sceKernelRaiseException: cannot suspend the target thread");
     }
-    if (SuspendThread(native) == static_cast<DWORD>(-1)) return SCE_KERNEL_ERROR_ESRCH;
-    CONTEXT interrupted{};
-    interrupted.ContextFlags = CONTEXT_FULL | CONTEXT_FLOATING_POINT;
-    if (!GetThreadContext(native, &interrupted)) {
+    if (Exited(native)) {
         ResumeThread(native);
-        return SCE_KERNEL_ERROR_ESRCH;
+        return false;
     }
-    auto* raised = new RaisedSignal{native, thread, handler, signum, {}, nullptr};
-    FillGuestContext(interrupted, raised->context);
-    // As the console kernel does, the context goes on the interrupted stack below its red zone, and
-    // the stack pointer handed to the handler covers it: a conservative collector scanning from it
-    // then also sees the pointers held in the interrupted registers.
-    constexpr std::uintptr_t redZone = 128;
-    const auto contextAddress = (interrupted.Rsp - redZone - sizeof(GuestUcontext)) & ~static_cast<std::uintptr_t>(63);
-    raised->stackContext = reinterpret_cast<GuestUcontext*>(contextAddress);
-    *raised->stackContext = raised->context;
-    raised->stackContext->mcontext.rsp = contextAddress;
-    const HANDLE proxy = CreateThread(nullptr, 1u << 20, &DeliverRaisedSignal, raised, 0, nullptr);
-    if (proxy == nullptr) {
-        delete raised;
+    if (thread->waitCount.load(std::memory_order_seq_cst) > 0) {
+        const bool accepted = QueueUserAPC(WaitingEntry, native, reinterpret_cast<ULONG_PTR>(queued.get())) != 0;
         ResumeThread(native);
-        return SCE_KERNEL_ERROR_EAGAIN;
+        if (!accepted) throw std::runtime_error("sceKernelRaiseException: cannot queue delivery to the waiting thread");
+        queued.release();
+        return true;
     }
-    CloseHandle(proxy);
-    return 0;
-#else
-    (void)thread;
-    (void)signum;
-    (void)handler;
-    NotImplemented_nid_no_patch("sceKernelRaiseException: guest signal delivery");
-    return 0;
-#endif
+    alignas(16) Delivery delivery{handler, signum, {}};
+    delivery.context.ContextFlags = CONTEXT_FULL | CONTEXT_FLOATING_POINT;
+    if (!GetThreadContext(native, &delivery.context)) {
+        ResumeThread(native);
+        throw std::runtime_error("sceKernelRaiseException: cannot read the target thread context");
+    }
+    const DWORD64 slot = (delivery.context.Rsp - RedZone - sizeof(Delivery)) & ~static_cast<DWORD64>(15);
+    if (!StackWritable(slot - HomeArea - 8, delivery.context.Rsp - RedZone)) {
+        ResumeThread(native);
+        throw std::runtime_error("sceKernelRaiseException: the target thread stack below its red zone is not committed");
+    }
+    std::memcpy(reinterpret_cast<void*>(slot), &delivery, sizeof(Delivery));
+    CONTEXT redirected = delivery.context;
+    redirected.Rsp = slot - HomeArea - 8;
+    redirected.Rip = reinterpret_cast<DWORD64>(&Aps5RedirectedEntryStub);
+    if (!SetThreadContext(native, &redirected)) {
+        ResumeThread(native);
+        throw std::runtime_error("sceKernelRaiseException: cannot redirect the target thread");
+    }
+    ResumeThread(native);
+    return true;
 }
+#endif
 
 }
+
+#ifdef _WIN32
+extern "C" [[noreturn]] void Aps5RedirectedEntry(void* delivery) {
+    RedirectedEntry(static_cast<Delivery*>(delivery));
+}
+asm(".text\n"
+    ".globl Aps5RedirectedEntryStub\n"
+    "Aps5RedirectedEntryStub:\n"
+    "    movq %rax, 176(%rsp)\n"
+    "    movq %rcx, 184(%rsp)\n"
+    "    movq %rdx, 192(%rsp)\n"
+    "    movq %rbx, 200(%rsp)\n"
+    "    movq %rbp, 216(%rsp)\n"
+    "    movq %rsi, 224(%rsp)\n"
+    "    movq %rdi, 232(%rsp)\n"
+    "    movq %r8, 240(%rsp)\n"
+    "    movq %r9, 248(%rsp)\n"
+    "    movq %r10, 256(%rsp)\n"
+    "    movq %r11, 264(%rsp)\n"
+    "    movq %r12, 272(%rsp)\n"
+    "    movq %r13, 280(%rsp)\n"
+    "    movq %r14, 288(%rsp)\n"
+    "    movq %r15, 296(%rsp)\n"
+    "    leaq 40(%rsp), %rcx\n"
+    "    jmp Aps5RedirectedEntry\n");
+#endif
 
 extern "C" {
 
@@ -131,22 +273,31 @@ extern "C" {
 // Exception payloads belong to the guest C++ runtime. Keep the diagnostic
 // useful without interpreting a host-incompatible exception object layout.
 int APS5_VABI sceKernelInstallExceptionHandler(int signum, void* handler) {
- if (signum <= 0 || signum >= kGuestSignals || handler == nullptr) return SCE_KERNEL_ERROR_EINVAL;
- g_exceptionHandlers[signum].store(reinterpret_cast<GuestExceptionHandler>(handler), std::memory_order_release);
+ if (!Allowed(signum) || handler == nullptr) return SCE_KERNEL_ERROR_EINVAL;
+ std::lock_guard lock(handlersLock);
+ if (handlers[signum] != nullptr) return SCE_KERNEL_ERROR_EAGAIN;
+ handlers[signum] = handler;
  return 0;
 }
 
 int APS5_VABI sceKernelRemoveExceptionHandler(int signum) {
- if (signum <= 0 || signum >= kGuestSignals) return SCE_KERNEL_ERROR_EINVAL;
- g_exceptionHandlers[signum].store(nullptr, std::memory_order_release);
+ if (!Allowed(signum)) return SCE_KERNEL_ERROR_EINVAL;
+ std::lock_guard lock(handlersLock);
+ handlers[signum] = nullptr;
  return 0;
 }
 
 int APS5_VABI sceKernelRaiseException(Pthread thread, int signum) {
- if (thread == nullptr || signum <= 0 || signum >= kGuestSignals) return SCE_KERNEL_ERROR_EINVAL;
- const auto handler = g_exceptionHandlers[signum].load(std::memory_order_acquire);
- if (handler == nullptr) return SCE_KERNEL_ERROR_EINVAL;
- return RaiseOnThread(thread, signum, handler);
+ if (signum != 30) return SCE_KERNEL_ERROR_EINVAL;
+ if (thread == nullptr || thread->_finished.load(std::memory_order_acquire)) return SCE_KERNEL_ERROR_ESRCH;
+ const auto handler = Handler(signum);
+ if (handler == nullptr) throw std::runtime_error("sceKernelRaiseException: no handler installed for the signal");
+#ifdef _WIN32
+ return RaiseOn(thread, handler, signum) ? 0 : SCE_KERNEL_ERROR_ESRCH;
+#else
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+#endif
 }
 
 void APS5_VABI sceKernelDebugRaiseException(int c1, int c2) {

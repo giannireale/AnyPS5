@@ -5,9 +5,12 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
+#include "prx/libkernel/Pthread/include/Pthread.hpp"
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #else
 #include <cerrno>
@@ -150,6 +153,18 @@ int APS5_VABI sceKernelDirectMemoryQuery(int64_t offset, int flags, void* info, 
  return 0;
 }
 
+int APS5_VABI sceKernelGetDirectMemoryType(int64_t offset, int* memory_type, int64_t* start, int64_t* end) {
+ if (!memory_type || !start || !end) return SCE_KERNEL_ERROR_EINVAL;
+ int64_t blockStart = 0;
+ int64_t blockEnd = 0;
+ int blockType = 0;
+ if (!DirectMemoryFind(offset, false, &blockStart, &blockEnd, &blockType)) return SCE_KERNEL_ERROR_ENOENT;
+ *memory_type = blockType;
+ *start = blockStart;
+ *end = blockEnd;
+ return 0;
+}
+
 size_t APS5_VABI sceKernelGetDirectMemorySize(void) {
  return DIRECT_MEMORY_SIZE;
 }
@@ -176,7 +191,6 @@ int APS5_VABI sceKernelMapNamedDirectMemory(void** addr, size_t len, int prot, i
  return result;
 }
 
-APS5_EXPORT("4h6F1LLbTiw", sceKernelMapNamedFlexibleMemory);
 int32_t APS5_VABI sceKernelMapNamedFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags, const char* name) {
  const int result = _mapFlexible(addr_in_out, len, prot, flags);
  if (result == 0 && name) sceKernelSetVirtualRangeName(*addr_in_out, len, name);
@@ -195,6 +209,10 @@ int APS5_VABI sceKernelMunmap(uint64_t vaddr, size_t len) {
  const int result = DoMunmap(reinterpret_cast<void*>(vaddr), len);
  if (result == 0) _releaseFlexible(static_cast<uintptr_t>(vaddr), len);
  return result;
+}
+
+int APS5_VABI sceKernelReleaseFlexibleMemory(void* addr, size_t len) {
+ return sceKernelMunmap(reinterpret_cast<uint64_t>(addr), len);
 }
 
 int APS5_VABI sceKernelReleaseDirectMemory(int64_t start, size_t len) {
@@ -225,6 +243,13 @@ int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInf
  // mapping at or above it: titles walk their mappings and check that a mapping covers a whole
  // allocation, so the answer must be the registered allocation, not a page.
  constexpr int findNext = 1;
+ std::uintptr_t reservedStart = 0;
+ std::uintptr_t reservedEnd = 0;
+ if (GuestReservation(address, &reservedStart, &reservedEnd)) {
+  info->start = reservedStart;
+  info->end = reservedEnd;
+  return 0;
+ }
  const auto lease = GuestAllocations::GuestAllocationsAcquire_nid_postfix();
  const GuestAllocations::Range* best = nullptr;
  for (const auto& range : lease) {
@@ -309,12 +334,13 @@ int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInf
 // ---------------------------------------------------------------------------
 
 int APS5_VABI sceKernelCheckedReleaseDirectMemory(int64_t start, size_t len) {
- return sceKernelReleaseDirectMemory(start, len);
+ if (start < 0 || (static_cast<uint64_t>(start) & (PS5_PAGE_SIZE - 1)) != 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
+ if (len == 0) return 0;
+ return DirectMemoryCheckedFree(start, len) ? 0 : SCE_KERNEL_ERROR_ENOENT;
 }
 
 int APS5_VABI sceKernelMtypeprotect(const void* addr, size_t len, int type, int prot) {
- (void)type;
- return DoMprotect(addr, len, prot);
+ return DoMtypeprotect(addr, len, type, prot);
 }
 
 int APS5_VABI sceKernelQueryMemoryProtection(void* addr, void** start, void** end, int* prot) {
@@ -330,25 +356,14 @@ int APS5_VABI sceKernelQueryMemoryProtection(void* addr, void** start, void** en
 // Answers for the calling thread's stack, which is what titles ask about (Unity's garbage collector
 // locates the bounds of the stack it is scanning from); other threads' stacks are not tracked.
 int APS5_VABI sceKernelIsStack(void* addr, void** start, void** end) {
- if (!start || !end) return SCE_KERNEL_ERROR_EINVAL;
- #ifdef _WIN32
- ULONG_PTR low = 0;
- ULONG_PTR high = 0;
- GetCurrentThreadStackLimits(&low, &high);
- #else
- pthread_attr_t attributes;
- if (pthread_getattr_np(pthread_self(), &attributes) != 0) return SCE_KERNEL_ERROR_EINVAL;
- void* base = nullptr;
- size_t size = 0;
- pthread_attr_getstack(&attributes, &base, &size);
- pthread_attr_destroy(&attributes);
- const auto low = reinterpret_cast<uintptr_t>(base);
- const auto high = low + size;
- #endif
- const auto address = reinterpret_cast<uintptr_t>(addr);
- if (address < low || address >= high) return SCE_KERNEL_ERROR_EINVAL;
- *start = reinterpret_cast<void*>(low);
- *end = reinterpret_cast<void*>(high);
+ std::uintptr_t stackStart = 0;
+ std::uintptr_t stackEnd = 0;
+ if (!GuestThreadStack(reinterpret_cast<std::uintptr_t>(addr), &stackStart, &stackEnd)) {
+  VirtualQueryInfo info{};
+  if (sceKernelVirtualQuery(addr, 0, &info, sizeof(info)) != 0) return SCE_KERNEL_ERROR_EACCES;
+ }
+ if (start) *start = reinterpret_cast<void*>(stackStart);
+ if (end) *end = reinterpret_cast<void*>(stackEnd);
  return 0;
 }
 
@@ -424,6 +439,10 @@ int APS5_VABI sceKernelBatchMap2(KernelBatchMapEntry* entries, int num_entries, 
  int result = 0;
  for (; processed < num_entries; ++processed) {
   auto& entry = entries[processed];
+  if (entry.length == 0 || entry.operation < OpMapDirect || entry.operation > OpTypeProtect) {
+   result = SCE_KERNEL_ERROR_EINVAL;
+   break;
+  }
   switch (entry.operation) {
   case OpMapDirect:
    result = DoMapDirect(&entry.start, entry.length, static_cast<uint8_t>(entry.protection), flags, static_cast<int64_t>(entry.offset), 0);
@@ -432,14 +451,14 @@ int APS5_VABI sceKernelBatchMap2(KernelBatchMapEntry* entries, int num_entries, 
    result = sceKernelMunmap(reinterpret_cast<uint64_t>(entry.start), entry.length);
    break;
   case OpProtect:
-  case OpTypeProtect:
    result = DoMprotect(entry.start, entry.length, static_cast<uint8_t>(entry.protection));
+   break;
+  case OpTypeProtect:
+   result = DoMtypeprotect(entry.start, entry.length, static_cast<uint8_t>(entry.type), static_cast<uint8_t>(entry.protection));
    break;
   case OpMapFlexible:
    result = _mapFlexible(&entry.start, entry.length, static_cast<uint8_t>(entry.protection), flags);
    break;
-  default:
-   throw std::invalid_argument("sceKernelBatchMap2: unsupported operation " + std::to_string(entry.operation));
   }
   if (result != 0) break;
  }

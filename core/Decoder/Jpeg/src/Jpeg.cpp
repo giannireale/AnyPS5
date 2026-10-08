@@ -9,6 +9,7 @@
 #define STBI_ONLY_JPEG
 #define STBI_NO_STDIO
 #include "stb_image.h"
+#include "turbojpeg.h"
 
 namespace Decoder::Jpeg {
 
@@ -16,10 +17,40 @@ namespace {
 
 constexpr std::uint32_t MAX_DIMENSION = 0xFFFF;
 
+class Handle {
+public:
+    Handle() : handle(tj3Init(TJINIT_COMPRESS)) {
+        if (!handle) throw std::runtime_error("Jpeg::Encode: encoder initialization failed");
+    }
+    ~Handle() { tj3Destroy(handle); }
+    Handle(const Handle&) = delete;
+    Handle& operator=(const Handle&) = delete;
+    operator tjhandle() const { return handle; }
+
+private:
+    tjhandle handle;
+};
+
+class Buffer {
+public:
+    ~Buffer() { tj3Free(data); }
+    unsigned char* data = nullptr;
+};
+
+int toSubsampling(Sampling sampling) {
+    switch (sampling) {
+    case Sampling::Yuv444: return TJSAMP_444;
+    case Sampling::Yuv422: return TJSAMP_422;
+    case Sampling::Yuv420: return TJSAMP_420;
+    }
+    throw std::invalid_argument("Jpeg::Encode: invalid sampling");
+}
+
 }  // namespace
 
 std::vector<std::uint8_t> Encode(std::span<const std::uint8_t> pixels, std::uint32_t width, std::uint32_t height,
-                                 std::uint32_t channels, int quality, Sampling sampling) {
+                                 std::uint32_t channels, int quality, Sampling sampling, std::uint32_t restartBlocks,
+                                 std::uint32_t restartRows) {
     if (width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION) {
         throw std::invalid_argument("Jpeg::Encode: unsupported image size");
     }
@@ -28,8 +59,25 @@ std::vector<std::uint8_t> Encode(std::span<const std::uint8_t> pixels, std::uint
     if (pixels.size() < static_cast<std::size_t>(width) * height * channels) {
         throw std::invalid_argument("Jpeg::Encode: pixel buffer is too small");
     }
-
-    return EncodeBaseline(pixels, width, height, channels, quality, sampling);
+    if (restartBlocks > MAX_DIMENSION || restartRows > MAX_DIMENSION || (restartBlocks != 0 && restartRows != 0)) {
+        throw std::invalid_argument("Jpeg::Encode: invalid restart interval");
+    }
+    const int subsampling = toSubsampling(sampling);
+    Handle handle;
+    if (tj3Set(handle, TJPARAM_QUALITY, quality) < 0 || tj3Set(handle, TJPARAM_SUBSAMP, channels == 1 ? TJSAMP_GRAY : subsampling) < 0) {
+        throw std::runtime_error("Jpeg::Encode: encoder configuration failed");
+    }
+    if ((restartBlocks != 0 && tj3Set(handle, TJPARAM_RESTARTBLOCKS, static_cast<int>(restartBlocks)) < 0) ||
+        (restartRows != 0 && tj3Set(handle, TJPARAM_RESTARTROWS, static_cast<int>(restartRows)) < 0)) {
+        throw std::runtime_error("Jpeg::Encode: encoder configuration failed");
+    }
+    Buffer buffer;
+    std::size_t size = 0;
+    const int pixelFormat = channels == 1 ? TJPF_GRAY : TJPF_RGB;
+    if (tj3Compress8(handle, pixels.data(), static_cast<int>(width), 0, static_cast<int>(height), pixelFormat, &buffer.data, &size) < 0) {
+        throw std::runtime_error("Jpeg::Encode: encoding failed");
+    }
+    return {buffer.data, buffer.data + size};
 }
 
 std::optional<Header> ParseHeader(std::span<const std::uint8_t> jpeg) {

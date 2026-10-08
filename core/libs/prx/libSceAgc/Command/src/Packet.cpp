@@ -146,7 +146,7 @@ bool TraceIndirectRegisters() {
 std::uint32_t* WriteIndirectRegisters(CommandBuffer* buffer, std::uint32_t opcode, const volatile ShaderRegister* registers, std::uint32_t count, const char* function) {
     const auto address = reinterpret_cast<std::uintptr_t>(registers);
     if (TraceIndirectRegisters()) std::fprintf(stderr, "[agc] %s opcode 0x%x regs %p count %u\n", function, opcode, reinterpret_cast<const void*>(address), count);
-    CheckAddress(address, 4, function);
+    if (address != 0 || count != 0) CheckAddress(address, 4, function);
     CheckBits(count, 0x3fffu, function);
     return Emit(buffer, opcode, {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u), 0x80000000u, count}, function);
 }

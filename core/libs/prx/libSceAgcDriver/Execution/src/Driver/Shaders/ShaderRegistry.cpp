@@ -6,9 +6,77 @@
 #include "Optimization/ResourceProgram.hpp"
 #include <cstdlib>
 #include <cstring>
+#include <list>
 #include <stdexcept>
+#include "RdnaDecoder/RdnaInstructionDecoder.hpp"
 
 namespace AgcDriver::DriverDetail {
+
+std::shared_ptr<const ShaderSnapshot> ReadRawComputeShader(std::uint64_t address) {
+    GuestMemory::CheckRange(reinterpret_cast<const void*>(address), sizeof(std::uint32_t), 256);
+    static std::mutex cacheMutex;
+    static std::list<std::shared_ptr<const ShaderSnapshot>> cache;
+    static std::size_t cacheBytes = 0;
+    std::shared_ptr<const ShaderSnapshot> cached;
+    {
+        std::lock_guard lock(cacheMutex);
+        const auto found = std::find_if(cache.begin(), cache.end(), [address](const auto& entry) { return entry->codeAddress == address; });
+        if (found != cache.end()) cached = *found;
+    }
+    if (cached) {
+        const auto code = std::as_bytes(std::span(cached->code));
+        GuestMemory::FlushGpuWrites(address, code.size());
+        if (GuestMemory::CompareMapped(address, code) == GuestMemory::Compare::Equal) {
+            std::lock_guard lock(cacheMutex);
+            const auto found = std::find(cache.begin(), cache.end(), cached);
+            if (found != cache.end()) cache.splice(cache.begin(), cache, found);
+            return cached;
+        }
+    }
+    constexpr std::size_t limit = 1024 * 1024;
+    const auto ranges = GuestMemory::CommittedRanges(address, limit);
+    std::uint64_t end = address;
+    for (const auto& range : ranges) {
+        if (range.first != end) break;
+        end = range.second;
+    }
+    const auto available = static_cast<std::size_t>(end - address) / sizeof(std::uint32_t);
+    ShaderSnapshot snapshot{address, 0, 0, {}, {}};
+    while (snapshot.code.size() < available) {
+        const auto previous = snapshot.code.size();
+        snapshot.code.resize(std::min(available, std::max<std::size_t>(64, previous * 2)));
+        GuestMemory::Read(address + previous * sizeof(std::uint32_t),
+            std::as_writable_bytes(std::span(snapshot.code).subspan(previous)), alignof(std::uint32_t));
+        try {
+            const auto decoded = ShaderRecompiler::RdnaInstructionDecoder{}.Decode(snapshot.code);
+            const auto& last = decoded.instructions.back();
+            snapshot.code.resize(last.programCounter / sizeof(std::uint32_t) + last.wordCount);
+            auto result = std::make_shared<const ShaderSnapshot>(std::move(snapshot));
+            std::lock_guard lock(cacheMutex);
+            const auto found = std::find_if(cache.begin(), cache.end(), [address](const auto& entry) { return entry->codeAddress == address; });
+            if (found != cache.end()) {
+                if ((*found)->code == result->code) {
+                    result = *found;
+                    cache.splice(cache.begin(), cache, found);
+                    return result;
+                }
+                cacheBytes -= (*found)->code.size() * sizeof(std::uint32_t);
+                cache.erase(found);
+            }
+            const auto bytes = result->code.size() * sizeof(std::uint32_t);
+            while (!cache.empty() && (cache.size() >= 64 || cacheBytes + bytes > 8 * 1024 * 1024)) {
+                cacheBytes -= cache.back()->code.size() * sizeof(std::uint32_t);
+                cache.pop_back();
+            }
+            cache.push_front(result);
+            cacheBytes += bytes;
+            return result;
+        } catch (const std::out_of_range&) {
+            if (snapshot.code.size() == available) break;
+        }
+    }
+    throw std::runtime_error("AGC driver: raw compute program has no reachable end within mapped code or the size limit");
+}
 
 bool FailureMemo() {
     static const bool memo = std::getenv("APS5_NO_FAILURE_MEMO") == nullptr;
@@ -95,31 +163,34 @@ std::uint64_t NullPixelProgramAddress() {
 
 void Driver::RegisterShader(const Shader* guestShader) {
     CheckFailure();
-    // Titles place shader headers at 4-byte offsets inside their own blobs (Unity), so the header
-    // is copied out instead of being read through a pointer that may break Shader's alignment.
-    constexpr std::size_t headerAlignment = 4;
-    GuestMemory::CheckRange(guestShader, sizeof(Shader), headerAlignment);
-    Shader header;
-    std::memcpy(&header, guestShader, sizeof(Shader));
-    const Shader* shader = &header;
-    require(shader->file_header == 0x34333231u && shader->version == 0x18u, "invalid shader header");
-    require(shader->header_size >= sizeof(Shader), "shader header is smaller than its fixed fields");
-    require(shader->shader_size != 0 && (shader->shader_size & 3u) == 0, "invalid shader size");
-    GuestMemory::CheckRange(guestShader, shader->header_size, headerAlignment);
-    const auto* code = const_cast<const void*>(shader->code);
-    GuestMemory::CheckRange(code, shader->shader_size, 256);
-    ShaderSnapshot snapshot{reinterpret_cast<std::uintptr_t>(code), reinterpret_cast<std::uintptr_t>(guestShader), shader->type, {}, {}};
-    snapshot.code.resize(shader->shader_size / sizeof(std::uint32_t));
-    std::memcpy(snapshot.code.data(), code, shader->shader_size);
-    snapshot.header.resize(shader->header_size);
-    std::memcpy(snapshot.header.data(), guestShader, shader->header_size);
+    GuestMemory::CheckRange(guestShader, sizeof(Shader), 1);
+    Shader fields;
+    std::memcpy(&fields, static_cast<const void*>(guestShader), sizeof(Shader));
+    require(fields.file_header == 0x34333231u && fields.version == 0x18u, "invalid guestShader header");
+    require(fields.header_size >= sizeof(Shader), "guestShader header is smaller than its fixed fields");
+    require(fields.shader_size != 0 && (fields.shader_size & 3u) == 0, "invalid guestShader size");
+    GuestMemory::CheckRange(guestShader, fields.header_size, 1);
+    const auto* code = const_cast<const void*>(fields.code);
+    GuestMemory::CheckRange(code, fields.shader_size, 256);
+    ShaderSnapshot snapshot{reinterpret_cast<std::uintptr_t>(code), reinterpret_cast<std::uintptr_t>(guestShader), fields.type, {}, {}};
+    snapshot.code.resize(fields.shader_size / sizeof(std::uint32_t));
+    std::memcpy(snapshot.code.data(), code, fields.shader_size);
+    snapshot.header.resize(fields.header_size);
+    std::memcpy(snapshot.header.data(), static_cast<const void*>(guestShader), fields.header_size);
 
     static const char* traceRegs = std::getenv("APS5_TRACE_SHADER_REGS");
     if (traceRegs != nullptr && (std::string(traceRegs) == "all" || std::strtoull(traceRegs, nullptr, 16) == snapshot.codeAddress)) {
-        std::fprintf(stderr, "[shader] 0x%llx type %u cx", static_cast<unsigned long long>(snapshot.codeAddress), shader->type);
-        for (std::uint32_t i = 0; i < shader->num_cx_registers && shader->cx_registers != nullptr; ++i) std::fprintf(stderr, " %x=%08x", shader->cx_registers[i].offset, shader->cx_registers[i].value);
+        const auto print = [](const ShaderRegister* registers, std::uint32_t count) {
+            for (std::uint32_t i = 0; i < count && registers != nullptr; ++i) {
+                ShaderRegister value;
+                std::memcpy(&value, static_cast<const void*>(registers + i), sizeof(value));
+                std::fprintf(stderr, " %x=%08x", value.offset, value.value);
+            }
+        };
+        std::fprintf(stderr, "[shader] 0x%llx type %u cx", static_cast<unsigned long long>(snapshot.codeAddress), fields.type);
+        print(fields.cx_registers, fields.num_cx_registers);
         std::fprintf(stderr, " sh");
-        for (std::uint32_t i = 0; i < shader->num_sh_registers && shader->sh_registers != nullptr; ++i) std::fprintf(stderr, " %x=%08x", shader->sh_registers[i].offset, shader->sh_registers[i].value);
+        print(fields.sh_registers, fields.num_sh_registers);
         std::fprintf(stderr, "\n");
     }
     std::lock_guard lock(mutex);

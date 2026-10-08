@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Acb.hpp"
@@ -9,14 +10,20 @@
 #include "prx/libSceAgcDriver/Eq/include/Event.hpp"
 #include "prx/libkernel/Equeue/Equeue.hpp"
 #include <array>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 extern "C" int APS5_VABI sceKernelCreateEqueue(KernelEqueue* eq, const char* name);
 extern "C" int APS5_VABI sceKernelDeleteEqueue(KernelEqueue eq);
@@ -36,6 +43,8 @@ template<typename TAction>
 std::string expectFailure(TAction action) {
     try {
         action();
+    } catch (const std::invalid_argument& error) {
+        return error.what();
     } catch (const std::runtime_error& error) {
         return error.what();
     }
@@ -58,14 +67,23 @@ void testEvents() {
     expectFailure([&] { sceAgcDriverGetEqEventType(&event); });
     expectFailure([] { sceAgcDriverGetEqEventType(nullptr); });
     expectFailure([&] { sceAgcDriverGetEqEventType(reinterpret_cast<const KernelEvent*>(reinterpret_cast<const std::byte*>(&event) + 1)); });
+    event.ident = 0x29;
+    check(sceAgcDriverGetEqContextId(&event) == 0x29, "graphics event context id uses wrong field");
+    event.ident = std::numeric_limits<std::uintptr_t>::max();
+    expectFailure([&] { sceAgcDriverGetEqContextId(&event); });
+    event.ident = 1;
+    event.filter = -1;
+    expectFailure([&] { sceAgcDriverGetEqContextId(&event); });
+    expectFailure([] { sceAgcDriverGetEqContextId(nullptr); });
+    expectFailure([&] { sceAgcDriverGetEqContextId(reinterpret_cast<const KernelEvent*>(reinterpret_cast<const std::byte*>(&event) + 1)); });
 }
 
 void testResourceRegistrationRequirements() {
     constexpr std::uint32_t unavailable = 0x8A6C9018;
     std::uint32_t max_name_length = 0xA5A5A5A5u;
-    check(sceAgcDriverGetResourceRegistrationMaxNameLength(&max_name_length) == static_cast<int>(unavailable), "unavailable name-length query reported success");
-    check(max_name_length == 0xA5A5A5A5u, "unavailable name-length query changed output");
-    check(sceAgcDriverGetResourceRegistrationMaxNameLength(nullptr) == static_cast<int>(unavailable), "unavailable name-length query accessed null output");
+    check(sceAgcDriverGetResourceRegistrationMaxNameLength(&max_name_length) == 0, "name-length query failed");
+    check(max_name_length == 0xfcu, "name-length query returned the wrong limit");
+    expectFailure([] { sceAgcDriverGetResourceRegistrationMaxNameLength(nullptr); });
     std::uint64_t size_in_bytes = 0xA5A5A5A5A5A5A5A5ull;
     check(sceAgcDriverQueryResourceRegistrationUserMemoryRequirements(&size_in_bytes, 128, 64) == unavailable, "resource registration query returned unexpected status");
     check(size_in_bytes == 0xA5A5A5A5A5A5A5A5ull, "resource registration query changed output on unavailable status");
@@ -98,7 +116,7 @@ void testValidation() {
     expectFailure([&] { sceAgcDriverSubmitDcb(&packet); });
     commands[0] = 0xc001105c;
     expectFailure([&] { sceAgcDriverSubmitDcb(&packet); });
-    commands[0] = 0xc0017601;
+    commands[0] = 0xc0017608;
     expectFailure([&] { sceAgcDriverSubmitDcb(&packet); });
     commands[0] = 0xc0017600;
     commands[1] = 0x10000;
@@ -132,7 +150,7 @@ void testClearState() {
     words[0] = 0xc0011200;
     packet.dw_num = 3;
     expectFailure([&] { sceAgcDriverSubmitDcb(&packet); });
-    words[0] = 0xc0001201;
+    words[0] = 0xc0001202;
     packet.dw_num = 2;
     expectFailure([&] { sceAgcDriverSubmitDcb(&packet); });
     words[0] = 0xc0001200;
@@ -189,10 +207,12 @@ void testEndOfPipeInterrupts() {
     std::array<KernelEvent, 2> events{};
     check(owner->GetTriggeredEvents(events.data(), 2) == 1, "graphics end-of-pipe interrupt was not delivered to its queue only");
     check(events[0].filter == -14 && events[0].udata == &graphicsTag && events[0].data == 2 && sceAgcDriverGetEqEventType(events.data()) == 0, "graphics end-of-pipe event encoding is wrong");
+    check(sceAgcDriverGetEqContextId(events.data()) == 0, "graphics end-of-pipe event reports another context");
     check(owner->GetTriggeredEvents(events.data(), 2) == 0, "delivered interrupt was not cleared");
     check(sceAgcDriverSubmitAcb(0x20, &packet) == 0, "compute interrupt submit failed");
     AgcDriverWaitIdle_nid_postfix();
     check(owner->GetTriggeredEvents(events.data(), 2) == 1 && events[0].udata == &computeTag && sceAgcDriverGetEqEventType(events.data()) == 0x20, "compute end-of-pipe interrupt missing");
+    check(sceAgcDriverGetEqContextId(events.data()) == 0x20, "compute end-of-pipe event reports another context");
     words[2] = 0;
     check(sceAgcDriverSubmitDcb(&packet) == 0, "plain release submit failed");
     AgcDriverWaitIdle_nid_postfix();
@@ -350,6 +370,48 @@ void testWaitFreeSubmissionBehindHeldOne() {
     AgcDriverWaitIdle_nid_postfix();
 }
 
+void testMultiAcbs() {
+    alignas(64) static volatile std::uint32_t value = 0, done = 0, gate = 0;
+    check(sceAgcDriverSubmitMultiAcbs(0x20, nullptr, nullptr, 0) == 0, "empty multi-ACB submit failed");
+    auto write = writeData(&value, 1);
+    std::array<std::uint32_t*, 1> addresses{write.data()};
+    std::array<std::uint32_t, 1> sizes{static_cast<std::uint32_t>(write.size())};
+    expectFailure([&] { sceAgcDriverSubmitMultiAcbs(0x1f, addresses.data(), sizes.data(), 1); });
+    expectFailure([&] { sceAgcDriverSubmitMultiAcbs(0x58, addresses.data(), sizes.data(), 1); });
+    expectFailure([&] { sceAgcDriverSubmitMultiAcbs(0, addresses.data(), sizes.data(), 1); });
+    check(sceAgcDriverSubmitMultiAcbs(0, nullptr, nullptr, 0) == 0, "empty multi-ACB submit checked its queue");
+    expectFailure([&] { sceAgcDriverSubmitMultiAcbs(0x20, nullptr, sizes.data(), 1); });
+    expectFailure([&] { sceAgcDriverSubmitMultiAcbs(0x20, addresses.data(), nullptr, 1); });
+    check(value == 0, "a rejected multi-ACB submit ran a command buffer");
+    for (std::uint32_t queue : {0x20u, 0x57u}) {
+        value = 0;
+        done = 0;
+        auto first = writeData(&value, 1);
+        auto second = writeData(&value, 2);
+        auto third = writeData(&done, 1);
+        std::array<std::uint32_t*, 3> buffers{first.data(), second.data(), third.data()};
+        std::array<std::uint32_t, 3> lengths{static_cast<std::uint32_t>(first.size()), static_cast<std::uint32_t>(second.size()), static_cast<std::uint32_t>(third.size())};
+        check(sceAgcDriverSubmitMultiAcbs(queue, buffers.data(), lengths.data(), 3) == 0, "multi-ACB submit failed");
+        waitFor(&done, 1, "the last ACB of a multi-ACB submit never ran");
+        check(value == 2, "multi-ACB submit did not run its ACBs in order");
+        AgcDriverWaitIdle_nid_postfix();
+    }
+    done = 0;
+    value = 0;
+    auto wait = waitEqual(&gate, 1);
+    auto finish = writeData(&done, 1);
+    std::array<std::uint32_t*, 2> buffers{wait.data(), finish.data()};
+    std::array<std::uint32_t, 2> lengths{static_cast<std::uint32_t>(wait.size()), static_cast<std::uint32_t>(finish.size())};
+    check(sceAgcDriverSubmitMultiAcbs(0x21, buffers.data(), lengths.data(), 2) == 0, "waiting multi-ACB submit failed");
+    submit(0x21, commands(writeData(&value, 1)));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    check(value == 0 && done == 0, "a later submission on the same compute queue overtook a multi-ACB submit");
+    gate = 1;
+    waitFor(&value, 1, "a submission queued behind a multi-ACB submit never ran");
+    check(done == 1, "a multi-ACB submit did not run before a later submission on its queue");
+    AgcDriverWaitIdle_nid_postfix();
+}
+
 void testWaitFreeSubmissionTheCpuWaitsFor() {
     alignas(64) static volatile std::uint32_t stored = 0, flag = 0, done = 0;
     submit(0, commands(waitEqual(&flag, 1), writeData(&done, 1)));
@@ -362,6 +424,61 @@ void testWaitFreeSubmissionTheCpuWaitsFor() {
     title.join();
     check(waited < std::chrono::milliseconds(500), "a held submission the CPU waits for was not released while queue 0 waited on the CPU");
     AgcDriverWaitIdle_nid_postfix();
+}
+
+void testMultiSubmissions() {
+    alignas(64) static volatile std::uint32_t value = 0, done = 0;
+    check(sceAgcDriverSubmitMultiDcbs(nullptr, nullptr, 0) == 0, "empty multi-DCB submit failed");
+    check(sceAgcDriverAgrSubmitMultiDcbs(nullptr, nullptr, 0) == 0, "empty AGR multi-DCB submit failed");
+    std::array<std::uint32_t, 3> invalid{0xc0017600, 0x20c, 0};
+    std::array<std::uint32_t*, 1> invalidAddresses{invalid.data()};
+    std::array<std::uint32_t, 1> invalidSizes{2};
+    expectFailure([&] { sceAgcDriverSubmitMultiDcbs(nullptr, invalidSizes.data(), 1); });
+    expectFailure([&] { sceAgcDriverAgrSubmitMultiDcbs(invalidAddresses.data(), nullptr, 1); });
+    expectFailure([&] { sceAgcDriverSubmitMultiDcbs(invalidAddresses.data(), invalidSizes.data(), 1); });
+    expectFailure([&] { sceAgcDriverAgrSubmitMultiDcbs(invalidAddresses.data(), invalidSizes.data(), 1); });
+    for (bool agr : {false, true}) {
+        value = 0;
+        done = 0;
+        auto first = writeData(&value, 1);
+        auto second = writeData(&value, 2);
+        auto third = writeData(&done, 1);
+        std::array<std::uint32_t*, 3> addresses{first.data(), second.data(), third.data()};
+        std::array<std::uint32_t, 3> sizes{static_cast<std::uint32_t>(first.size()), static_cast<std::uint32_t>(second.size()), static_cast<std::uint32_t>(third.size())};
+        const int result = agr ? sceAgcDriverAgrSubmitMultiDcbs(addresses.data(), sizes.data(), 3) : sceAgcDriverSubmitMultiDcbs(addresses.data(), sizes.data(), 3);
+        check(result == 0, "multi-DCB submit failed");
+        waitFor(&done, 1, "the last DCB of a multi-DCB submit never ran");
+        check(value == 2, "multi-DCB submit did not run its DCBs in order");
+        AgcDriverWaitIdle_nid_postfix();
+    }
+}
+
+void testShaderHeaderAlignment() {
+    alignas(256) static const std::array<std::uint32_t, 64> code{0xbf810000};
+    alignas(8) static std::array<std::byte, 2 * sizeof(Shader)> storage{};
+    Shader shader{};
+    shader.file_header = 0x34333231;
+    shader.version = 0x18;
+    shader.header_size = sizeof(Shader);
+    shader.shader_size = sizeof(code);
+    shader.code = code.data();
+    const auto at = [](std::size_t offset, const Shader& fields) {
+        std::memcpy(storage.data() + offset, &fields, sizeof(fields));
+        return reinterpret_cast<const Shader*>(storage.data() + offset);
+    };
+    for (const std::size_t offset : {0, 4, 1}) AgcDriverRegisterShader_nid_postfix(at(offset, shader));
+    const auto refused = [](const std::string& message, const char* reason) { check(message.find(reason) != std::string::npos, message.c_str()); };
+    refused(expectFailure([] { AgcDriverRegisterShader_nid_postfix(nullptr); }), "null or misaligned address");
+    refused(expectFailure([] { AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x1001)); }), "not readable");
+    Shader misplaced = shader;
+    misplaced.code = code.data() + 1;
+    refused(expectFailure([&] { AgcDriverRegisterShader_nid_postfix(at(4, misplaced)); }), "null or misaligned address");
+    Shader older = shader;
+    older.version = 0x17;
+    refused(expectFailure([&] { AgcDriverRegisterShader_nid_postfix(at(1, older)); }), "invalid guestShader header");
+    Shader truncated = shader;
+    truncated.header_size = sizeof(Shader) - 4;
+    refused(expectFailure([&] { AgcDriverRegisterShader_nid_postfix(at(4, truncated)); }), "smaller than its fixed fields");
 }
 
 void testWorkerFailure() {
@@ -384,6 +501,68 @@ void testWorkerFailure() {
 
 int main() {
     try {
+        alignas(256) std::array<std::uint32_t, 64> rawCode{};
+        rawCode.fill(0xbf800000);
+        rawCode[0] = 0xbe8003ff;
+        rawCode[1] = 0xbf810000;
+        rawCode[2] = 0xbf810000;
+        const auto rawAddress = reinterpret_cast<std::uintptr_t>(rawCode.data());
+        const auto literal = AgcDriver::DriverDetail::ReadRawComputeShader(rawAddress);
+        check(literal->code.size() == 3 && literal->header.empty(), "raw compute stopped at an instruction literal");
+        check(AgcDriver::DriverDetail::ReadRawComputeShader(rawAddress) == literal, "unchanged raw compute code lost its snapshot identity");
+        rawCode[0] = 0xbf820002;
+        rawCode[1] = 0xbf810000;
+        rawCode[2] = 0xbf800000;
+        rawCode[3] = 0xbf810000;
+        const auto branched = AgcDriver::DriverDetail::ReadRawComputeShader(rawAddress);
+        check(branched->code.size() == 4 && literal->code[0] == 0xbe8003ff, "raw compute lost branch targets or modified an earlier snapshot");
+        check(branched != literal, "changed raw compute code reused a stale snapshot");
+        std::array<std::shared_ptr<const AgcDriver::DriverDetail::ShaderSnapshot>, 8> concurrent;
+        std::vector<std::thread> readers;
+        for (auto& snapshot : concurrent) readers.emplace_back([&snapshot, rawAddress] {
+            snapshot = AgcDriver::DriverDetail::ReadRawComputeShader(rawAddress);
+        });
+        for (auto& reader : readers) reader.join();
+        for (const auto& snapshot : concurrent) check(snapshot == branched, "concurrent raw compute readers lost snapshot reuse");
+        alignas(256) std::array<std::array<std::uint32_t, 64>, 65> programs{};
+        for (auto& program : programs) program[0] = 0xbf810000;
+        const auto firstAddress = reinterpret_cast<std::uintptr_t>(programs.front().data());
+        readers.clear();
+        for (auto& snapshot : concurrent) readers.emplace_back([&snapshot, firstAddress] {
+            snapshot = AgcDriver::DriverDetail::ReadRawComputeShader(firstAddress);
+        });
+        for (auto& reader : readers) reader.join();
+        for (const auto& snapshot : concurrent) check(snapshot == concurrent.front(), "concurrent raw compute misses duplicated snapshots");
+        const auto evicted = AgcDriver::DriverDetail::ReadRawComputeShader(firstAddress);
+        for (std::size_t i = 1; i < programs.size(); ++i)
+            AgcDriver::DriverDetail::ReadRawComputeShader(reinterpret_cast<std::uintptr_t>(programs[i].data()));
+        check(AgcDriver::DriverDetail::ReadRawComputeShader(firstAddress) != evicted && evicted->code[0] == 0xbf810000,
+            "raw compute cache eviction lost snapshot lifetime or exceeded its entry limit");
+        check(!expectFailure([&] { AgcDriver::DriverDetail::ReadRawComputeShader(rawAddress + 4); }).empty(), "raw compute accepted a misaligned entry");
+        check(!expectFailure([] { AgcDriver::DriverDetail::ReadRawComputeShader(0); }).empty(), "raw compute accepted an unmapped entry");
+#ifdef _WIN32
+        auto* mapping = static_cast<std::uint32_t*>(VirtualAlloc(nullptr, 8192, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        check(mapping != nullptr, "cannot allocate raw compute boundary test");
+        DWORD protection = 0;
+        check(VirtualProtect(mapping + 1024, 4096, PAGE_NOACCESS, &protection) != 0, "cannot protect raw compute boundary");
+        auto* boundedCode = mapping + 1024 - 64;
+        std::fill_n(boundedCode, 64, 0xbf800000u);
+        const auto boundedAddress = reinterpret_cast<std::uintptr_t>(boundedCode);
+        const auto unterminated = expectFailure([&] { AgcDriver::DriverDetail::ReadRawComputeShader(boundedAddress); });
+        boundedCode[63] = 0xbf810000;
+        const auto bounded = AgcDriver::DriverDetail::ReadRawComputeShader(boundedAddress);
+        check(VirtualProtect(mapping + 1024, 4096, PAGE_READWRITE, &protection) != 0, "cannot extend raw compute mapping");
+        boundedCode[63] = 0xbf800000;
+        boundedCode[64] = 0xbf810000;
+        const auto extended = AgcDriver::DriverDetail::ReadRawComputeShader(boundedAddress);
+        check(extended != bounded && extended->code.size() == 65, "raw compute reused code before its end changed");
+        check(VirtualProtect(mapping + 1024, 4096, PAGE_NOACCESS, &protection) != 0, "cannot revoke cached raw compute tail");
+        check(!expectFailure([&] { AgcDriver::DriverDetail::ReadRawComputeShader(boundedAddress); }).empty(), "raw compute reused an inaccessible cached tail");
+        check(VirtualProtect(mapping, 4096, PAGE_NOACCESS, &protection) != 0, "cannot revoke cached raw compute code");
+        check(!expectFailure([&] { AgcDriver::DriverDetail::ReadRawComputeShader(boundedAddress); }).empty(), "raw compute reused inaccessible cached code");
+        check(VirtualFree(mapping, 0, MEM_RELEASE) != 0, "cannot release raw compute boundary test");
+        check(!unterminated.empty() && bounded->code.size() == 64, "raw compute crossed inaccessible memory or missed its last instruction");
+#endif
         testEvents();
         testResourceRegistrationRequirements();
         testValidation();
@@ -396,8 +575,11 @@ int main() {
         testWideLabelStoredSinceSubmission();
         testWaitFreeSubmissionAfterEarlierQueue0Work();
         testWaitFreeSubmissionQueue0WaitsOn();
+        testMultiAcbs();
         testWaitFreeSubmissionBehindHeldOne();
         testWaitFreeSubmissionTheCpuWaitsFor();
+        testMultiSubmissions();
+        testShaderHeaderAlignment();
         testWorkerFailure();
         check(expectFailure([] { LibcRunShutdown_nid_postfix(); }).find("required shader register") != std::string::npos, "shutdown lost worker failure");
         std::puts("AGC driver submit tests passed");

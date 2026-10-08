@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 static void Require(bool value) { if (!value) std::abort(); }
@@ -37,6 +38,25 @@ static std::vector<std::uint8_t> FrameHeader(const std::vector<std::uint8_t>& jp
     std::abort();
 }
 
+struct FrameInfo { int components; std::uint8_t sampling; };
+
+static FrameInfo ReadFrame(const std::vector<std::uint8_t>& jpeg) {
+    std::size_t offset = 2;
+    while (offset + 3 < jpeg.size()) {
+        Require(jpeg[offset++] == 0xFF);
+        while (offset < jpeg.size() && jpeg[offset] == 0xFF) ++offset;
+        Require(offset < jpeg.size());
+        const std::uint8_t marker = jpeg[offset++];
+        if (marker == 0xDA || marker == 0xD9) break;
+        Require(offset + 1 < jpeg.size());
+        const std::size_t length = (static_cast<std::size_t>(jpeg[offset]) << 8) | jpeg[offset + 1];
+        Require(length >= 2 && offset + length <= jpeg.size());
+        if (marker >= 0xC0 && marker <= 0xC3) return {jpeg[offset + 7], jpeg[offset + 9]};
+        offset += length;
+    }
+    std::abort();
+}
+
 static int MaximumDifference(const std::vector<std::uint8_t>& left, const std::vector<std::uint8_t>& right) {
     Require(left.size() == right.size());
     int worst = 0;
@@ -60,7 +80,7 @@ static void CheckSampling() {
         }
     }
 
-    const auto grayscale = Decoder::Jpeg::Encode(gray, width, height, 1, 90, Decoder::Jpeg::Sampling::Full);
+    const auto grayscale = Decoder::Jpeg::Encode(gray, width, height, 1, 90, Decoder::Jpeg::Sampling::Yuv444);
     Require(IsJpeg(grayscale));
     const auto grayscaleHeader = FrameHeader(grayscale);
     Require(grayscaleHeader[5] == 1);
@@ -69,9 +89,9 @@ static void CheckSampling() {
     Require(decodedGrayscale.has_value() && decodedGrayscale->channels == 1);
     Require(MaximumDifference(decodedGrayscale->pixels, gray) < 24);
 
-    const auto full = Decoder::Jpeg::Encode(rgb, width, height, 3, 90, Decoder::Jpeg::Sampling::Full);
-    const auto half = Decoder::Jpeg::Encode(rgb, width, height, 3, 90, Decoder::Jpeg::Sampling::Ycc422);
-    const auto quarter = Decoder::Jpeg::Encode(rgb, width, height, 3, 90, Decoder::Jpeg::Sampling::Ycc420);
+    const auto full = Decoder::Jpeg::Encode(rgb, width, height, 3, 90, Decoder::Jpeg::Sampling::Yuv444);
+    const auto half = Decoder::Jpeg::Encode(rgb, width, height, 3, 90, Decoder::Jpeg::Sampling::Yuv422);
+    const auto quarter = Decoder::Jpeg::Encode(rgb, width, height, 3, 90, Decoder::Jpeg::Sampling::Yuv420);
     Require(IsJpeg(full) && IsJpeg(half) && IsJpeg(quarter));
     Require(FrameHeader(full)[5] == 3 && FrameHeader(full)[7] == 0x11);
     Require(FrameHeader(half)[7] == 0x21);
@@ -106,6 +126,7 @@ int main() {
 
     const std::vector<std::uint8_t> rgbJpeg = Decoder::Jpeg::Encode(rgb, width, height, 3, 90);
     Require(IsJpeg(rgbJpeg));
+    Require(ReadFrame(rgbJpeg).components == 3 && ReadFrame(rgbJpeg).sampling == 0x11);
     const auto rgbImage = Decoder::Jpeg::Decode(rgbJpeg);
     Require(rgbImage.has_value());
     Require(rgbImage->width == width && rgbImage->height == height && rgbImage->channels == 3);
@@ -120,6 +141,7 @@ int main() {
     }
     const std::vector<std::uint8_t> grayJpeg = Decoder::Jpeg::Encode(gray, width, height, 1, 90);
     Require(IsJpeg(grayJpeg));
+    Require(ReadFrame(grayJpeg).components == 1);
     const auto grayImage = Decoder::Jpeg::Decode(grayJpeg);
     Require(grayImage.has_value());
     Require(grayImage->width == width && grayImage->height == height);
@@ -133,6 +155,19 @@ int main() {
     Require(ThrowsInvalidArgument([&] { Decoder::Jpeg::Encode(rgb, 0, height, 3, 90); }));
     Require(ThrowsInvalidArgument([&] { Decoder::Jpeg::Encode(rgb, 0x10000, 1, 3, 90); }));
     Require(ThrowsInvalidArgument([&] { Decoder::Jpeg::Encode(rgb, width, height + 1, 3, 90); }));
+
+    for (const auto [sampling, factor] : {std::pair{Decoder::Jpeg::Sampling::Yuv444, std::uint8_t{0x11}},
+                                          std::pair{Decoder::Jpeg::Sampling::Yuv422, std::uint8_t{0x21}},
+                                          std::pair{Decoder::Jpeg::Sampling::Yuv420, std::uint8_t{0x22}}}) {
+        const auto encoded = Decoder::Jpeg::Encode(rgb, 31, 23, 3, 1, sampling);
+        Require(ReadFrame(encoded).components == 3 && ReadFrame(encoded).sampling == factor);
+        const auto highQuality = Decoder::Jpeg::Encode(rgb, 31, 23, 3, 100, sampling);
+        Require(ReadFrame(highQuality).components == 3 && ReadFrame(highQuality).sampling == factor);
+    }
+    Require(ThrowsInvalidArgument([&] { Decoder::Jpeg::Encode(rgb, width, height, 3, 90, static_cast<Decoder::Jpeg::Sampling>(3)); }));
+    Require(ThrowsInvalidArgument([&] { Decoder::Jpeg::Encode(rgb, width, height, 3, 90, Decoder::Jpeg::Sampling::Yuv444, 1, 1); }));
+    Require(ThrowsInvalidArgument([&] { Decoder::Jpeg::Encode(rgb, width, height, 3, 90, Decoder::Jpeg::Sampling::Yuv444, 0x10000, 0); }));
+    Require(ThrowsInvalidArgument([&] { Decoder::Jpeg::Encode(rgb, width, height, 3, 90, Decoder::Jpeg::Sampling::Yuv444, 0, 0x10000); }));
 
     Require(!Decoder::Jpeg::Decode({}).has_value());
     const std::vector<std::uint8_t> garbage{1, 2, 3, 4, 5, 6, 7, 8};

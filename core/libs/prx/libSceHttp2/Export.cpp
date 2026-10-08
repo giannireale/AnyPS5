@@ -191,6 +191,12 @@ int APS5_VABI sceHttp2SslEnableOption(int id, uint32_t ssl_flags) {
     return 0;
 }
 
+int APS5_VABI sceHttp2SetMinSslVersion(int id, uint32_t ssl_version) {
+    (void)id;
+    (void)ssl_version;
+    return 0;
+}
+
 int APS5_VABI sceHttp2Term(int lib_http2_ctx_id) {
     (void)lib_http2_ctx_id;
     return 0;
@@ -209,14 +215,29 @@ int APS5_VABI sceHttp2AbortRequest(int req_id) {
     return 0;
 }
 
-int APS5_VABI sceHttp2CookieFlush(int lib_http2_ctx_id) {
-    (void)lib_http2_ctx_id;
+int APS5_VABI sceHttp2GetMemoryPoolStats() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceHttp2GetMemoryPoolStats() {
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceHttp2CookieFlush(int id) {
+    (void)id;
+    return 0;
+}
+
+int APS5_VABI sceHttp2CreateCookieBox(int lib_http2_ctx_id) {
+    (void)lib_http2_ctx_id;
+    return g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+}
+
+int APS5_VABI sceHttp2SetCookieBox(int id, int cookie_box_id) {
+    (void)id;
+    (void)cookie_box_id;
+    return 0;
+}
+
+int APS5_VABI sceHttp2SetRequestNoContentLength(int id) {
+    (void)id;
     return 0;
 }
 

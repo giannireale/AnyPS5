@@ -134,6 +134,11 @@ public:
                 function<PFN_vkGetPhysicalDeviceProperties2>("vkGetPhysicalDeviceProperties2")(context.physical, &properties);
                 context.hostImportAlignment = hostProperties.minImportedHostPointerAlignment;
             }
+            if (hasExtension(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) && hasExtension(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME)) {
+                extensionsEnabled.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+                extensionsEnabled.push_back(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
+                context.dmaBufImport = true;
+            }
             VkPhysicalDeviceImageViewMinLodFeaturesEXT minLod{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_MIN_LOD_FEATURES_EXT};
             if (hasExtension(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME)) {
                 VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &minLod};
@@ -1629,6 +1634,15 @@ void importWatchTests(const Device& device) {
     const auto probe = ProbeImportWriteProtection(context);
     Require(probe.failure == nullptr, std::string("(u) the import probe failed at ") + (probe.failure != nullptr ? probe.failure : "") + " (" + std::to_string(static_cast<int>(probe.result)) + ")");
     std::cout << "import probe: " << probe.writtenAfterSubmit << " of " << probe.pages << " scratch pages written after a GPU read, " << probe.writtenAtImport << " after the import\n";
+    Require(probe.writtenByCpu != 0, "(u) a CPU store after the import probe's GPU read was not collected");
+    if (context.dmaBufImport) {
+        const auto dmaBuf = ProbeDmaBufImportWriteProtection(context);
+        Require(dmaBuf.failure == nullptr, std::string("(u) the dma-buf import probe failed at ") + (dmaBuf.failure != nullptr ? dmaBuf.failure : "") + " (" + std::to_string(static_cast<int>(dmaBuf.result)) + ")");
+        Require(dmaBuf.writtenByCpu != 0, "(u) a CPU store into a dma-buf imported scratch range was not collected");
+        std::cout << "dma-buf import probe: " << dmaBuf.writtenAfterSubmit << " of " << dmaBuf.pages << " scratch pages written after a GPU read, " << dmaBuf.writtenAtImport << " after the import, " << dmaBuf.writtenByCpu << " after a CPU store\n";
+    } else {
+        std::cout << "dma-buf imports unavailable: the dma-buf import probe not tested\n";
+    }
     const auto decided = PrepareImportWatch(context);
     struct Restore {
         const Context& context;
@@ -2573,6 +2587,44 @@ void firstLayerViewTests(const Device& device, Recorder& recorder) {
     expectRed(program.Red(flatTexture.View(), flatTexture.Layout(), 0.0f), 0x20 / 255.0f, "a 2D texture over the surface does not read its first layer");
 }
 
+void atomicViewTests(const Device& device, Recorder& recorder) {
+    const auto& context = device.GetContext();
+    TextureDetiler detiler(context);
+    auto withDetiler = context;
+    withDetiler.detiler = &detiler;
+    for (const std::uint32_t format : {20u, 21u, 22u, 56u}) {
+        GuestTextureResource resource{};
+        resource.width = 64;
+        resource.height = 4;
+        resource.mipCount = 1;
+        resource.tileMode = TextureTileMode::kLinear;
+        resource.dimension = TextureDimension::k2D;
+        resource.format = format;
+        resource.dstSelX = 4;
+        resource.dstSelY = 5;
+        resource.dstSelZ = 6;
+        resource.dstSelW = 7;
+        const auto geometry = DescribeSurface(resource);
+        std::vector<std::uint8_t> memory(static_cast<std::size_t>(geometry.guestBytes) + 256);
+        resource.baseAddress = (reinterpret_cast<std::uintptr_t>(memory.data()) + 255) & ~std::uintptr_t{255};
+        auto image = std::make_shared<StorageTexture>(withDetiler, detiler, resource, 0);
+        recorder.Keep(image);
+        if (format == 56u) {
+            bool refused = false;
+            try {
+                static_cast<void>(image->AtomicView(0, false));
+            } catch (const std::exception&) {
+                refused = true;
+            }
+            Require(refused, "an 8_8_8_8 storage image has an atomic view");
+            continue;
+        }
+        const auto atomic = image->AtomicView(0, false);
+        Require(atomic != VK_NULL_HANDLE && atomic == image->AtomicView(0, false), "atomic storage views are not reused");
+        Require((atomic == image->View(0)) == (format == 20u), "only a 32_UINT storage image serves atomics through its own view");
+    }
+}
+
 void keysFillTests(const Device& device, Recorder& recorder) {
     const auto& base = device.GetContext();
     if (base.hostImportAlignment == 0) {
@@ -2661,15 +2713,20 @@ void keysFillTests(const Device& device, Recorder& recorder) {
             }
             return true;
         };
+        const auto fill = [&](std::uint8_t key) {
+            recorder.Sync();
+            std::memset(keys, key, keyCount);
+            return StorageTexture::NoteKeysFill(keysAddress, keyCount, key);
+        };
         Require(holds({0, 0, 0, 0}), "a surface under 0000 keys was not cleared");
         draw({{1.0f, 0.0f, 0.0f, 1.0f}});
-        Require(StorageTexture::NoteKeysFill(keysAddress, keyCount, 0x00) == 1, "a 0000 key fill did not cover the surface");
+        Require(fill(0x00) == 1, "a 0000 key fill did not cover the surface");
         Require(image->FilledKeys() == DccKeys::Clear0000, "a key fill over pending results was not recorded");
         image->Refresh();
         Require(holds({0, 0, 0, 0}), "a key fill did not clear the results made before it at the next refresh");
         Require(image->FilledKeys() == DccKeys::Uncompressed, "the image cleared by a refresh still holds the fill");
         draw({{0.0f, 0.0f, 1.0f, 1.0f}});
-        Require(StorageTexture::NoteKeysFill(keysAddress, keyCount, 0x00) == 1, "a second 0000 key fill did not cover the surface");
+        Require(fill(0x00) == 1, "a second 0000 key fill did not cover the surface");
 #ifdef _WIN32
         _putenv_s("APS5_KEYS_FILL_CLEAR", "1");
 #else
@@ -2724,6 +2781,7 @@ int main() {
         dataRefreshTests(device, recorder);
         minLodTests(device, recorder);
         firstLayerViewTests(device, recorder);
+        atomicViewTests(device, recorder);
         metadataPassTests(device, recorder);
         pendingKeyStoreTests(device, recorder);
         sampleDumpTests(device, recorder);

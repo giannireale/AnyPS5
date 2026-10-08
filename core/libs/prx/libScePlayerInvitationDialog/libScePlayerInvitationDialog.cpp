@@ -7,6 +7,11 @@
 
 namespace {
 
+constexpr std::int32_t COMMON_DIALOG_RESULT_USER_CANCELED = 1;
+constexpr auto COMMON_DIALOG_ERROR_NOT_INITIALIZED = static_cast<std::int32_t>(0x80B80003u);
+constexpr auto COMMON_DIALOG_ERROR_NOT_FINISHED = static_cast<std::int32_t>(0x80B80005u);
+constexpr auto COMMON_DIALOG_ERROR_ARG_NULL = static_cast<std::int32_t>(0x80B8000Du);
+
 std::mutex g_dialog_mutex;
 PlayerInvitationDialogStatus g_dialog_status = PlayerInvitationDialogStatus::None;
 
@@ -68,10 +73,14 @@ std::int32_t APS5_VABI scePlayerInvitationDialogTerminate(void) {
     return 0;
 }
 
-std::int32_t APS5_VABI scePlayerInvitationDialogGetResult(void* result) {
-    if (result == nullptr) return static_cast<std::int32_t>(0x80B80003u);
-    const std::int32_t canceled = 1;
-    std::memcpy(result, &canceled, sizeof(canceled));
+std::int32_t APS5_VABI scePlayerInvitationDialogGetResult(ScePlayerInvitationDialogResult* result) {
+    std::lock_guard lock(g_dialog_mutex);
+    APS5_LOG_OUT("result=%p status=%d", static_cast<void*>(result), status());
+    if (g_dialog_status == PlayerInvitationDialogStatus::None) return COMMON_DIALOG_ERROR_NOT_INITIALIZED;
+    if (result == nullptr) return COMMON_DIALOG_ERROR_ARG_NULL;
+    if (g_dialog_status != PlayerInvitationDialogStatus::Finished) return COMMON_DIALOG_ERROR_NOT_FINISHED;
+    *result = ScePlayerInvitationDialogResult{};
+    result->result = COMMON_DIALOG_RESULT_USER_CANCELED;
     return 0;
 }
 

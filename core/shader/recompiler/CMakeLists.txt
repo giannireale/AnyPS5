@@ -219,6 +219,8 @@ function(add_shader_recompiler target runtimeTarget)
             ResourceMaterializer::SpecializationNanoseconds
             SetDebugProbeActive
             ShaderCacheDirectory
+            SrgbDecodeBit
+            SrgbUnormFormat
             ThreadOwned
             WriteFileAtomically
     )
@@ -279,6 +281,7 @@ endfunction()
 if(BUILD_TESTING)
     add_executable(shader_mesh_input_tests ${CMAKE_CURRENT_LIST_DIR}/tests/ShaderMeshInputTests.cpp)
     target_include_directories(shader_mesh_input_tests PRIVATE
+            ${CMAKE_CURRENT_LIST_DIR}
             ${CMAKE_CURRENT_LIST_DIR}/Optimization/include
             ${CMAKE_CURRENT_LIST_DIR}/IntermediateRepresentation/include
             ${CMAKE_CURRENT_LIST_DIR}/RdnaDecoder/include

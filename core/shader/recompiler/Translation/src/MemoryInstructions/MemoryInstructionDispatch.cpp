@@ -40,6 +40,10 @@ bool TranslationContext::emitMemory(const RdnaInstruction& inst) {
     case RdnaOpcode::SBufferLoadDwordx8:
     case RdnaOpcode::SBufferLoadDwordx16:
         return sLoad(inst, false);
+    case RdnaOpcode::SScratchLoadDword:
+    case RdnaOpcode::SScratchLoadDwordx2:
+    case RdnaOpcode::SScratchLoadDwordx4:
+        return sScratchLoad(inst);
     case RdnaOpcode::SGetWaveidInWorkgroup: {
         if (program.Resources().stage != IrShaderStage::Compute) {
             throw std::runtime_error("s_get_waveid_in_workgroup is supported only in compute shaders, at pc " + std::to_string(inst.programCounter));
@@ -217,6 +221,11 @@ bool TranslationContext::emitMemory(const RdnaInstruction& inst) {
         return flatAtomic(inst, IrOpcode::AddressAtomicIAdd32);
     case RdnaOpcode::FlatAtomicSub:
         return flatAtomic(inst, IrOpcode::AddressAtomicISub32);
+    case RdnaOpcode::GlobalAtomicCsub:
+        if (!inst.glc) {
+            throw std::runtime_error("global_atomic_csub without glc is not supported, at pc " + std::to_string(inst.programCounter));
+        }
+        return flatAtomic(inst, IrOpcode::AddressAtomicUSubSat32);
     case RdnaOpcode::FlatAtomicSmin:
         return flatAtomic(inst, IrOpcode::AddressAtomicSMin32);
     case RdnaOpcode::FlatAtomicUmin:
@@ -464,6 +473,11 @@ bool TranslationContext::emitMemory(const RdnaInstruction& inst) {
     case RdnaOpcode::DsWrite2B64:
     case RdnaOpcode::DsWrite2st64B64:
         return dsWrite2(inst);
+    case RdnaOpcode::DsWrxchg2RtnB32:
+    case RdnaOpcode::DsWrxchg2st64RtnB32:
+    case RdnaOpcode::DsWrxchg2RtnB64:
+    case RdnaOpcode::DsWrxchg2st64RtnB64:
+        return dsWrxchg2(inst);
     case RdnaOpcode::DsWriteB8:
     case RdnaOpcode::DsWriteB16:
     case RdnaOpcode::DsWriteB16D16Hi:
@@ -591,6 +605,8 @@ bool TranslationContext::emitMemory(const RdnaInstruction& inst) {
     case RdnaOpcode::ImageLoadMipPck:
     case RdnaOpcode::ImageLoadMipPckSgn:
         return imageLoad(inst);
+    case RdnaOpcode::ImageMsaaLoad:
+        return imageMsaaLoad(inst);
     case RdnaOpcode::ImageStore:
     case RdnaOpcode::ImageStoreMip:
     case RdnaOpcode::ImageStorePck:

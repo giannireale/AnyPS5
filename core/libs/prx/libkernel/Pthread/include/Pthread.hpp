@@ -85,6 +85,7 @@ struct PthreadPrivate {
     std::atomic<unsigned> references{2};
     void* stackAddress = nullptr;
     std::size_t stackSize = 0;
+    std::atomic<int> waitCount{0};
     std::atomic<KernelCpumask> affinity{DEFAULT_THREAD_AFFINITY};
     std::atomic<int> priority{DEFAULT_THREAD_PRIORITY};
     std::mutex nameLock;
@@ -103,5 +104,6 @@ struct PthreadPrivate {
 // a guest signal handler delivered on a proxy thread runs as the interrupted thread.
 PthreadPrivate* PthreadExchangeCurrent(PthreadPrivate* thread);
 
+bool GuestThreadStack(std::uintptr_t address, std::uintptr_t* start, std::uintptr_t* end);
 
 #endif

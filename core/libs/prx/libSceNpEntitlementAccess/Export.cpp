@@ -118,6 +118,11 @@ int APS5_VABI sceNpEntitlementAccessRequestConsumeUnifiedEntitlement(void) {
  return SCE_NP_ERROR_SIGNED_OUT;
 }
 
+int APS5_VABI sceNpEntitlementAccessGetPftFlag(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 // No PSN account: every entitlement query reports a signed-out user.
 std::int32_t APS5_VABI sceNpEntitlementAccessGetEntitlementKey(const void*, const void*, const void*, const void*) {
     return SCE_NP_ERROR_SIGNED_OUT;

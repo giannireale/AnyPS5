@@ -1,4 +1,5 @@
 #include "SpirvBackend/SpirvEmitter.hpp"
+#include "SpirvBackend/SpirvEmitterHelpers.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <stdexcept>
 #include <string>
@@ -12,10 +13,6 @@ namespace ShaderRecompiler
     struct SpirvEmitterState;
 
     namespace {
-
-        [[noreturn]] void FailEmit(const std::string& reason) {
-            throw std::runtime_error("SPIR-V module emission failed: " + reason);
-        }
 
         std::uint32_t HostInvocationId(SpirvEmitterState& state) {
             if (state.subgroupLocalInvocationIdVariable == 0) {
@@ -140,6 +137,13 @@ namespace ShaderRecompiler
         }
         if (control == 0x141u) {
             return EmitDppMirrorTargetLane(state, subid, true);
+        }
+        if (control >= 0x150u && control <= 0x15fu) {
+            const auto row = state.module.AllocateId();
+            const auto target = state.module.AllocateId();
+            state.module.AddFunction(spv::OpBitwiseAnd, TypeU32(state), row, subid, ConstantU32(state, 0xfffffff0u));
+            state.module.AddFunction(spv::OpBitwiseOr, TypeU32(state), target, row, ConstantU32(state, control & 0xfu));
+            return {target, ConstantBool(state, true)};
         }
         if (control >= 0x160u && control <= 0x16fu) {
             const auto target = state.module.AllocateId();

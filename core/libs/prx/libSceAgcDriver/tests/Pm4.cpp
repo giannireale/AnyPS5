@@ -1,13 +1,19 @@
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
+#include "prx/libSceAgcDriver/Submit/include/Acb.hpp"
 #include "prx/libc/include/Shutdown.hpp"
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <limits>
 #include <set>
 #include <stdexcept>
+#include <thread>
+#include <tuple>
 #include <vector>
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -15,6 +21,8 @@
 #endif
 #include <windows.h>
 #endif
+
+extern "C" int APS5_VABI sceKernelAvailableFlexibleMemorySize(size_t* size);
 
 namespace {
 
@@ -55,7 +63,7 @@ void testCatalog() {
         const auto reason = AgcDriver::Pm4::UnsupportedReason(packet[0]);
         if (!reason.empty()) expectFailure([&] { AgcDriver::Pm4::Validate(packet, 0); }, std::string(reason).c_str());
     }
-    check(values.size() == 54, "reference opcode catalog is incomplete");
+    check(values.size() == 55, "reference opcode catalog is incomplete");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0xff, {0}), 0); }, "not known");
     const std::array<std::pair<std::uint32_t, const char*>, 11> custom{{
         {5, "DRAW_RESET"}, {6, "WAIT_FLIP_DONE"}, {9, "DISPATCH_RESET"}, {11, "PUSH_MARKER"},
@@ -176,7 +184,7 @@ void testAutoDraw() {
     }
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x2d, {3}), 0); }, "packet size");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x2d, {3, 2, 0}), 0); }, "packet size");
-    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x2d, {3, 2}, 1), 0); }, "header flags");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x2d, {3, 2}, 2), 0); }, "header flags");
     state.userConfig[0x24a] = std::numeric_limits<std::uint32_t>::max();
     check(AgcDriver::Pm4::ResolveDraw(makePacket(0x2d, {1, 2}), state).firstVertex == std::numeric_limits<std::uint32_t>::max(), "last vertex rejected");
     expectFailure([&] { AgcDriver::Pm4::ResolveDraw(makePacket(0x2d, {2, 2}), state); }, "vertex range overflow");
@@ -290,6 +298,9 @@ void testMemory() {
     check(data[0] == 22 && data[1] == 12, "WRITE_DATA fixed destination failed");
     execute(state, makePacket(0x37, {0x40000100, low(data.data()), high(data.data()), 41, 42}));
     check(data[0] == 41 && data[1] == 42, "WRITE_DATA from the PFP failed");
+    execute(state, makePacket(0x37, {0x04100200, low(data.data()), high(data.data()), 61, 62}));
+    check(data[0] == 61 && data[1] == 62, "WRITE_DATA with a cache policy failed");
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x37, {0x08000100, low(data.data()), high(data.data()), 71}), 0); }, "reserved");
     expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x37, {0x80000100, low(data.data()), high(data.data()), 51}), 0); }, "engine");
     execute(state, makePacket(0x81, {4, 31, 32}));
     execute(state, makePacket(0x83, {4, 2, low(data.data()), high(data.data())}));
@@ -311,9 +322,13 @@ void testCopies() {
     execute(state, makePacket(0x50, {0x40000000, 0x44332211, 0, low(destination.data()), high(destination.data()), 6}));
     check(destination[0] == 0x44332211 && destination[1] == 0x00002211, "DMA_DATA byte fill failed");
     constexpr std::uint32_t cachePolicies = (1u << 13u) | (2u << 25u);
+    std::size_t flexibleBefore = 0;
+    check(sceKernelAvailableFlexibleMemorySize(&flexibleBefore) == 0, "cannot query flexible memory");
     const auto toGds = makePacket(0x50, {0x60100000 | cachePolicies, low(source.data()), high(source.data()), 0x100, 0, 16});
     check(!AgcDriver::Pm4::ResolveStore(toGds, state, 64).has_value(), "DMA_DATA to GDS resolved as a memory store");
     execute(state, toGds);
+    std::size_t flexibleAfter = 0;
+    check(sceKernelAvailableFlexibleMemorySize(&flexibleAfter) == 0 && flexibleAfter == flexibleBefore, "the GDS was charged to the flexible memory budget");
     execute(state, makePacket(0x50, {0x20100000, 0x104, 0, 0xfff8, 0, 8}));
     destination = {};
     execute(state, makePacket(0x50, {0x20000000 | cachePolicies, 0xfff8, 0, low(destination.data()), high(destination.data()), 8}));
@@ -405,6 +420,60 @@ void testMemorySynchronization() {
     check(memory.destination == 42, "failed synchronization changed the destination");
 }
 
+void testConditionalValidation() {
+    alignas(4) static std::uint32_t condition = 0;
+    const auto valid = makePacket(0x22, {low(&condition), high(&condition), 0, 0x3fff});
+    check(AgcDriver::Pm4::UnsupportedReason(valid[0]).empty() && AgcDriver::Pm4::AccessesMemory(valid[0]), "COND_EXEC is rejected or does not synchronize guest memory");
+    AgcDriver::Pm4::Validate(valid, 0);
+    AgcDriver::Pm4::Validate(valid, 0x20);
+    check(AgcDriver::Pm4::ConditionalWords(valid) == 0x3fff, "COND_EXEC count decoded wrong");
+    check(AgcDriver::Pm4::ConditionalWords(makePacket(0x22, {low(&condition), high(&condition), 0, 0})) == 0, "empty COND_EXEC range decoded wrong");
+    AgcDriver::Pm4::Validate(makePacket(0x22, {low(&condition), high(&condition), 3u << 25u, 5}), 0x20);
+    const auto invalidWord = [&](std::size_t word, std::uint32_t value, std::uint32_t queue, const char* text) {
+        auto packet = valid;
+        packet[word] = value;
+        expectFailure([&] { AgcDriver::Pm4::Validate(packet, queue); }, text);
+    };
+    invalidWord(1, low(&condition) | 1u, 0, "reserved address bits");
+    invalidWord(1, low(&condition) | 2u, 0x20, "reserved address bits");
+    invalidWord(2, 0x10000u, 0, "above 48");
+    invalidWord(3, 3u << 25u, 0, "reserved control fields");
+    invalidWord(3, 1u, 0x20, "reserved control fields");
+    invalidWord(3, 1u << 27u, 0x20, "reserved control fields");
+    invalidWord(4, 0x4000u, 0, "reserved count bits");
+    invalidWord(4, 0x80000005u, 0x20, "reserved count bits");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x22, {0, 0, 0}), 0); }, "packet size");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x22, {0, 0, 0, 0, 0}), 0); }, "packet size");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x22, {0, 0, 0, 0}, 1), 0); }, "header flags");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x22, {0, 0, 0, 0}, 2), 0x20); }, "header flags");
+    expectFailure([] { AgcDriver::Pm4::ConditionalWords(makePacket(0x37, {0x100, 0, 0, 0})); }, "expected COND_EXEC");
+    AgcDriver::QueueState state;
+    expectFailure([&] { AgcDriver::Pm4::Execute(valid, state); }, "driver execution");
+}
+
+void testConditionReadSynchronization() {
+    alignas(4) static std::uint32_t condition = 0;
+    static std::size_t flushed = 0;
+    condition = 0;
+    flushed = 0;
+    struct FlushHookReset {
+        ~FlushHookReset() { AgcDriver::GuestMemory::SetFlushHook(nullptr); }
+    } reset;
+    AgcDriver::GuestMemory::SetFlushHook([](std::uint64_t address, std::size_t bytes) {
+        check(address == reinterpret_cast<std::uintptr_t>(&condition) && bytes == sizeof(condition), "COND_EXEC synchronized an unrelated range");
+        condition = 0x80;
+        ++flushed;
+    });
+    const auto packet = makePacket(0x22, {low(&condition), high(&condition), 0, 5});
+    check(AgcDriver::Pm4::ReadCondition(packet) == 0x80 && flushed == 1, "COND_EXEC read its condition before the GPU work that writes it");
+    AgcDriver::GuestMemory::SetFlushHook([](std::uint64_t, std::size_t) {
+        throw std::runtime_error("condition synchronization failed");
+    });
+    expectFailure([&] { AgcDriver::Pm4::ReadCondition(packet); }, "condition synchronization failed");
+    AgcDriver::GuestMemory::SetFlushHook(nullptr);
+    expectFailure([] { AgcDriver::Pm4::ReadCondition(makePacket(0x22, {0x1000, 0, 0, 5})); }, "guest");
+}
+
 void testWriteChangedKeepsUntouchedBytes() {
     alignas(256) static std::uint8_t guest[256];
     std::memset(guest, 0, sizeof(guest));
@@ -447,7 +516,7 @@ void testEventWrite() {
     for (const auto bit : {0x40u, 0x80u, 0x800u, 0x80000000u}) {
         expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x410u | bit}), 0); }, "reserved bits");
     }
-    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x410}, 1), 0); }, "header flags");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x410}, 2), 0); }, "header flags");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x410, 0, 0}), 0); }, "packet size");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x13a, 0, 0}), 0); }, "event type 58");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x0d}), 0); }, "event type 13");
@@ -480,7 +549,7 @@ void testAcquireMem() {
         packet[index] = value;
         expectFailure([&] { AgcDriver::Pm4::Validate(packet, 0); }, reason);
     };
-    invalidWord(0, captured[0] | 1u, "header flags");
+    invalidWord(0, captured[0] | 2u, "header flags");
     invalidWord(1, 4, "control flags");
     invalidWord(1, 0x00800000, "control flags");
     invalidWord(3, 1, "above 40 bits");
@@ -491,6 +560,50 @@ void testAcquireMem() {
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x58, {0, 2, 0, 0xffffffff, 0, 0, 0}), 0); }, "range exceeds");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x58, {0, 0, 0, 0, 0}), 0); }, "packet size");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x58, {0, 0, 0, 0, 0, 0, 0, 0}), 0); }, "packet size");
+}
+
+void testPredication() {
+    alignas(16) std::uint64_t flag[4] = {0, 0, 0, 0};
+    auto* flag32 = reinterpret_cast<std::uint32_t*>(&flag[2]);
+    const auto setPredication = [&](std::uint32_t operation, bool executeWhenSet, const void* address) {
+        return makePacket(0x20, {(operation << 16u) | (executeWhenSet ? 0x100u : 0u) | 0x1000u, low(address), high(address)});
+    };
+    AgcDriver::QueueState state;
+    check(AgcDriver::Pm4::PredicationPasses(state), "inactive predication must pass");
+    execute(state, setPredication(3, true, &flag[0]));
+    check(state.predication.operation == 3 && state.predication.executeWhenSet && state.predication.address == reinterpret_cast<std::uintptr_t>(&flag[0]), "BOOL64 predication state mismatch");
+    check(!AgcDriver::Pm4::PredicationPasses(state), "zero BOOL64 value must skip draw-visible packets");
+    flag[0] = 1ull << 40u;
+    check(AgcDriver::Pm4::PredicationPasses(state), "upper BOOL64 bits must count");
+    execute(state, setPredication(3, false, &flag[0]));
+    check(!AgcDriver::Pm4::PredicationPasses(state), "non-zero BOOL64 value must skip draw-not-visible packets");
+    flag[0] = 0;
+    check(AgcDriver::Pm4::PredicationPasses(state), "zero BOOL64 value must run draw-not-visible packets");
+    execute(state, setPredication(4, true, &flag[2]));
+    flag[2] = 0xffffffff00000000ull;
+    check(*flag32 == 0 && !AgcDriver::Pm4::PredicationPasses(state), "BOOL32 must read only 32 bits");
+    *flag32 = 7;
+    check(AgcDriver::Pm4::PredicationPasses(state), "non-zero BOOL32 value must run draw-visible packets");
+    execute(state, setPredication(0, false, nullptr));
+    check(state.predication.operation == 0 && AgcDriver::Pm4::PredicationPasses(state), "clear must end predication");
+
+    expectFailure([&] { AgcDriver::Pm4::Validate(setPredication(1, true, &flag[0]), 0); }, "query predication");
+    expectFailure([&] { AgcDriver::Pm4::Validate(setPredication(2, true, &flag[0]), 0); }, "query predication");
+    expectFailure([&] { AgcDriver::Pm4::Validate(setPredication(5, true, &flag[0]), 0); }, "invalid predication operation");
+    expectFailure([&] { AgcDriver::Pm4::Validate(setPredication(3, true, &flag[0]), 0x20); }, "compute queue");
+    expectFailure([&] { AgcDriver::Pm4::Validate(setPredication(3, true, nullptr), 0); }, "unaligned predication address");
+    expectFailure([&] { AgcDriver::Pm4::Validate(setPredication(3, true, reinterpret_cast<const std::uint8_t*>(&flag[0]) + 8), 0); }, "unaligned predication address");
+    auto continued = setPredication(3, true, &flag[0]);
+    continued[1] |= 1u << 31u;
+    expectFailure([&] { AgcDriver::Pm4::Validate(continued, 0); }, "SET_PREDICATION bits");
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x20, {3u << 16u, low(&flag[0]), high(&flag[0])}, 1), 0); }, "header flags");
+
+    AgcDriver::Pm4::Validate(makePacket(0x2d, {3, 2}, 1), 0);
+    AgcDriver::Pm4::Validate(makePacket(0x46, {0x410}, 1), 0);
+    const auto call = makePacket(0x3f, {0x1000, 0, 0x0f200010}, 1);
+    AgcDriver::Pm4::Validate(call, 0);
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x3f, {0x1000, 0, 0x0f200010}), 0); }, "nested command buffers");
+    expectFailure([&] { AgcDriver::Pm4::Execute(call, state); }, "nested command buffers");
 }
 
 void testDriverSubmission() {
@@ -541,6 +654,250 @@ void testDriverSubmission() {
     check(destination[0] == 0, "rejected submission executed a prefix");
 }
 
+std::vector<std::uint32_t> joinPackets(std::initializer_list<std::vector<std::uint32_t>> packets) {
+    std::vector<std::uint32_t> words;
+    for (const auto& packet : packets) words.insert(words.end(), packet.begin(), packet.end());
+    return words;
+}
+
+std::vector<std::uint32_t> writeWord(std::uint32_t& target, std::uint32_t value) {
+    return makePacket(0x37, {0x00100200, low(&target), high(&target), value});
+}
+
+std::vector<std::uint32_t> conditional(const std::uint32_t& condition, std::uint32_t words, std::uint32_t control = 0) {
+    return makePacket(0x22, {low(&condition), high(&condition), control, words});
+}
+
+std::vector<std::uint32_t> indirectBuffer(const std::vector<std::uint32_t>& target, bool chain = false) {
+    return makePacket(0x3f, {low(target.data()), high(target.data()), static_cast<std::uint32_t>(target.size()) | (chain ? 1u << 20u : 0u)});
+}
+
+void submitWords(std::vector<std::uint32_t>& words, std::uint32_t queue = 0) {
+    Packet packet{words.data(), static_cast<std::uint32_t>(words.size()), 0, {}};
+    check((queue == 0 ? sceAgcDriverSubmitDcb(&packet) : sceAgcDriverSubmitAcb(queue, &packet)) == 0, "conditional submission failed");
+}
+
+void testConditionalSubmission() {
+    alignas(8) static std::uint32_t zero = 0, one = 1, condition = 0;
+    static std::array<std::uint32_t, 16> results{};
+    results.fill(0);
+    const auto run = [](std::vector<std::uint32_t> words, std::uint32_t queue = 0) {
+        submitWords(words, queue);
+        AgcDriverWaitIdle_nid_postfix();
+    };
+    run(joinPackets({conditional(one, 5), writeWord(results[0], 11), writeWord(results[1], 12)}));
+    check(results[0] == 11 && results[1] == 12, "COND_EXEC skipped a range whose condition is set");
+    run(joinPackets({conditional(zero, 6), {0x80000000u}, writeWord(results[0], 21), writeWord(results[1], 22)}));
+    check(results[0] == 11 && results[1] == 22, "COND_EXEC did not skip exactly its range when the condition is zero");
+    run(joinPackets({conditional(zero, 0), writeWord(results[2], 23)}));
+    check(results[2] == 23, "an empty COND_EXEC range skipped the next packet");
+    alignas(4) static std::uint32_t never = 0;
+    never = 0;
+    auto skippedWait = joinPackets({conditional(zero, 9), makePacket(0x3c, {0x13, low(&never), high(&never), 1, 0xffffffffu, 0x190}), makePacket(0x10, {0}, 0x30), writeWord(results[14], 24)});
+    submitWords(skippedWait);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::atomic_ref<std::uint32_t>(results[14]).load() != 24 && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    const bool skipped = std::atomic_ref<std::uint32_t>(results[14]).load() == 24;
+    std::atomic_ref<std::uint32_t>(never).store(1);
+    AgcDriverWaitIdle_nid_postfix();
+    check(skipped, "a WAIT_REG_MEM inside a skipped COND_EXEC range was executed");
+
+    condition = 1;
+    run(joinPackets({writeWord(condition, 0), conditional(condition, 5), writeWord(results[0], 31), writeWord(results[1], 32)}));
+    check(condition == 0 && results[0] == 11 && results[1] == 32, "COND_EXEC read its condition before an earlier packet of its queue stored it");
+    run(joinPackets({writeWord(condition, 9), conditional(condition, 5), writeWord(results[0], 41)}));
+    check(results[0] == 41, "COND_EXEC skipped a range whose condition an earlier packet of its queue set");
+    condition = 0;
+    run(joinPackets({conditional(condition, 5, 3u << 25u), writeWord(results[3], 42), writeWord(condition, 1), conditional(condition, 5, 1u << 25u), writeWord(results[4], 43)}), 0x20);
+    check(results[3] == 0 && results[4] == 43, "compute queue COND_EXEC with a cache policy evaluated wrong");
+
+    run(joinPackets({conditional(one, 10), conditional(zero, 10), writeWord(results[5], 51), writeWord(results[6], 52), writeWord(results[7], 53)}));
+    check(results[5] == 0 && results[6] == 0 && results[7] == 53, "a nested COND_EXEC range reaching past the outer range was not skipped exactly");
+    run(joinPackets({conditional(zero, 10), conditional(one, 10), writeWord(results[5], 54), writeWord(results[6], 55), writeWord(results[7], 56)}));
+    check(results[5] == 0 && results[6] == 55 && results[7] == 56, "a skipped COND_EXEC range did not skip the COND_EXEC inside it");
+
+    static std::vector<std::uint32_t> target;
+    target = joinPackets({writeWord(results[8], 61), conditional(zero, 5), writeWord(results[9], 62), writeWord(results[10], 63)});
+    run(joinPackets({conditional(zero, 4), indirectBuffer(target), writeWord(results[11], 64)}));
+    check(results[8] == 0 && results[10] == 0 && results[11] == 64, "COND_EXEC over an INDIRECT_BUFFER did not skip the whole buffer");
+    run(joinPackets({conditional(one, 4), indirectBuffer(target), writeWord(results[11], 65)}));
+    check(results[8] == 61 && results[9] == 0 && results[10] == 63 && results[11] == 65, "COND_EXEC over an INDIRECT_BUFFER or inside one evaluated wrong");
+
+    const auto rejected = [](std::vector<std::uint32_t> words, const char* text) {
+        results[12] = 0;
+        expectFailure([&] { submitWords(words); }, text);
+        AgcDriverWaitIdle_nid_postfix();
+        check(results[12] == 0, "a rejected conditional submission executed a prefix");
+    };
+    const auto sentinel = writeWord(results[12], 1);
+    rejected(joinPackets({sentinel, conditional(one, 3), writeWord(results[13], 1)}), "ends inside a packet");
+    rejected(joinPackets({sentinel, conditional(one, 6), writeWord(results[13], 1)}), "exceeds its command buffer");
+    rejected(joinPackets({sentinel, conditional(one, 6), {0xc004105cu, 7, 0, 1, 0, 0}}), "a flip inside a conditional execution range");
+    rejected(joinPackets({sentinel, conditional(one, 2), makePacket(0x59, {0x80000000u})}), "REWIND inside a conditional execution range");
+    rejected(joinPackets({sentinel, conditional(one, 4), indirectBuffer(target, true)}), "chained INDIRECT_BUFFER");
+    rejected(joinPackets({sentinel, conditional(one, 2), {0x40000000u, 0}}), "whole packets");
+    rejected(joinPackets({sentinel, makePacket(0x22, {low(&one), high(&one), 0, 0x4005}), writeWord(results[13], 1)}), "reserved count bits");
+    static std::vector<std::uint32_t> unaligned, overlong;
+    unaligned = joinPackets({conditional(one, 3), writeWord(results[13], 1)});
+    overlong = joinPackets({conditional(one, 10), writeWord(results[13], 1)});
+    rejected(joinPackets({sentinel, indirectBuffer(unaligned)}), "ends inside a packet");
+    rejected(joinPackets({sentinel, indirectBuffer(overlong), writeWord(results[13], 1)}), "exceeds its command buffer");
+    check(results[13] == 0, "a rejected conditional submission executed a guarded packet");
+}
+
+std::vector<std::uint32_t> branch(std::uint32_t mode, std::uint32_t function, const std::vector<std::uint32_t>* first, const std::vector<std::uint32_t>* second) {
+    const auto address = [](const std::vector<std::uint32_t>* target) { return target ? reinterpret_cast<std::uintptr_t>(target->data()) : std::uintptr_t{0}; };
+    const auto size = [](const std::vector<std::uint32_t>* target) { return target ? static_cast<std::uint32_t>(target->size()) : 0u; };
+    return makePacket(0x3f, {mode | (function << 8u), 0, 0, 0, 0, 0, 0, static_cast<std::uint32_t>(address(first)), static_cast<std::uint32_t>(address(first) >> 32u), size(first), static_cast<std::uint32_t>(address(second)), static_cast<std::uint32_t>(address(second) >> 32u), size(second)});
+}
+
+void testBranchSubmission() {
+    static std::array<std::uint32_t, 4> results{};
+    static std::vector<std::uint32_t> first, second;
+    results.fill(0);
+    first = joinPackets({writeWord(results[0], 71)});
+    second = joinPackets({writeWord(results[1], 72)});
+    auto words = joinPackets({branch(1, 0, &first, nullptr), writeWord(results[2], 73)});
+    submitWords(words);
+    AgcDriverWaitIdle_nid_postfix();
+    check(results[0] == 71 && results[1] == 0 && results[2] == 73, "an always-taken if-then COND_INDIRECT_BUFFER did not run its buffer");
+    results.fill(0);
+    words = joinPackets({branch(2, 0, &first, &second), writeWord(results[2], 74)});
+    submitWords(words);
+    AgcDriverWaitIdle_nid_postfix();
+    check(results[0] == 71 && results[1] == 0 && results[2] == 74, "an always-taken if-then-else COND_INDIRECT_BUFFER ran the wrong buffer");
+    results.fill(0);
+    words = joinPackets({branch(1, 0, nullptr, nullptr), writeWord(results[2], 75)});
+    submitWords(words);
+    AgcDriverWaitIdle_nid_postfix();
+    check(results[2] == 75, "an empty COND_INDIRECT_BUFFER skipped the next packet");
+    for (const auto& [mode, function, text] : {std::tuple{1u, 3u, "with a comparison"}, std::tuple{0u, 0u, "invalid COND_INDIRECT_BUFFER mode"}}) {
+        results.fill(0);
+        words = joinPackets({writeWord(results[3], 1), branch(mode, function, &first, nullptr)});
+        expectFailure([&] { submitWords(words); }, text);
+        AgcDriverWaitIdle_nid_postfix();
+        check(results[0] == 0 && results[3] == 0, "a rejected COND_INDIRECT_BUFFER submission executed a packet");
+    }
+}
+
+void testPredicatedSubmission() {
+    alignas(16) std::uint64_t flag[2] = {0, 0};
+    alignas(16) std::array<std::uint32_t, 4> written{};
+    alignas(16) std::array<std::uint32_t, 1> nestedWritten{};
+    const auto nested = makePacket(0x37, {0x100, low(nestedWritten.data()), high(nestedWritten.data()), 3});
+    const auto call = makePacket(0x3f, {low(nested.data()), high(nested.data()), 0x0f200000u | static_cast<std::uint32_t>(nested.size())}, 1);
+    const auto submit = [](std::vector<std::uint32_t>& commands) {
+        Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
+        check(sceAgcDriverSubmitDcb(&packet) == 0, "predicated submission failed");
+        AgcDriverWaitIdle_nid_postfix();
+    };
+    std::vector<std::uint32_t> commands;
+    for (const auto& packet : {
+        makePacket(0x20, {0x31100, low(&flag[0]), high(&flag[0])}),
+        makePacket(0x37, {0x100, low(&written[0]), high(&written[0]), 7}, 1),
+        call,
+        makePacket(0x20, {0, 0, 0}),
+        makePacket(0x37, {0x100, low(&written[1]), high(&written[1]), 9}, 1)
+    }) commands.insert(commands.end(), packet.begin(), packet.end());
+    submit(commands);
+    check(written[0] == 0, "packet with a false predicate was executed");
+    check(nestedWritten[0] == 0, "command buffer with a false predicate was executed");
+    check(written[1] == 9, "cleared predication skipped a packet");
+    flag[0] = 1;
+    commands.clear();
+    for (const auto& packet : {
+        makePacket(0x20, {0x31100, low(&flag[0]), high(&flag[0])}),
+        makePacket(0x37, {0x100, low(&written[2]), high(&written[2]), 5}, 1),
+        call,
+        makePacket(0x20, {0x31000, low(&flag[0]), high(&flag[0])}),
+        makePacket(0x37, {0x100, low(&written[3]), high(&written[3]), 6}, 1),
+        makePacket(0x20, {0, 0, 0})
+    }) commands.insert(commands.end(), packet.begin(), packet.end());
+    submit(commands);
+    check(written[2] == 5, "packet with a true predicate was skipped");
+    check(nestedWritten[0] == 3, "command buffer with a true predicate was skipped");
+    check(written[3] == 0, "draw-not-visible packet ran with a set value");
+    auto chain = makePacket(0x3f, {low(nested.data()), high(nested.data()), 0x0f300000u | static_cast<std::uint32_t>(nested.size())}, 1);
+    Packet chained{chain.data(), static_cast<std::uint32_t>(chain.size()), 0, {}};
+    expectFailure([&] { sceAgcDriverSubmitDcb(&chained); }, "predicated command buffer chains");
+    AgcDriverWaitIdle_nid_postfix();
+}
+
+std::vector<std::uint32_t> condWrite(std::uint32_t control, const std::uint32_t& poll, std::uint32_t reference, std::uint32_t mask, std::uint32_t& target, std::uint32_t value) {
+    return makePacket(0x45, {control, low(&poll), high(&poll), reference, mask, low(&target), high(&target), value});
+}
+
+void testConditionalWrite() {
+    AgcDriver::QueueState state;
+    alignas(4) std::uint32_t poll = 0x1234u;
+    alignas(4) std::uint32_t target = 0;
+    const auto valid = condWrite(0x113, poll, 0x34, 0xff, target, 7);
+    check(AgcDriver::Pm4::Name(valid[0]) == "COND_WRITE" && valid[0] == 0xc0074500u, "COND_WRITE header or name mismatch");
+    check(AgcDriver::Pm4::UnsupportedReason(valid[0]).empty() && AgcDriver::Pm4::AccessesMemory(valid[0]), "COND_WRITE is rejected or does not synchronize guest memory");
+
+    const std::array<std::pair<std::uint32_t, bool>, 7> functions{{{0, true}, {1, false}, {2, true}, {3, true}, {4, false}, {5, true}, {6, false}}};
+    for (const auto& [function, writes] : functions) {
+        target = 0;
+        execute(state, condWrite(0x110 | function, poll, 0x34, 0xff, target, 9));
+        check(target == (writes ? 9u : 0u), "COND_WRITE compared the masked poll value incorrectly");
+    }
+    target = 0;
+    execute(state, condWrite(0x111, poll, 0x35, 0xff, target, 10));
+    check(target == 10, "COND_WRITE less-than did not write");
+    target = 0;
+    execute(state, condWrite(0x116, poll, 0x1233, 0xffffffffu, target, 11));
+    check(target == 11, "COND_WRITE greater-than with a full mask did not write");
+
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x45, {0x113, low(&poll), high(&poll), 0, 0, low(&target), high(&target)}), 0); }, "packet size");
+    expectFailure([&] { AgcDriver::Pm4::Validate(condWrite(0x2000113, poll, 0, 0, target, 0), 0); }, "reserved");
+    expectFailure([&] { AgcDriver::Pm4::Validate(condWrite(0x103, poll, 0, 0, target, 0), 0); }, "register-space");
+    expectFailure([&] { AgcDriver::Pm4::Validate(condWrite(0x117, poll, 0, 0, target, 0), 0); }, "compare function");
+    expectFailure([&] { AgcDriver::Pm4::Validate(condWrite(0x013, poll, 0, 0, target, 0), 0); }, "destination");
+    expectFailure([&] { AgcDriver::Pm4::Validate(condWrite(0x213, poll, 0, 0, target, 0), 0); }, "destination");
+    auto misaligned = condWrite(0x113, poll, 0, 0, target, 0);
+    misaligned[2] += 2;
+    expectFailure([&] { AgcDriver::Pm4::Validate(misaligned, 0); }, "misaligned");
+    misaligned = condWrite(0x113, poll, 0, 0, target, 0);
+    misaligned[6] += 1;
+    expectFailure([&] { AgcDriver::Pm4::Validate(misaligned, 0); }, "misaligned");
+
+    struct MemoryState {
+        std::uint32_t poll = 0;
+        std::uint32_t target = 0;
+        bool read = false;
+        bool written = false;
+    };
+    static MemoryState memory;
+    memory = {};
+    struct FlushHookReset {
+        ~FlushHookReset() { AgcDriver::GuestMemory::SetFlushHook(nullptr); }
+    } reset;
+    AgcDriver::GuestMemory::SetFlushHook([](std::uint64_t address, std::size_t bytes) {
+        check(bytes == sizeof(std::uint32_t), "COND_WRITE resolved an unrelated range");
+        if (address == reinterpret_cast<std::uintptr_t>(&memory.target)) {
+            memory.written = true;
+        } else {
+            check(address == reinterpret_cast<std::uintptr_t>(&memory.poll), "COND_WRITE resolved an unrelated poll address");
+            memory.poll = 5;
+            memory.read = true;
+        }
+    });
+    execute(state, condWrite(0x113, memory.poll, 5, 0xffffffffu, memory.target, 12));
+    check(memory.read && memory.written && memory.target == 12, "COND_WRITE used a stale poll value or skipped synchronizing its target");
+}
+
+void testConditionalWriteSubmission() {
+    alignas(4) static std::uint32_t poll = 0;
+    static std::array<std::uint32_t, 2> results{};
+    results.fill(0);
+    poll = 0;
+    auto words = joinPackets({writeWord(poll, 5), condWrite(0x113, poll, 5, 0xffffffffu, results[0], 51), condWrite(0x114, poll, 5, 0xffffffffu, results[1], 52)});
+    submitWords(words);
+    AgcDriverWaitIdle_nid_postfix();
+    check(results[0] == 51, "COND_WRITE read its poll value before an earlier packet of its queue stored it");
+    check(results[1] == 0, "COND_WRITE wrote although its comparison failed");
+}
+
 void testAsyncMemoryFailure() {
     auto commands = makePacket(0x37, {0x100, 0x1000, 0, 1});
     Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
@@ -551,6 +908,14 @@ void testAsyncMemoryFailure() {
     expectFailure([] { LibcRunShutdown_nid_postfix(); }, "guest");
 }
 
+}
+
+void testUnwrittenUserData() {
+    AgcDriver::Registers shader{{0x8c, 0x100}, {0x8d, 0}, {0x240, 0x200}};
+    check(AgcDriver::DriverDetail::readUserData(shader, 0x8c) == 0x100 && AgcDriver::DriverDetail::readUserData(shader, 0x240) == 0x200, "a written user data register was not read");
+    check(AgcDriver::DriverDetail::readUserData(shader, 0x8d) == 0, "a user data register written as zero was not read");
+    check(AgcDriver::DriverDetail::readUserData(shader, 0x95) == 0 && AgcDriver::DriverDetail::readUserData(shader, 0x241) == 0, "an unwritten user data register does not read zero");
+    expectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::readRegister(shader, 0x95)); }, "required shader register");
 }
 
 int main(int argc, char** argv) {
@@ -572,11 +937,20 @@ int main(int argc, char** argv) {
         testCopies();
         testMemoryCopyDecode();
         testMemorySynchronization();
+        testConditionalValidation();
+        testConditionReadSynchronization();
         testEventWrite();
         testAcquireMem();
+        testConditionalWrite();
+        testConditionalWriteSubmission();
+        testPredication();
+        testUnwrittenUserData();
         testDriverSubmission();
+        testPredicatedSubmission();
+        testConditionalSubmission();
+        testBranchSubmission();
         LibcRunShutdown_nid_postfix();
-        std::puts("PM4 catalog, registers, state, memory and submission tests passed");
+        std::puts("PM4 catalog, registers, state, memory, conditional execution and submission tests passed");
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "%s\n", error.what());

@@ -5,7 +5,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <deque>
 #include <mutex>
+#include <utility>
 #include <vector>
 
 #include "SDL.h"
@@ -36,12 +38,22 @@ static constexpr std::uint32_t AUDIO_OUT2_SAMPLE_RATE = 48000;
 // The grain a push carries, in samples per channel: a context's num_grains (Demon's Souls: 256, 5.33 ms).
 static constexpr std::uint32_t AUDIO_OUT2_DEFAULT_GRAIN = 256;
 static constexpr std::uint32_t AUDIO_OUT2_OUTPUT_CHANNELS = 2;
-static constexpr std::uint32_t AUDIO_OUT2_PORT_CHANNELS_MAX = 8;
+static constexpr std::uint32_t AUDIO_OUT2_PORT_CHANNELS_MAX = 12;
 
 struct AudioOut2Context;
+struct AudioOut2StereoFold;
+
+struct AudioOut2CapturedPort {
+    std::size_t index = 0;
+    std::uint64_t generation = 0;
+    const void* data = nullptr;
+};
+
+using AudioOut2Grain = std::vector<AudioOut2CapturedPort>;
 
 struct AudioOut2Port {
     bool used = false;
+    std::uint64_t generation = 0;
     AudioOut2Context* context = nullptr;
     std::uint16_t type = 0;
     std::uint32_t dataFormat = 0;
@@ -49,8 +61,9 @@ struct AudioOut2Port {
     std::uint32_t flags = 0;
     std::uint32_t channels = 0;
     bool int16 = false;
+    const AudioOut2StereoFold* fold = nullptr;
     const void* data = nullptr;
-    float volume[AUDIO_OUT2_PORT_CHANNELS_MAX] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+    float volume[AUDIO_OUT2_PORT_CHANNELS_MAX] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
     std::uint64_t dataSets = 0;
     std::uint64_t attributeTraces = 0;
 };
@@ -61,12 +74,17 @@ struct AudioOut2Context {
     std::uint32_t queueDepth = 1;
     // Fallback hardware queue model for a context without an SDL device: pushes that have not
     // finished playing, and the time the last of them finishes; playback is real time, so the queue
-    // drains as the wall clock advances. With a device the SDL queue is the hardware queue.
+    // drains as the wall clock advances. With a device the unplayed grains are the hardware queue.
     std::uint32_t queued = 0;
     std::chrono::steady_clock::time_point playHead;
     SDL_AudioDeviceID device = 0;
-    // Stereo float mix of the ports for one push.
+    // Stereo float mix of the ports for one grain.
     std::vector<float> mix;
+    // Mixed stereo frames the device has not played yet; it plays silence until the cushion is mixed.
+    std::deque<float> output;
+    bool priming = true;
+    std::deque<AudioOut2Grain> pendingGrains;
+    std::deque<std::chrono::steady_clock::time_point> pendingSince;
     SDL_AudioDeviceID padDevice = 0;
     std::chrono::steady_clock::time_point nextPadProbe;
     AudioOut2PadLayout padLayout;
@@ -90,7 +108,8 @@ struct AudioOut2Context {
 
 // Mixes every port of the context that carries PCM data into out (stereo float, frames frames), summing
 // onto the zeroed buffer. Returns the number of ports mixed.
-std::uint32_t AudioOut2MixPorts(const AudioOut2Context& context, float* out, float* padOut, std::uint32_t frames);
+std::uint32_t AudioOut2MixPorts(const AudioOut2Context& context, const AudioOut2Grain& grain, float* out, float* padOut, std::uint32_t frames);
+AudioOut2Grain AudioOut2CaptureGrain(const AudioOut2Context& context);
 bool AudioOut2HasPadPorts(const AudioOut2Context& context);
 // Forgets the ports of a context being destroyed.
 void AudioOut2ReleasePorts(const AudioOut2Context& context);

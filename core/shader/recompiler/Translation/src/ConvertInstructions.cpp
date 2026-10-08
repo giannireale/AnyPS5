@@ -171,7 +171,14 @@ void TranslationContext::vCvtPknormF32(const RdnaInstruction& inst, bool signedV
 
 void TranslationContext::vCvtPkU8F32(const RdnaInstruction& inst) {
     const IrF32 source(*readOperand(sourceAt(inst, 0u), IrType::F32));
-    const IrU32 byteValue = convertF32ToU32Saturated(source, 255.0f, 255.0f, 255u);
+    const IrU32 truncated = convertF32ToU32Saturated(source, 255.0f, 255.0f, 255u);
+    IrValue& whole = ir.Emit(IrOpcode::ConvertF32U32, IrType::F32, {&truncated.Value()});
+    IrValue& fraction = ir.Emit(IrOpcode::FPSub32, IrType::F32, {&source.Value(), &whole});
+    const IrU1 odd(ir.INotEqual(ir.BitwiseAnd(truncated.Value(), ir.Constant(1u)), ir.Constant(0u)));
+    const IrU1 aboveHalf(ir.Emit(IrOpcode::FPOrdGreaterThan32, IrType::U1, {&fraction, &ir.ConstantF32(0.5f)}));
+    const IrU1 tie(ir.LogicalAnd(ir.Emit(IrOpcode::FPOrdEqual32, IrType::U1, {&fraction, &ir.ConstantF32(0.5f)}), odd.Value()));
+    const IrU1 roundUp(ir.LogicalAnd(ir.LogicalOr(aboveHalf.Value(), tie.Value()), ir.ULessThan(truncated.Value(), ir.Constant(255u))));
+    const IrU32 byteValue(ir.Select(roundUp.Value(), ir.IAdd(truncated.Value(), ir.Constant(1u)), truncated.Value()));
     const IrU32 index(ir.BitwiseAnd(readU32(sourceAt(inst, 1u)).Value(), ir.Constant(3u)));
     const IrU32 shift(ir.ShiftLeftLogical(index.Value(), ir.Constant(3u)));
     const IrU32 mask(ir.ShiftLeftLogical(ir.Constant(0xffu), shift.Value()));

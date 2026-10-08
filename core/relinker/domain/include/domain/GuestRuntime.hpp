@@ -12,6 +12,7 @@ struct GuestImport {
     std::uint32_t TargetRva;
     std::uint64_t Addend;
     std::uint32_t RelocationType = 1;
+    std::string Library;
 };
 
 struct GuestRuntime {
@@ -27,6 +28,7 @@ struct GuestRuntime {
     bool DeferInit = false;
     // Output names of deferred guest modules this one imports from; they start before it.
     std::vector<std::string> DeferredDependencies;
+    std::vector<std::string> Names;
 };
 
 }

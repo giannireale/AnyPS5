@@ -139,13 +139,6 @@ int APS5_VABI sceKernelGetModuleInfoForUnwind(uint64_t addr, int flags, ModuleIn
 #endif
 }
 
-int APS5_VABI sceKernelGetModuleInfoFromAddr(uint64_t addr, int n, ModuleInfo* r) {
- (void)addr;
- (void)n;
- (void)r;
- NotImplemented_nid_no_patch(__func__);
- return 0;
-}
 
 }
 #ifdef _WIN32

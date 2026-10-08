@@ -131,6 +131,7 @@ bool IsScalarAluOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::SMulHiI32:
         case RdnaOpcode::SMulkI32:
         case RdnaOpcode::SBfeU64:
+        case RdnaOpcode::SBfeI64:
         case RdnaOpcode::SBfmB32:
         case RdnaOpcode::SBfmB64:
         case RdnaOpcode::SCselectB32:
@@ -646,6 +647,9 @@ bool IsScalarMemoryOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::SBufferLoadDwordx4:
         case RdnaOpcode::SBufferLoadDwordx8:
         case RdnaOpcode::SBufferLoadDwordx16:
+        case RdnaOpcode::SScratchLoadDword:
+        case RdnaOpcode::SScratchLoadDwordx2:
+        case RdnaOpcode::SScratchLoadDwordx4:
             return true;
         default:
             return false;
@@ -819,6 +823,7 @@ bool IsImageOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::ImageStoreMip:
         case RdnaOpcode::ImageStorePck:
         case RdnaOpcode::ImageStoreMipPck:
+        case RdnaOpcode::ImageMsaaLoad:
         case RdnaOpcode::ImageAtomicSwap:
         case RdnaOpcode::ImageAtomicCmpswap:
         case RdnaOpcode::ImageAtomicAdd:

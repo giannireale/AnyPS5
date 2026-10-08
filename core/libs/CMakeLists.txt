@@ -34,6 +34,12 @@ function(configure_windows_unwind target)
     endif()
 endfunction()
 
+if(MINGW)
+    foreach(runtimeLinkFlag IN ITEMS -static-libgcc -static-libstdc++ -static)
+        string(REPLACE "${runtimeLinkFlag}" "" CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
+    endforeach()
+endif()
+
 set(LIBC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/prx/libc)
 add_library(libc SHARED EXCLUDE_FROM_ALL)
 set(LIBS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
@@ -51,6 +57,8 @@ set_target_properties(libc PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${UNPATCHED_DIR}
         LIBRARY_OUTPUT_DIRECTORY ${UNPATCHED_DIR}
         ARCHIVE_OUTPUT_DIRECTORY ${IMPLIB_DIR}
+        BUILD_WITH_INSTALL_RPATH ON
+        INSTALL_RPATH "$ORIGIN"
 )
 
 set(LIBC_UNPATCHED ${UNPATCHED_DIR}/libc.prx)
@@ -101,6 +109,8 @@ foreach(LIB_DIR ${LIBS_DIRS})
                 RUNTIME_OUTPUT_DIRECTORY ${UNPATCHED_DIR}
                 LIBRARY_OUTPUT_DIRECTORY ${UNPATCHED_DIR}
                 ARCHIVE_OUTPUT_DIRECTORY ${IMPLIB_DIR}
+                BUILD_WITH_INSTALL_RPATH ON
+                INSTALL_RPATH "$ORIGIN"
         )
 
         set(UNPATCHED_FILE ${UNPATCHED_DIR}/${LIB_NAME}.prx)
@@ -117,17 +127,6 @@ foreach(LIB_DIR ${LIBS_DIRS})
         list(APPEND PATCHED_OUTPUTS ${PATCHED_FILE})
     endif()
 endforeach()
-
-set(LIBCOHTML_PATCHED ${PATCHED_DIR}/libcohtml.prx)
-set(LIBCOHTML_PROSPERO_PATCHED ${PATCHED_DIR}/libcohtml.Prospero.prx)
-add_custom_command(
-        OUTPUT ${LIBCOHTML_PROSPERO_PATCHED}
-        COMMAND ${CMAKE_COMMAND} -E copy "${LIBCOHTML_PATCHED}" "${LIBCOHTML_PROSPERO_PATCHED}"
-        DEPENDS ${LIBCOHTML_PATCHED}
-        VERBATIM
-)
-add_custom_target(libcohtml_prospero DEPENDS ${LIBCOHTML_PROSPERO_PATCHED})
-list(APPEND PATCHED_OUTPUTS ${LIBCOHTML_PROSPERO_PATCHED})
 
 add_custom_target(libs DEPENDS ${PATCHED_OUTPUTS})
 
@@ -207,15 +206,7 @@ if(BUILD_TESTING)
         set_tests_properties(audioout_timing PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
-    add_test_executable(audio3d_port_tests tests/Audio3dPorts.cpp)
-    target_include_directories(audio3d_port_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(audio3d_port_tests PRIVATE libSceAudio3d libc)
-    configure_windows_unwind(audio3d_port_tests)
-    add_test(NAME audio3d_ports COMMAND audio3d_port_tests)
-    if(WIN32)
-        set_tests_properties(audio3d_ports PROPERTIES ENVIRONMENT_MODIFICATION
-            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
-    endif()
+
     add_test_executable(voice_port_tests tests/VoicePorts.cpp)
     target_include_directories(voice_port_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(voice_port_tests PRIVATE libSceVoice libc)
@@ -225,28 +216,8 @@ if(BUILD_TESTING)
         set_tests_properties(voice_ports PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
-    add_test_executable(ime_keyboard_tests tests/ImeKeyboard.cpp)
-    target_include_directories(ime_keyboard_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(ime_keyboard_tests PRIVATE libSceIme libc)
-    configure_windows_unwind(ime_keyboard_tests)
-    add_test(NAME ime_keyboard COMMAND ime_keyboard_tests)
-    if(WIN32)
-        set_tests_properties(ime_keyboard PROPERTIES ENVIRONMENT_MODIFICATION
-            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
-    endif()
-    add_test_executable(guest_sync_on_address_tests tests/GuestSyncOnAddress.cpp)
-    target_include_directories(guest_sync_on_address_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_sources(guest_sync_on_address_tests PRIVATE prx/libkernel/SyncOnAddress.cpp)
-    target_compile_definitions(guest_sync_on_address_tests PRIVATE APS5_SYNC_ON_ADDRESS_TEST_ACCESS)
-    target_include_directories(guest_sync_on_address_tests PRIVATE ${LIBS_INCLUDE_DIR})
-    target_link_libraries(guest_sync_on_address_tests PRIVATE libc)
-    configure_windows_unwind(guest_sync_on_address_tests)
-    add_test(NAME guest_sync_on_address COMMAND guest_sync_on_address_tests)
-    set_tests_properties(guest_sync_on_address PROPERTIES TIMEOUT 20)
-    if(WIN32)
-        set_tests_properties(guest_sync_on_address PROPERTIES ENVIRONMENT_MODIFICATION
-            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
-    endif()
+
+
 
 
     add_test_executable(savedata_core_write_replacement_tests tests/SaveDataWriteReplacement.cpp)
@@ -279,10 +250,4 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceSaveData.native>")
 
     endif()
-endif()
-
-if(MINGW)
-    foreach(runtimeLinkFlag IN ITEMS -static-libgcc -static-libstdc++ -static)
-        string(REPLACE "${runtimeLinkFlag}" "" CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
-    endforeach()
 endif()
