@@ -50,6 +50,7 @@ struct TrampolineSite {
     std::size_t ReturnBranchOffset;
     std::vector<TrampolineFixup> Fixups;
     std::vector<TrampolineIncomingBranch> Incoming;
+    std::vector<StubRelocation> Relocations = {};
 };
 
 struct ConvertResult {

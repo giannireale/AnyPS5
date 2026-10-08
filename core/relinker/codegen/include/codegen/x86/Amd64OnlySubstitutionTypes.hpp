@@ -1,7 +1,6 @@
 #ifndef CODEGEN_X86_AMD64ONLYSUBSTITUTIONTYPES_HPP
 #define CODEGEN_X86_AMD64ONLYSUBSTITUTIONTYPES_HPP
 
-#include <codegen/x86/StubBodyBuilder.hpp>
 #include <domain/Types.hpp>
 #include <cstdint>
 #include <string>
@@ -16,6 +15,18 @@ enum class Amd64OnlyLowering : std::uint8_t {
     Kept
 };
 
+struct PendingRipFixup {
+    std::size_t BodyOffset;
+    std::int32_t OriginalDisplacement;
+    std::size_t InstructionEnd;
+};
+
+struct StubRelocation {
+    std::size_t DisplacementOffset;
+    std::size_t InstructionEnd;
+    std::int64_t SiteTarget;
+};
+
 struct Amd64OnlyMatch {
     std::string InstructionName;
     std::size_t Length;
@@ -26,6 +37,7 @@ struct Amd64OnlyMatch {
     std::size_t TrailingOffset = 0;
     std::vector<PendingRipFixup> RipFixups;
     bool Optional = false;
+    std::vector<StubRelocation> Relocations = {};
 };
 
 struct Amd64OnlySubstitutionReport {

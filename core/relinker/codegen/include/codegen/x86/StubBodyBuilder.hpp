@@ -1,26 +1,24 @@
 #ifndef CODEGEN_X86_STUBBODYBUILDER_HPP
 #define CODEGEN_X86_STUBBODYBUILDER_HPP
 
+#include <codegen/x86/Amd64OnlySubstitutionTypes.hpp>
+#include <domain/Types.hpp>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <optional>
 #include <span>
 #include <vector>
 
 namespace Codegen {
-
-struct PendingRipFixup {
-    std::size_t BodyOffset;
-    std::int32_t OriginalDisplacement;
-    std::size_t InstructionEnd;
-};
 
 struct LoweredBody {
     std::vector<std::uint8_t> Bytes;
     std::size_t ReturnBranchOffset;
     std::size_t TrailingOffset = 0;
     std::vector<PendingRipFixup> RipFixups;
+    std::vector<StubRelocation> Relocations = {};
 };
 
 using StubConstant = std::array<std::uint8_t, 16>;
@@ -42,11 +40,14 @@ struct MemoryOperand {
     std::int32_t Displacement;
     bool StackBase;
     std::size_t EncodedSize;
+    bool RipRelative;
+    std::size_t InstructionLength;
 };
 
 [[nodiscard]] MemoryOperand DecodeMemoryOperand(const std::uint8_t* data, std::size_t length, std::size_t modRmOffset, std::uint8_t rex, std::vector<std::uint8_t> prefixes);
 
 void EmitShiftImm(std::vector<std::uint8_t>& out, std::uint8_t extension, std::uint8_t reg, std::uint8_t imm);
+void ApplyStubRelocations(std::span<std::uint8_t> body, std::span<const StubRelocation> relocations, std::uint64_t siteAddress, std::uint64_t stubAddress, Domain::FileByteOffset failureOffset);
 
 class StubBodyBuilder {
 public:
@@ -79,6 +80,8 @@ public:
     void GprAddImmediate(std::uint8_t reg, std::uint32_t value);
     void LoadXmmIndirect(std::uint8_t reg, std::uint8_t rexExtension, std::span<const std::uint8_t> address);
     void LoadXmmStackRelative(std::uint8_t reg, std::uint8_t rexExtension, std::uint8_t sib, std::int32_t offset);
+    void Move(std::span<const std::uint8_t> instruction, std::optional<std::size_t> ripDisplacementOffset);
+    void Advance(std::size_t length);
     [[nodiscard]] LoweredBody Finish();
 
 private:
@@ -94,7 +97,9 @@ private:
     std::vector<Fixup> _fixups;
     std::vector<StubConstant> _constants;
     std::vector<PendingRipFixup> _ripFixups;
+    std::vector<StubRelocation> _relocations;
     std::size_t _stackDepth = 0;
+    std::size_t _siteOffset = 0;
 };
 
 void EmitSse(std::vector<std::uint8_t>& out, std::uint8_t prefix, std::initializer_list<std::uint8_t> opcode, std::uint8_t dst, std::uint8_t src);

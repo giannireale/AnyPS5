@@ -4,8 +4,10 @@
 #include <elfpatcher/general/ProgramHeaderLayoutRequest.hpp>
 #include <elfpatcher/general/SectionHeaderTableRequest.hpp>
 #include <codegen/x86/Amd64OnlySubstitutionTable.hpp>
+#include <codegen/x86/StubBodyBuilder.hpp>
 #include <algorithm>
 #include <limits>
+#include <span>
 #include <string>
 
 namespace Elfpatcher::Linux {

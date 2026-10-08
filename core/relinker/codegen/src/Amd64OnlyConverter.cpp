@@ -177,6 +177,7 @@ void Amd64OnlyConverter::_convertSegment(
             std::size_t siteLength = match.Length;
             auto stub = substitution;
             std::vector<TrampolineFixup> fixups;
+            std::vector<StubRelocation> trailingRelocations;
             std::map<std::uint64_t, std::size_t> absorbed;
             if (siteLength < Amd64OnlySubstitutionTable::kJmpRel32.Size) {
                 const X64InstructionDecoder decoder;
@@ -210,7 +211,7 @@ void Amd64OnlyConverter::_convertSegment(
                                 throw CodegenException("Relocated instruction has a truncated RIP-relative displacement", ph.Offset + following.Offset);
                             std::int32_t displacement = 0;
                             std::memcpy(&displacement, bytes.data() + info.RipRelativeDispOffset, sizeof(displacement));
-                            fixups.push_back({trailingBytes.size() + info.RipRelativeDispOffset, static_cast<Domain::VirtualAddress>(followingAddress + following.Length + displacement)});
+                            trailingRelocations.push_back({trailingBytes.size() + info.RipRelativeDispOffset, trailingBytes.size() + following.Length, static_cast<std::int64_t>(followingAddress - address + following.Length) + displacement});
                         }
                         trailingBytes.insert(trailingBytes.end(), bytes.begin(), bytes.end());
                     } else {
@@ -229,6 +230,13 @@ void Amd64OnlyConverter::_convertSegment(
                 stub = std::move(*relocated);
                 for (auto& fixup : fixups)
                     fixup.BodyOffset += stub.TrailingOffset;
+                // Original instruction positions survive widened branches in trailingBytes.
+                std::erase_if(stub.Relocations, [&](const auto& relocation) { return relocation.DisplacementOffset >= stub.TrailingOffset; });
+                for (auto relocation : trailingRelocations) {
+                    relocation.DisplacementOffset += stub.TrailingOffset;
+                    relocation.InstructionEnd += stub.TrailingOffset;
+                    stub.Relocations.push_back(relocation);
+                }
             }
             for (const auto& pending : stub.RipFixups)
                 fixups.push_back({pending.BodyOffset, static_cast<Domain::VirtualAddress>(address + pending.InstructionEnd + pending.OriginalDisplacement)});
@@ -259,7 +267,8 @@ void Amd64OnlyConverter::_convertSegment(
                 stub.StubBody,
                 stub.ReturnBranchOffset,
                 std::move(fixups),
-                std::move(incoming)
+                std::move(incoming),
+                std::move(stub.Relocations)
             });
             replacementLength = stub.StubBody.size();
             } catch (const CodegenException&) {

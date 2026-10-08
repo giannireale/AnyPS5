@@ -1,9 +1,11 @@
 #include <elfpatcher/general/GuestModuleWriter.hpp>
 #include <elfpatcher/general/TrampolineWriter.hpp>
 #include <codegen/x86/Amd64OnlySubstitutionTable.hpp>
+#include <codegen/x86/StubBodyBuilder.hpp>
 #include <io/BufferUtils.hpp>
 #include <algorithm>
 #include <limits>
+#include <span>
 
 namespace Elfpatcher {
 

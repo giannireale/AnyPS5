@@ -1,3 +1,5 @@
+#include <codegen/x86/StubBodyBuilder.hpp>
+#include <span>
 #include <elfpatcher/general/TrampolineWriter.hpp>
 #include <codegen/x86/Amd64OnlySubstitutionTable.hpp>
 #include <domain/Types.hpp>
@@ -29,6 +31,8 @@ void AppendTrampoline(std::vector<std::uint8_t>& bytes, const Codegen::Trampolin
     if (!inRange(returnDisplacement) || !inRange(jumpDisplacement))
         throw Domain::RelinkerException("AMD-only stub exceeds rel32 range", site.Offset);
     Io::WriteU32(bytes, static_cast<std::size_t>(bodyOffset + site.ReturnBranchOffset + 1), static_cast<std::uint32_t>(returnDisplacement));
+
+    Codegen::ApplyStubRelocations(std::span<std::uint8_t>(bytes.data() + bodyOffset, site.ReturnBranchOffset), site.Relocations, site.Address, bodyAddress, site.Offset);
 
     for (const auto& fixup : site.Fixups) {
         if (fixup.BodyOffset + 4 > site.Body.size())
