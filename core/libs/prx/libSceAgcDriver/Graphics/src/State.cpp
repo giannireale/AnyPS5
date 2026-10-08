@@ -57,6 +57,43 @@ std::string vteMessage(std::uint32_t viewportControl) {
     return message.str();
 }
 
+std::string conservativeMessage(std::uint32_t control) {
+    std::ostringstream message;
+    message << "AGC graphics: PA_SC_CONSERVATIVE_RASTERIZATION_CNTL=0x" << std::hex << control << ": only 0x6000 (off) and 0x6001 (overestimation) are supported";
+    return message.str();
+}
+
+void requireConservativeTriangles(bool triangles, const char* primitive, const char* source, std::uint32_t value) {
+    if (triangles) return;
+    std::ostringstream message;
+    message << "AGC graphics: conservative rasterization of " << primitive << " is unsupported (" << source << "=0x" << std::hex << value << "): only triangles are overestimated";
+    throw std::runtime_error(message.str());
+}
+
+VkConservativeRasterizationModeEXT decodeConservativeRasterization(const QueueState& queue) {
+    const auto& cx = queue.context;
+    const auto control = read(cx, 0x313);
+    if (control == 0x6000u) return VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT;
+    if (control != 0x6001u) throw std::runtime_error(conservativeMessage(control));
+    const auto stages = read(cx, 0x2d5);
+    if ((stages & 0x20u) != 0) {
+        const auto output = read(cx, 0x29b);
+        const auto type = output & 0x3fu;
+        const bool perStream = (output & 0x80000000u) != 0;
+        requireConservativeTriangles(!perStream && type == 2u, perStream ? "per-stream primitive types" : type == 0u ? "points" : type == 1u ? "lines" : "other primitive types", "VGT_GS_OUT_PRIM_TYPE", output);
+    } else if ((stages & 4u) != 0) {
+        const auto parameters = read(cx, 0x2db);
+        const auto domain = parameters & 3u;
+        const auto topology = (parameters >> 5u) & 7u;
+        requireConservativeTriangles((domain == 1u || domain == 2u) && (topology == 2u || topology == 3u), topology == 0u ? "points" : topology == 1u || domain == 0u ? "lines" : "other primitive types", "VGT_TF_PARAM", parameters);
+    } else {
+        const auto primitive = read(queue.userConfig, 0x242, RegisterBank::UserConfig);
+        requireConservativeTriangles(primitive == 4u || primitive == 5u || primitive == 6u, primitive == 1u ? "points" : primitive == 2u || primitive == 3u ? "lines" : primitive == 7u || primitive == 17u ? "rectangles" : "other primitive types", "VGT_PRIMITIVE_TYPE", primitive);
+    }
+    Require((read(cx, 0x1b3) & 0x44u) == 0, "conservative rasterization with centroid interpolation is unsupported");
+    return VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT;
+}
+
 // The register rules DecodeState and DrawRejection share (the precheck must reject exactly what
 // DecodeState would): the masks whose set bits are unsupported, and the depth-control verdict.
 // Render target index, viewport index and the misc export vector that carries them are accepted but
@@ -450,9 +487,17 @@ ShaderStages DecodeShaderStages(const QueueState& queue) {
     return result;
 }
 
+std::string DepthMaintenanceRejection(const QueueState& queue) {
+    const auto control = find(queue.context, 0x000);
+    if (control == queue.context.end() || (control->second & ~0x2063u) == 0) return {};
+    return zeroMessage(0x000, control->second, "DB_RENDER_CONTROL depth copy, resummarize or decompress");
+}
+
 State DecodeState(const QueueState& queue) {
+    if (auto reason = DepthMaintenanceRejection(queue); !reason.empty()) throw std::runtime_error(reason);
     const auto& cx = queue.context;
     State result{};
+    result.conservativeRasterization = decodeConservativeRasterization(queue);
     result.stages = DecodeShaderStages(queue);
     const auto primitive = read(queue.userConfig, 0x242, RegisterBank::UserConfig);
     APS5_LOG_OUT_DEBUG("DecodeState primitive=%u path=%u vertexWave=%u", primitive, static_cast<unsigned>(result.stages.path), result.stages.vertexWaveSize);
@@ -516,7 +561,6 @@ State DecodeState(const QueueState& queue) {
     Require(read(cx, 0x83) == 0xffffu, "clip rectangles are unsupported");
     Require((read(cx, 0x8c) & 0xfu) == 0xau, "nonstandard triangle edge rules are unsupported");
     Require(read(cx, 0x2f9) == 0x2du, "nonstandard pixel center or vertex quantization is unsupported");
-    Require(read(cx, 0x313) == 0x6000u, "conservative rasterization is unsupported");
     Require(read(cx, 0x30e) == 0xffffffffu && read(cx, 0x30f) == 0xffffffffu, "sample masks are unsupported");
     const auto viewportControl = read(cx, 0x206);
     if (viewportControl != 0x43fu) throw std::runtime_error(vteMessage(viewportControl));
@@ -793,6 +837,7 @@ std::optional<ColorMetadataPass> DecodeColorMetadataPass(const QueueState& queue
 }
 
 std::string DrawRejection(const QueueState& queue, bool indexed) {
+    if (auto reason = DepthMaintenanceRejection(queue); !reason.empty()) return reason;
     const auto& cx = queue.context;
     // A register a rule needs that is absent gives no verdict here: DecodeState reports it.
     const auto value = [&](const Registers& registers, std::uint32_t offset, std::uint32_t& out) {
@@ -833,7 +878,7 @@ std::string DrawRejection(const QueueState& queue, bool indexed) {
     if (value(cx, 0x83, word) && word != 0xffffu) return require(false, "clip rectangles are unsupported");
     if (value(cx, 0x8c, word) && (word & 0xfu) != 0xau) return require(false, "nonstandard triangle edge rules are unsupported");
     if (value(cx, 0x2f9, word) && word != 0x2du) return require(false, "nonstandard pixel center or vertex quantization is unsupported");
-    if (value(cx, 0x313, word) && word != 0x6000u) return require(false, "conservative rasterization is unsupported");
+    if (value(cx, 0x313, word) && word != 0x6000u && word != 0x6001u) return conservativeMessage(word);
     std::uint32_t other = 0;
     if (value(cx, 0x30e, word) && value(cx, 0x30f, other) && (word != 0xffffffffu || other != 0xffffffffu)) return require(false, "sample masks are unsupported");
     if (value(cx, 0x206, word) && word != 0x43fu) return vteMessage(word);
