@@ -29,7 +29,9 @@ std::size_t X64InstructionDecoder::Decode(const std::uint8_t* data, std::size_t 
             repnePrefix = true;
         } else if (b == PrefixOperandSize) {
             operandSizeOverride = true;
-        } else if (b != PrefixLock && b != PrefixRep && b != PrefixAddressSize &&
+        } else if (b == PrefixAddressSize) {
+            addressSizeOverride = true;
+        } else if (b != PrefixLock && b != PrefixRep &&
                    b != PrefixSegCs && b != PrefixSegSs && b != PrefixSegDs &&
                    b != PrefixSegEs && b != PrefixSegFs && b != PrefixSegGs) {
             break;
@@ -40,6 +42,9 @@ std::size_t X64InstructionDecoder::Decode(const std::uint8_t* data, std::size_t 
         rex = 0;
         pos += 1;
     }
+
+    const bool rexW = rexPresent && (rex & RexWBit) != 0;
+    const std::size_t operandImmediateSize = operandSizeOverride && !rexW ? ImmSize16 : ImmSize32;
 
     if (pos >= available) {
         throw CodegenException("Instruction truncated after prefixes");
@@ -107,7 +112,6 @@ std::size_t X64InstructionDecoder::Decode(const std::uint8_t* data, std::size_t 
 
     bool hasModRm = false;
     std::size_t immediateSize = ImmSizeNone;
-    const bool rexW = rexPresent && (rex & RexWBit) != 0;
     const bool operandSize16 = operandSizeOverride && !rexW;
 
     const bool vectorImmediate = vexMap == 1 && ((opcode >= 0x70 && opcode <= 0x73) || opcode == 0xC2 || opcode == 0xC4 || opcode == 0xC5 || opcode == 0xC6);
@@ -178,8 +182,7 @@ std::size_t X64InstructionDecoder::Decode(const std::uint8_t* data, std::size_t 
             if (opcode >= OneByteMovImm32RegMin && opcode <= OneByteMovImm32RegMax) {
                 immediateSize = rexW ? ImmSize64 :
                     (operandSizeOverride ? ImmSize16 : ImmSize32);
-            } else if (opcode == OneBytePushImm32) {
-                immediateSize = operandSizeOverride ? ImmSize16 : ImmSize32;
+
             } else {
                 immediateSize = operandSize16 ? ImmSize16 : ImmSize32;
             }
@@ -210,6 +213,10 @@ std::size_t X64InstructionDecoder::Decode(const std::uint8_t* data, std::size_t 
 
         if (opcode == OneByteEnter) {
             immediateSize = ImmSizeEnter;
+        }
+
+        if (opcode >= OneByteMovMoffsMin && opcode <= OneByteMovMoffsMax) {
+            immediateSize = addressSizeOverride ? ImmSize32 : ImmSize64;
         }
     } else {
         if (opcode == TwoByteExtrqInsertqImm8Imm8) {

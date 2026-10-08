@@ -57,9 +57,9 @@ static std::uint64_t ClockOrigin() {
 }
 
 static std::uint64_t GetMonotonicNanos() {
+    const auto origin = ClockOrigin();
     const auto raw = RawMonotonicNanos();
     if (TimeScale() == 1.0) return raw;
-    const auto origin = ClockOrigin();
     return origin + static_cast<std::uint64_t>(static_cast<double>(raw - origin) * TimeScale());
 }
 
@@ -147,11 +147,13 @@ static const bool g_timerSelfTest = [] {
 extern "C" {
 
 std::uint64_t APS5_VABI sceKernelGetProcessTime() {
-    return (GetMonotonicNanos() - GetStartNanos()) / 1000ULL;
+    const auto start = GetStartNanos();
+    return (GetMonotonicNanos() - start) / 1000ULL;
 }
 
 std::uint64_t APS5_VABI sceKernelGetProcessTimeCounter() {
-    return GetMonotonicNanos() - GetStartNanos();
+    const auto start = GetStartNanos();
+    return GetMonotonicNanos() - start;
 }
 
 std::uint64_t APS5_VABI sceKernelGetProcessTimeCounterFrequency() {

@@ -29,6 +29,59 @@
 int StartDynamicGuestModule_nid_no_patch(void* handle, size_t args, const void* argp,
                                        int (*initialize)(void*, size_t, const void*));
 
+#ifdef _WIN32
+namespace {
+std::uint64_t ReadEncoded(const std::uint8_t*& p, std::uint8_t encoding) {
+  const auto application = encoding & 0x70;
+  if ((encoding & 0x80) != 0 || (application != 0x00 && application != 0x10)) NotImplemented_nid_no_patch("sceKernelGetModuleInfoForUnwind eh_frame_ptr encoding other than absptr or pcrel");
+  std::uint64_t value = 0;
+  const auto* at = p;
+  switch (encoding & 0x0f) {
+  case 0x03: { std::uint32_t v; std::memcpy(&v, p, 4); value = v; p += 4; break; }
+  case 0x0b: { std::int32_t v; std::memcpy(&v, p, 4); value = static_cast<std::uint64_t>(static_cast<std::int64_t>(v)); p += 4; break; }
+  case 0x04: case 0x0c: std::memcpy(&value, p, 8); p += 8; break;
+  default: NotImplemented_nid_no_patch("sceKernelGetModuleInfoForUnwind eh_frame_ptr value format");
+  }
+  if (application == 0x10) value += reinterpret_cast<std::uint64_t>(at);
+  return value;
+}
+
+void FillGuestUnwindInfo(const std::uint8_t* base, ModuleInfoForUnwind* info) {
+  const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+  if (dos->e_magic != IMAGE_DOS_SIGNATURE) throw std::runtime_error("sceKernelGetModuleInfoForUnwind: image without a DOS header");
+  const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+  if (nt->Signature != IMAGE_NT_SIGNATURE) throw std::runtime_error("sceKernelGetModuleInfoForUnwind: image without an NT header");
+  const auto* sections = IMAGE_FIRST_SECTION(nt);
+  for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+    if (std::memcmp(sections[i].Name, ".ehmeta", 8) != 0) continue;
+    std::uint32_t rva = 0;
+    std::memcpy(&rva, base + sections[i].VirtualAddress, 4);
+    const auto* header = base + rva;
+    if (header[0] != 1) NotImplemented_nid_no_patch("sceKernelGetModuleInfoForUnwind eh_frame_hdr version other than 1");
+    const auto* p = header + 4;
+    const auto frames = ReadEncoded(p, header[1]);
+    const auto* record = reinterpret_cast<const std::uint8_t*>(frames);
+    const auto* end = base + nt->OptionalHeader.SizeOfImage;
+    if (record < base || record >= end) throw std::runtime_error("sceKernelGetModuleInfoForUnwind: eh_frame_ptr outside the image");
+    for (;;) {
+      if (record + 4 > end) throw std::runtime_error("sceKernelGetModuleInfoForUnwind: eh_frame has no terminator inside the image");
+      std::uint32_t length = 0;
+      std::memcpy(&length, record, 4);
+      if (length == 0) break;
+      if (length == 0xffffffffu) NotImplemented_nid_no_patch("sceKernelGetModuleInfoForUnwind eh_frame record with a 64-bit length");
+      record += 4 + length;
+    }
+    info->eh_frame_hdr_addr = reinterpret_cast<std::uint64_t>(header);
+    info->eh_frame_addr = frames;
+    info->eh_frame_size = static_cast<std::uint64_t>(record - reinterpret_cast<const std::uint8_t*>(frames));
+    info->seg0_addr = reinterpret_cast<std::uint64_t>(base);
+    info->seg0_size = nt->OptionalHeader.SizeOfImage;
+    return;
+  }
+}
+}
+#endif
+
 extern "C" {
 void* APS5_VABI dlopen_nid_postfix(const char* path, int flags);
 void* APS5_VABI dlsym_nid_postfix(void* handle, const char* name);
@@ -53,60 +106,22 @@ int APS5_VABI sceKernelGetModuleInfoForUnwind(uint64_t addr, int flags, ModuleIn
  if (flags >= 3) return SCE_KERNEL_ERROR_EINVAL;
  if (!info) return SCE_KERNEL_ERROR_EFAULT;
 #ifdef _WIN32
- if (info->st_size < sizeof(ModuleInfoForUnwind)) return SCE_KERNEL_ERROR_EINVAL;
- HMODULE module = nullptr;
- if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(addr), &module)) return SCE_KERNEL_ERROR_ESRCH;
- const auto* base = reinterpret_cast<const std::uint8_t*>(module);
- const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
- const auto* section = IMAGE_FIRST_SECTION(nt);
- std::uint64_t header = 0;
- std::uint64_t ehFrameSize = 0;
- // The relinker records the guest PT_GNU_EH_FRAME as an RVA in .ehmeta; .ehfram, when present, bounds .eh_frame.
- for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section) {
-  const std::string_view name(reinterpret_cast<const char*>(section->Name), strnlen(reinterpret_cast<const char*>(section->Name), IMAGE_SIZEOF_SHORT_NAME));
-  if (name == ".ehmeta") header = reinterpret_cast<std::uint64_t>(base) + *reinterpret_cast<const std::uint32_t*>(base + section->VirtualAddress);
-  else if (name == ".ehfram") ehFrameSize = section->Misc.VirtualSize;
- }
- std::memset(info, 0, sizeof(ModuleInfoForUnwind));
- info->st_size = sizeof(ModuleInfoForUnwind);
- char path[MAX_PATH] = {};
- GetModuleFileNameA(module, path, sizeof(path));
- const char* slash = std::strrchr(path, 92);
- std::strncpy(info->name, slash ? slash + 1 : path, sizeof(info->name) - 1);
- info->seg0_addr = reinterpret_cast<std::uint64_t>(base);
- info->seg0_size = nt->OptionalHeader.SizeOfImage;
- if (header != 0) {
-  const auto* hdr = reinterpret_cast<const std::uint8_t*>(header);
-  // eh_frame_hdr: version, eh_frame_ptr_enc, fde_count_enc, table_enc, eh_frame_ptr. Guest toolchains emit pcrel|sdata4.
-  if (hdr[0] != 1 || hdr[1] != 0x1b) throw std::runtime_error("sceKernelGetModuleInfoForUnwind: unsupported eh_frame_hdr encoding");
-  std::int32_t delta = 0;
-  std::memcpy(&delta, hdr + 4, sizeof(delta));
-  info->eh_frame_hdr_addr = header;
-  info->eh_frame_addr = header + 4 + static_cast<std::int64_t>(delta);
-  // The unwinder asks once per frame; measure each module's .eh_frame only once.
-  static std::mutex sizeLock;
-  static std::unordered_map<std::uint64_t, std::uint64_t> sizes;
-  std::lock_guard sizeGuard(sizeLock);
-  if (ehFrameSize == 0) {
-   if (const auto cached = sizes.find(info->eh_frame_addr); cached != sizes.end()) ehFrameSize = cached->second;
-  }
-  if (ehFrameSize == 0) {
-   // Walk CIE/FDE records up to the zero terminator.
-   const auto* p = reinterpret_cast<const std::uint8_t*>(info->eh_frame_addr);
-   const auto* limit = base + nt->OptionalHeader.SizeOfImage;
-   while (p + 4 <= limit) {
-    std::uint32_t length = 0;
-    std::memcpy(&length, p, sizeof(length));
-    if (length == 0) { p += 4; break; }
-    if (length == 0xffffffffu) throw std::runtime_error("sceKernelGetModuleInfoForUnwind: 64-bit eh_frame records are not supported");
-    p += 4 + static_cast<std::size_t>(length);
-   }
-   ehFrameSize = static_cast<std::uint64_t>(p - reinterpret_cast<const std::uint8_t*>(info->eh_frame_addr));
-   sizes.emplace(info->eh_frame_addr, ehFrameSize);
-  }
-  info->eh_frame_size = ehFrameSize;
- }
- return 0;
+  // st_size is written by this API; callers may pass a zero-initialized output.
+  MEMORY_BASIC_INFORMATION mbi{};
+  if (!VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi))) return SCE_KERNEL_ERROR_ESRCH;
+  info->st_size = sizeof(ModuleInfoForUnwind);
+  info->eh_frame_hdr_addr = 0;
+  info->eh_frame_addr = 0;
+  info->eh_frame_size = 0;
+  info->seg0_addr = reinterpret_cast<std::uint64_t>(mbi.BaseAddress);
+  info->seg0_size = mbi.RegionSize;
+  if (mbi.Type == MEM_IMAGE) FillGuestUnwindInfo(static_cast<const std::uint8_t*>(mbi.AllocationBase), info);
+  char path[4096] = {};
+  DWORD len = GetMappedFileNameA(GetCurrentProcess(), mbi.BaseAddress, path, sizeof(path) - 1);
+  path[len] = '\0';
+  std::strncpy(info->name, path, sizeof(info->name) - 1);
+  info->name[sizeof(info->name) - 1] = '\0';
+  return 0;
 #else
   std::ifstream maps("/proc/self/maps");
   if (!maps) throw std::runtime_error("sceKernelGetModuleInfoForUnwind: failed to open /proc/self/maps");

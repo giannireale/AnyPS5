@@ -13,6 +13,8 @@ int APS5_VABI sceAudioOutOutputs(AudioOutOutputParam* param, std::uint32_t num);
 }
 
 int main() {
+    // The first clock read must not wrap while initializing its origin.
+    if (sceKernelGetProcessTime() >= 1000000ULL) return 1;
     constexpr std::uint32_t Frames = 256, Rate = 48000, Blocks = 96;
     std::array<std::int16_t, Frames * 2> samples{};
     // Vibration ports never open an SDL device: this exercises their fallback clock.
@@ -23,6 +25,13 @@ int main() {
         AudioOutOutputParam param{handle, samples.data()};
         const auto output = [&] { return batch ? sceAudioOutOutputs(&param, 1) : sceAudioOutOutput(handle, samples.data()); };
         if (output() < 0) return 1;
+        // Fill the virtual queue before measuring steady producer pacing.
+        // Startup may enqueue up to the target latency without sleeping.
+        for (unsigned warmup = 0; warmup < 32; ++warmup) {
+            KernelTimespec work{};
+            work.tv_nsec = 2000000;
+            if (sceKernelNanosleep(&work, nullptr) != 0 || output() < 0) return 1;
+        }
         const auto start = std::chrono::steady_clock::now();
         for (std::uint32_t block = 0; block < Blocks; ++block) {
             KernelTimespec work{};
