@@ -20,6 +20,7 @@ struct SpirvTargetOptions {
     std::span<const std::string_view> supportedExtensions;
     bool fragmentShaderBarycentricEnabled;
     bool nonConstantImageOffsets = false;
+    bool narrowSubgroupClock = false;
 };
 
 class SpirvEmitter {

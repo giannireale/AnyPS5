@@ -332,6 +332,7 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
     targetOptions.supportedExtensions = request.target.supportedExtensions;
     targetOptions.fragmentShaderBarycentricEnabled = request.target.fragmentShaderBarycentricEnabled;
     targetOptions.nonConstantImageOffsets = request.target.nonConstantImageOffsets;
+    targetOptions.narrowSubgroupClock = request.target.narrowSubgroupClock;
 
     constexpr SpirvEmitter spirvEmitter;
     RecompileResult result;
