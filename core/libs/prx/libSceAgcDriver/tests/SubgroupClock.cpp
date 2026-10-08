@@ -8,9 +8,15 @@ struct Case {
     VkDriverId driver;
     std::string_view name;
     bool narrow;
+    std::uint32_t deviceId = 0;
 };
 
 constexpr Case Cases[]{
+    {VK_DRIVER_ID_AMD_PROPRIETARY, "AMD Radeon RX 7800 XT", true, 0x747e},
+    {VK_DRIVER_ID_AMD_PROPRIETARY, "AMD Radeon RX 7800 XT", false, 0},
+    {VK_DRIVER_ID_AMD_PROPRIETARY, "AMD Radeon RX 7800 XT", false, 0x744c},
+    {VK_DRIVER_ID_AMD_OPEN_SOURCE, "AMD Radeon RX 7800 XT", false, 0x747e},
+    {VK_DRIVER_ID_NVIDIA_PROPRIETARY, "AMD Radeon RX 7800 XT", false, 0x747e},
     {VK_DRIVER_ID_MESA_RADV, "AMD Radeon RX 6750 XT (RADV NAVI22)", true},
     {VK_DRIVER_ID_MESA_RADV, "AMD Ryzen 5 7600X 6-Core Processor (RADV RAPHAEL_MENDOCINO)", true},
     {VK_DRIVER_ID_MESA_RADV, "AMD Radeon RX 7900 XTX (RADV NAVI31)", true},
@@ -31,7 +37,7 @@ constexpr Case Cases[]{
 int main() {
     int failures = 0;
     for (const auto& item : Cases) {
-        if (AgcDriver::NarrowSubgroupClock(item.driver, item.name) != item.narrow) {
+        if (AgcDriver::NarrowSubgroupClock(item.driver, item.name, item.deviceId) != item.narrow) {
             std::fprintf(stderr, "driver %d \"%.*s\": expected %s subgroup clock\n", static_cast<int>(item.driver), static_cast<int>(item.name.size()), item.name.data(), item.narrow ? "a narrow" : "a full");
             ++failures;
         }

@@ -15,7 +15,10 @@ constexpr std::array<std::string_view, 19> NarrowClockFamilies{
 
 }
 
-bool NarrowSubgroupClock(VkDriverId driver, std::string_view deviceName) {
+bool NarrowSubgroupClock(VkDriverId driver, std::string_view deviceName, std::uint32_t deviceId) {
+    // RX 7800 XT on AMD's Windows driver also exposes a wrapping subgroup clock.
+    // Keep this observed workaround scoped to the tested driver and device ID.
+    if (driver == VK_DRIVER_ID_AMD_PROPRIETARY && deviceId == 0x747eu) return true;
     if (driver != VK_DRIVER_ID_MESA_RADV) return false;
     constexpr std::string_view prefix = "(RADV ";
     const auto start = deviceName.rfind(prefix);
