@@ -2120,6 +2120,7 @@ bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
     bool convert = false;
     if (!NoResidentPresent()) {
         bool pending = false;
+        // Cache PresentableResident result; it's expensive (locks pending mutex, iterates textures)
         resident = PresentableResident(graphicsContext(), buffer, filter, pending, convert);
         if (resident != nullptr && buffer.dccAddress != 0 && !ResidentServesDisplay(*resident, buffer)) {
             resident.reset();

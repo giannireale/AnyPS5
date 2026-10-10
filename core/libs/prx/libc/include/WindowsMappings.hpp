@@ -364,14 +364,18 @@ public:
                     const auto spanBytes = stop - cursor;
                     const auto needed = (stop - cursor + 4095) / 4096;
                     if (needed > capacity - *count) {
-                        for (auto at = cursor; *count < capacity; at += 4096) {
+                        // Batch fill: compute end once, avoid repeated bound check
+                        const auto fillEnd = cursor + (capacity - *count) * 4096;
+                        for (auto at = cursor; at < fillEnd; at += 4096) {
                             pages[(*count)++] = reinterpret_cast<void*>(at);
                             if (subphaseOn) ++subphase.returnedPages;
                         }
                         if (subphaseOn) addSubphase(&CollectSubphase::enumCalls, &CollectSubphase::enumBytes, &CollectSubphase::enumNanoseconds, spanBytes, enumStart);
                         return true;
                     }
-                    for (auto at = cursor; at < stop; at += 4096) {
+                    // Full enumeration: compute end once
+                    const auto endAt = stop;
+                    for (auto at = cursor; at < endAt; at += 4096) {
                         pages[(*count)++] = reinterpret_cast<void*>(at);
                         if (subphaseOn) ++subphase.returnedPages;
                     }
@@ -380,15 +384,36 @@ public:
                 if (clear && !pinned) {
                     // Arming: the alias walk plus one VirtualProtect per unarmed alias.
                     const auto armStart = subphaseOn ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                    // Collect contiguous aliases with same protection for batched VirtualProtect
+                    std::vector<std::uintptr_t> toArm;
+                    DWORD currentProtection = 0;
+                    std::uintptr_t rangeStart = 0;
+                    std::size_t rangeBytes = 0;
+                    auto flushRange = [&](std::uintptr_t start, std::size_t bytes, DWORD prot) {
+                        if (bytes == 0) return;
+                        DWORD previous;
+                        if (!VirtualProtect(reinterpret_cast<void*>(start), bytes, prot, &previous)) fail("arm shared memory write tracking");
+                        if (subphaseOn) ++subphase.armedProtectCalls;
+                    };
                     for (const auto alias : view.page->aliases) {
                         auto& other = views.at(alias);
                         if (!writable(other.protection) || other.armed || other.hostWrites != 0) continue;
-                        DWORD previous;
-                        const DWORD protection = other.protection == PAGE_EXECUTE_READWRITE ? PAGE_EXECUTE_READ : PAGE_READONLY;
-                        if (!VirtualProtect(reinterpret_cast<void*>(alias), pageBytes, protection, &previous)) fail("arm shared memory write tracking");
-                        if (subphaseOn) ++subphase.armedProtectCalls;
+                        const DWORD prot = other.protection == PAGE_EXECUTE_READWRITE ? PAGE_EXECUTE_READ : PAGE_READONLY;
+                        if (rangeBytes == 0) {
+                            rangeStart = alias;
+                            rangeBytes = pageBytes;
+                            currentProtection = prot;
+                        } else if (alias == rangeStart + rangeBytes && prot == currentProtection) {
+                            rangeBytes += pageBytes;
+                        } else {
+                            flushRange(rangeStart, rangeBytes, currentProtection);
+                            rangeStart = alias;
+                            rangeBytes = pageBytes;
+                            currentProtection = prot;
+                        }
                         other.armed = true;
                     }
+                    flushRange(rangeStart, rangeBytes, currentProtection);
                     view.seen = view.page->generation;
                     rememberClean(base, base + pageBytes);
                     if (subphaseOn) addSubphase(&CollectSubphase::armCalls, &CollectSubphase::armBytes, &CollectSubphase::armNanoseconds, pageBytes, armStart);
