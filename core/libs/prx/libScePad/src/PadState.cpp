@@ -20,6 +20,7 @@ namespace {
     const std::vector<ScriptedPress>& scriptedPresses() {
         static const std::vector<ScriptedPress> presses = [] {
             std::vector<ScriptedPress> result;
+            result.reserve(8); // typical max presses
             const char* text = std::getenv("APS5_PAD_SCRIPT");
             while (text != nullptr && *text != '\0') {
                 unsigned long long startMs = 0, holdMs = 0;
@@ -131,23 +132,39 @@ void Pad::Initialize() {
 }
 
 PadData Pad::ReadState() {
-    std::lock_guard lock(stateMutex);
-    if (failure) std::rethrow_exception(failure);
-    if (!initialized) throw std::runtime_error("Pad: read before initialization");
-    const std::uint64_t now = sceKernelGetProcessTime();
+    // Snapshot state under lock, then compute outside to reduce contention
+    PadInputState inputState;
+    PadOutputState outputState;
+    std::uint64_t now;
+    bool hasFailure;
+    bool isInitialized;
+    {
+        std::lock_guard lock(stateMutex);
+        if (failure) std::rethrow_exception(failure);
+        if (!initialized) throw std::runtime_error("Pad: read before initialization");
+        inputState = state;
+        outputState = output;
+        now = sceKernelGetProcessTime();
+        hasFailure = static_cast<bool>(failure);
+        isInitialized = initialized;
+    }
+    
+    if (!isInitialized) throw std::runtime_error("Pad: read before initialization");
+    if (hasFailure) std::rethrow_exception(failure);
+    
     PadData data{};
-    data.buttons = state.buttons | scriptedButtons(now);
-    data.left_stick_x = state.sticks[0];
-    data.left_stick_y = state.sticks[1];
-    data.right_stick_x = state.sticks[2];
-    data.right_stick_y = state.sticks[3];
-    data.analog_buttons_l2 = std::max<std::uint8_t>(state.analogButtonsL2, (state.buttons & 0x100) != 0 ? 255 : 0);
-    data.analog_buttons_r2 = std::max<std::uint8_t>(state.analogButtonsR2, (state.buttons & 0x200) != 0 ? 255 : 0);
+    data.buttons = inputState.buttons | scriptedButtons(now);
+    data.left_stick_x = inputState.sticks[0];
+    data.left_stick_y = inputState.sticks[1];
+    data.right_stick_x = inputState.sticks[2];
+    data.right_stick_y = inputState.sticks[3];
+    data.analog_buttons_l2 = std::max<std::uint8_t>(inputState.analogButtonsL2, (inputState.buttons & 0x100) != 0 ? 255 : 0);
+    data.analog_buttons_r2 = std::max<std::uint8_t>(inputState.analogButtonsR2, (inputState.buttons & 0x200) != 0 ? 255 : 0);
 
-    const bool live = state.hasMotion && output.motionEnabled;
+    const bool live = inputState.hasMotion && outputState.motionEnabled;
     const std::array<float, 3> rest{0.0f, 9.80665f, 0.0f};
-    const std::array<float, 3>& accel = live ? state.accel : rest;
-    const std::array<float, 3> gyro = live ? state.gyro : std::array<float, 3>{0.0f, 0.0f, 0.0f};
+    const std::array<float, 3>& accel = live ? inputState.accel : rest;
+    const std::array<float, 3> gyro = live ? inputState.gyro : std::array<float, 3>{0.0f, 0.0f, 0.0f};
     if (live) {
         float dt = lastFuseTime != 0 && now > lastFuseTime ? static_cast<float>(now - lastFuseTime) * 1e-6f : 0.0f;
         dt = std::min(dt, 0.1f);
@@ -175,7 +192,7 @@ PadData Pad::ReadState() {
 
     std::uint8_t touchNum = 0;
     for (int i = 0; i < 2; ++i) {
-        const PadTouchPoint& tp = state.touch[i];
+        const PadTouchPoint& tp = inputState.touch[i];
         if (!tp.active) { prevTouchActive[i] = false; continue; }
         if (!prevTouchActive[i]) touchIds[i] = static_cast<std::uint8_t>(nextTouchId++ & 0x7F);
         prevTouchActive[i] = true;
@@ -186,10 +203,10 @@ PadData Pad::ReadState() {
         }
         ++touchNum;
     }
-    if (touchNum == 0 && (state.touchLeft || state.touchRight)) {
+    if (touchNum == 0 && (inputState.touchLeft || inputState.touchRight)) {
         data.buttons |= 0x100000;
         touchNum = 1;
-        data.touch_data_touch0_x = state.touchRight ? 1440 : 480;
+        data.touch_data_touch0_x = inputState.touchRight ? 1440 : 480;
         data.touch_data_touch0_y = 471;
         data.touch_data_touch0_id = 0;
     }
