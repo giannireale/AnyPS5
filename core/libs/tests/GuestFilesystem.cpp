@@ -113,6 +113,10 @@ int main() {
     Require(remove_nid_postfix((file / "invalid").string().c_str()) == -1);
     Require(remove_nid_postfix("") == -1 && *__error_nid_postfix() == 2);
     Require(remove_nid_postfix(nullptr) == -1 && *__error_nid_postfix() == 14);
+    const auto readOnly = root / "read-only.txt";
+    { std::ofstream stream(readOnly); stream << "removable"; }
+    Require(sceKernelChmod_nid_postfix(readOnly.string().c_str(), 0400) == 0);
+    Require(remove_nid_postfix(readOnly.string().c_str()) == 0 && !std::filesystem::exists(readOnly));
     const auto renamed = root / "renamed.txt";
     { std::ofstream stream(renamed); stream << "old contents"; }
     Require(rename_nid_postfix(file.string().c_str(), renamed.string().c_str()) == 0);
@@ -248,6 +252,19 @@ int main() {
     Require(flock_nid_postfix(kernelRecycled, 8 | 2) == 0);
     Require(flock_nid_postfix(other, 2 | 4) == 0 && flock_nid_postfix(other, 8) == 0);
     Require(sceKernelClose(kernelRecycled) == 0 && close_nid_postfix(other) == 0);
+    const int holder = open_nid_postfix(presentName.c_str(), 0, 0);
+    const int contender = open_nid_postfix(presentName.c_str(), 0, 0);
+    Require(holder >= 0 && contender >= 0 && flock_nid_postfix(holder, 2 | 4) == 0);
+    Require(flock_nid_postfix(contender, 2 | 4) == -1 && *__error_nid_postfix() == 35);
+    Require(flock_nid_postfix(contender, 1 | 4) == -1 && *__error_nid_postfix() == 35);
+    Require(flock_nid_postfix(holder, 1 | 4) == 0 && flock_nid_postfix(contender, 1 | 4) == 0);
+    Require(flock_nid_postfix(contender, 2 | 4) == -1 && *__error_nid_postfix() == 35);
+    Require(flock_nid_postfix(holder, 8) == 0 && flock_nid_postfix(contender, 2 | 4) == 0);
+    Require(flock_nid_postfix(contender, 8) == 0);
+    Require(flock_nid_postfix(holder, 1 | 2 | 4 | 0x10) == 0);
+    Require(flock_nid_postfix(contender, 1 | 4) == -1 && *__error_nid_postfix() == 35);
+    Require(flock_nid_postfix(holder, 8) == 0);
+    Require(close_nid_postfix(contender) == 0 && close_nid_postfix(holder) == 0);
     Require(open_nid_postfix(missingName.c_str(), 0, 0) == -1 && *__error_nid_postfix() == 2);
     Require(_open_nid_postfix(missingName.c_str(), 0) == -1 && *__error_nid_postfix() == 2);
     Require(sceKernelOpen(missingName.c_str(), 0, 0) == static_cast<int>(0x80020002u));
@@ -280,6 +297,16 @@ int main() {
     Require(closable >= 0 && sceKernelClose(closable) == 0);
     Require(sceKernelClose(closable) == static_cast<int>(0x80020009u));
     Require(sceKernelClose(-1) == static_cast<int>(0x80020009u));
+    for (const char* device : {"/dev/urandom", "/dev/random"}) {
+        const int random = open_nid_postfix(device, 0, 0);
+        Require(random >= 0);
+        unsigned char first[64]{};
+        unsigned char second[64]{};
+        Require(read_nid_postfix(random, first, sizeof(first)) == sizeof(first));
+        Require(read_nid_postfix(random, second, 3) == 3);
+        Require(std::memcmp(first, second, sizeof(first)) != 0 && second[3] == 0);
+        Require(close_nid_postfix(random) == 0);
+    }
     Require(unlink_nid_postfix(presentName.c_str()) == 0 && !std::filesystem::exists(present));
     const auto empty = root / "empty";
     Require(std::filesystem::create_directory(empty));

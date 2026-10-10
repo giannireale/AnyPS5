@@ -286,6 +286,8 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_linux_program_header_order.py $<TARGET_FILE:relinker>)
         add_test(NAME windows_gui COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_windows_gui.py $<TARGET_FILE:relinker>)
+        add_test(NAME windows_working_directory COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_windows_working_directory.py $<TARGET_FILE:relinker>)
         add_test(NAME windows_address_space COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_windows_address_space.py $<TARGET_FILE:relinker>)
         add_test(NAME windows_icon COMMAND ${Python3_EXECUTABLE}
@@ -327,6 +329,8 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_absolute_symbols.py $<TARGET_FILE:relinker>)
         add_test(NAME guest_module_identity COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_module_identity.py $<TARGET_FILE:relinker>)
+        add_test(NAME guest_needed_nested_modules COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_needed_nested_modules.py $<TARGET_FILE:relinker>)
         add_test(NAME windows_import_modules COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_windows_import_modules.py $<TARGET_FILE:relinker>)
         add_test(NAME elf_header COMMAND ${Python3_EXECUTABLE}

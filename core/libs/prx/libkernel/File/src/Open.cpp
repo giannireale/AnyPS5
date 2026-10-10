@@ -6,6 +6,7 @@
 #include "prx/libkernel/File/include/DirectoryDescriptor.hpp"
 #include "prx/libkernel/File/include/FileLock.hpp"
 #include "prx/libkernel/Socket/include/SocketRuntime.hpp"
+#include "prx/libkernel/File/include/RandomDevice.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
 #include "SceTypes.hpp"
 
@@ -18,9 +19,6 @@
 #include <fcntl.h>
 #include <io.h>
 #include <sys/stat.h>
-#include <cstring>
-#include <mutex>
-#include <unordered_set>
 static int NativeOpen(const std::filesystem::path& p, int nativeFlags, std::uint16_t mode) {
     return ::_wopen(p.wstring().c_str(), nativeFlags, static_cast<int>(mode));
 }
@@ -48,38 +46,6 @@ static int NativeClose(int fd) {
     return result;
 }
 
-// Windows has no /dev/random: back those paths with a NUL descriptor and serve reads from rand_s.
-extern "C" errno_t rand_s(unsigned int* value);
-static std::mutex g_randomLock;
-static std::unordered_set<int> g_randomDescriptors;
-static bool IsRandomDevice(const char* path) {
-    return path != nullptr && (std::strcmp(path, "/dev/urandom") == 0 || std::strcmp(path, "/dev/random") == 0);
-}
-static int OpenRandomDevice() {
-    const int fd = ::_open("NUL", _O_RDONLY | _O_BINARY);
-    if (fd >= 0) {
-        std::lock_guard lock(g_randomLock);
-        g_randomDescriptors.insert(fd);
-    }
-    return fd;
-}
-static bool ReadRandomDevice(int fd, void* buf, std::size_t n) {
-    {
-        std::lock_guard lock(g_randomLock);
-        if (!g_randomDescriptors.contains(fd)) return false;
-    }
-    auto* out = static_cast<unsigned char*>(buf);
-    for (std::size_t i = 0; i < n;) {
-        unsigned int value = 0;
-        if (rand_s(&value) != 0) throw std::runtime_error("sceKernelRead: rand_s failed");
-        for (int b = 0; b < 4 && i < n; ++b, ++i) out[i] = static_cast<unsigned char>(value >> (8 * b));
-    }
-    return true;
-}
-static void ForgetRandomDevice(int fd) {
-    std::lock_guard lock(g_randomLock);
-    g_randomDescriptors.erase(fd);
-}
 static int NativeUnlink(const std::filesystem::path& p) {
     return ::_wunlink(p.wstring().c_str());
 }
@@ -145,12 +111,11 @@ extern "C" {
 
 int APS5_VABI sceKernelOpen(const char* path, int flags, std::uint16_t mode) {
     APS5_LOG_OUT("path=%s flags=0x%X nativeFlags=0x%X mode=0%o", path, flags, MapFlags(flags), mode);
-#ifdef _WIN32
-    if (IsRandomDevice(path)) {
-        const int fd = OpenRandomDevice();
+    if (path != nullptr && File::IsRandomDevicePath(path)) {
+        if ((flags & SCE_KERNEL_O_ACCMODE) != SCE_KERNEL_O_RDONLY) throw std::runtime_error(std::string(__func__) + ": writing to " + path + " is not implemented");
+        const int fd = File::OpenRandomDevice();
         return fd < 0 ? SceErrorFromErrno(errno) : fd;
     }
-#endif
     auto native = ResolvePath_nid_no_patch(path);
     int fd = NativeOpen(native, MapFlags(flags), mode);
 #ifdef _WIN32
@@ -172,9 +137,9 @@ int APS5_VABI sceKernelOpen(const char* path, int flags, std::uint16_t mode) {
 }
 
 int APS5_VABI sceKernelClose(int d) {
+    File::ForgetRandomDevice(d);
 #ifdef _WIN32
     File::ForgetDirectoryDescriptor(d);
-    ForgetRandomDevice(d);
     File::ForgetFileLock(d);
 #endif
     if (NativeClose(d) != 0) {
@@ -195,9 +160,7 @@ std::int64_t APS5_VABI sceKernelRead(int d, void* buf, std::size_t nbytes) {
     const GuestArena::HostWrite destination(buf, nbytes);
     const bool validDestination = destination.Open();
     if (!validDestination) errno = EFAULT;
-#ifdef _WIN32
-    if (validDestination && ReadRandomDevice(d, buf, nbytes)) return static_cast<std::int64_t>(nbytes);
-#endif
+    else if (File::ReadRandomDevice(d, buf, nbytes)) return static_cast<std::int64_t>(nbytes);
     auto n = validDestination ? NativeRead(d, buf, nbytes) : -1;
     if (n < 0) {
         throw std::runtime_error(std::string(__func__) + ": read failed, fd=" + std::to_string(d) + ", errno=" + std::to_string(errno));

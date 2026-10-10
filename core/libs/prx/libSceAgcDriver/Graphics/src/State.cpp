@@ -194,7 +194,8 @@ VkStencilOpState stencilFace(std::uint32_t compare, std::uint32_t ops, std::uint
 }
 
 void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result) {
-    zero(cx, 0x000, 0x00001f9du, "depth clear, copy, resummarize or decompress draws (DB_RENDER_CONTROL)");
+    zero(cx, 0x000, 0x00001f9cu, "depth copy, resummarize or decompress draws (DB_RENDER_CONTROL)");
+    const bool depthClear = (read(cx, 0x000) & 1u) != 0;
     const bool stencilClear = (read(cx, 0x000) & 2u) != 0;
     const auto view = read(cx, 0x002);
     zero(cx, 0x002, 0x3c000000u, "depth mips (DB_DEPTH_VIEW MIP_LEVEL)");
@@ -212,6 +213,7 @@ void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result)
     const bool depthReadOnly = (view & 0x01000000u) != 0;
     const bool stencilReadOnly = (view & 0x02000000u) != 0;
     Require(!stencilClear || (stencil && !stencilReadOnly), "stencil clear requires a writable stencil plane");
+    Require(!depthClear || (zFormat != 0 && !depthReadOnly), "depth clear requires a writable depth plane");
     DepthTarget depth{};
     depth.address = zFormat != 0 ? base(0x012, 0x01a) : 0;
     depth.stencilAddress = stencil ? base(0x013, 0x01b) : 0;
@@ -236,6 +238,12 @@ void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result)
         Require(zFormat != 0, "depth bounds without a depth plane");
         result.minDepthBounds = readFloat(cx, 0x008);
         result.maxDepthBounds = readFloat(cx, 0x009);
+    }
+    if (depthClear) {
+        result.depthTest = true;
+        result.depthWrite = true;
+        result.depthCompare = VK_COMPARE_OP_ALWAYS;
+        result.depthBoundsTest = false;
     }
     result.stencilTest = (depthControl & 1u) != 0;
     if (stencilClear) {
@@ -263,15 +271,19 @@ void decodeDepthBias(const Registers& cx, std::uint32_t raster, State& result) {
     const bool frontBias = (raster & 0x800u) != 0;
     const bool backBias = (raster & 0x1000u) != 0;
     if (!(front && frontBias) && !(back && backBias)) return;
-    if (front && back && (frontBias != backBias || read(cx, 0x2e0) != read(cx, 0x2e2) || read(cx, 0x2e1) != read(cx, 0x2e3))) throw std::runtime_error("AGC graphics: " + zeroMessage(0x205, raster, "depth bias differing between front and back faces"));
+    const bool perFace = front && back && (frontBias != backBias || read(cx, 0x2e0) != read(cx, 0x2e2) || read(cx, 0x2e1) != read(cx, 0x2e3));
     const bool d16 = result.depth->format == VK_FORMAT_D16_UNORM || result.depth->format == VK_FORMAT_D16_UNORM_S8_UINT;
     const auto format = find(cx, 0x2de) == cx.end() ? (d16 ? 0xf0u : 0x1e9u) : read(cx, 0x2de);
     if (format != (d16 ? 0xf0u : 0x1e9u)) throw std::runtime_error("AGC graphics: " + zeroMessage(0x2de, format, "depth bias in units other than the depth format"));
     const auto scale = front && frontBias ? 0x2e0u : 0x2e2u;
     result.depthBias = true;
-    result.depthBiasSlope = readFloat(cx, scale) / 16.0f;
-    result.depthBiasConstant = readFloat(cx, scale + 1u);
+    result.depthBiasSlope = frontBias || !perFace ? readFloat(cx, scale) / 16.0f : 0.0f;
+    result.depthBiasConstant = frontBias || !perFace ? readFloat(cx, scale + 1u) : 0.0f;
     result.depthBiasClamp = readFloat(cx, 0x2df);
+    if (!perFace) return;
+    result.depthBiasPerFace = true;
+    result.backDepthBiasSlope = backBias ? readFloat(cx, 0x2e2) / 16.0f : 0.0f;
+    result.backDepthBiasConstant = backBias ? readFloat(cx, 0x2e3) : 0.0f;
 }
 
 bool depthPassThrough(std::uint32_t depthControl) {
@@ -560,8 +572,8 @@ State DecodeState(const QueueState& queue) {
     {
         const auto depthControl = read(cx, 0x200);
         const auto renderControl = find(cx, 0x000);
-        const bool stencilClear = renderControl != cx.end() && (renderControl->second & 2u) != 0;
-        if (stencilClear || ((depthControl & 0xbu) != 0 && depthSurfaceBound(cx))) {
+        const bool clear = renderControl != cx.end() && (renderControl->second & 3u) != 0;
+        if (clear || ((depthControl & 0xbu) != 0 && depthSurfaceBound(cx))) {
             decodeDepth(cx, depthControl, result);
         } else if (depthPassThrough(depthControl) || ((depthControl & 0xbu) != 0 && depthPlanesAbsent(cx))) {
             static bool reported = false;
@@ -684,6 +696,11 @@ State DecodeState(const QueueState& queue) {
     }
     Require(readFloat(cx, 0xb4) <= readFloat(cx, 0xb5), "inverted viewport depth clamp bounds");
     result.viewport = collapsed ? VkViewport{xo, yo, 1, 1, minDepth, maxDepth} : VkViewport{xo - xs, yo - ys, 2 * xs, 2 * ys, minDepth, maxDepth};
+    if (const auto renderControl = find(cx, 0x000); result.depth && renderControl != cx.end() && (renderControl->second & 1u) != 0) {
+        result.viewport.minDepth = result.depth->clearDepth;
+        result.viewport.maxDepth = result.depth->clearDepth;
+        result.depthBias = false;
+    }
     APS5_LOG_OUT_DEBUG("Viewport x=%f y=%f w=%f h=%f minDepth=%f maxDepth=%f", result.viewport.x, result.viewport.y, result.viewport.width, result.viewport.height, result.viewport.minDepth, result.viewport.maxDepth);
     result.scissor = {{0, 0}, result.renderExtent};
     intersect(result.scissor, cx, 0xc, true);
@@ -927,12 +944,17 @@ std::string DrawRejection(const QueueState& queue, bool indexed) {
     if (auto reason = nonzero(cx, 0x207, ~LayerExports, "clip distances, layer, viewport or auxiliary vertex exports"); !reason.empty()) return reason;
     if (value(cx, 0x200, word)) {
         const auto renderControl = find(cx, 0x000);
+        const bool depthClear = renderControl != cx.end() && (renderControl->second & 1u) != 0;
         const bool stencilClear = renderControl != cx.end() && (renderControl->second & 2u) != 0;
         if (stencilClear) {
             std::uint32_t stencil = 0, view = 0;
             if ((value(cx, 0x011, stencil) && (stencil & 1u) == 0) || (value(cx, 0x002, view) && (view & 0x02000000u) != 0)) return require(false, "stencil clear requires a writable stencil plane");
         }
-        const bool surface = ((word & 0xbu) != 0 || stencilClear) && depthSurfaceBound(cx);
+        if (depthClear) {
+            std::uint32_t z = 0, view = 0;
+            if ((value(cx, 0x010, z) && (z & 3u) == 0) || (value(cx, 0x002, view) && (view & 0x01000000u) != 0)) return require(false, "depth clear requires a writable depth plane");
+        }
+        const bool surface = ((word & 0xbu) != 0 || depthClear || stencilClear) && depthSurfaceBound(cx);
         if (!surface && !((word & 0xbu) != 0 && depthPlanesAbsent(cx)) && !depthPassThrough(word) && !IgnoreDepthTest() && (effectiveDepthControl(word) & DepthControlMask) != 0) return zeroMessage(0x200, word, "depth, stencil or conditional color writes");
         if (auto reason = require((word & 8u) == 0 || surface || depthPlanesAbsent(cx), "depth bounds without a depth surface"); !reason.empty()) return reason;
         if (auto reason = require((word & 0xc0000000u) == 0, "depth-conditional color writes are unsupported"); !reason.empty()) return reason;

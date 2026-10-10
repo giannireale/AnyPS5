@@ -744,7 +744,7 @@ bool MovableBuffers() {
     return enabled;
 }
 
-ResourceCache::Key DrawResourceKey(const Context& context, std::span<const CompiledShader> shaders, const ColorTarget& target, std::uint64_t indexAddress, std::uint64_t indexBytes, bool ranges) {
+ResourceCache::Key DrawResourceKey(const Context& context, std::span<const CompiledShader> shaders, const ColorTarget& target, std::uint32_t colorAttachments, std::uint64_t indexAddress, std::uint64_t indexBytes, bool ranges) {
     ResourceCache::Key key{0xffffffffu};
     const auto append64 = [&](std::uint64_t value) {
         key.push_back(static_cast<std::uint32_t>(value));
@@ -757,6 +757,7 @@ ResourceCache::Key DrawResourceKey(const Context& context, std::span<const Compi
         key.push_back(static_cast<std::uint32_t>(part.size()));
         key.insert(key.end(), part.begin(), part.end());
     }
+    key.push_back(colorAttachments);
     if (ranges) {
         append64(target.address);
         append64(target.bytes);
@@ -1337,7 +1338,7 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
     std::vector<std::shared_ptr<Buffer>> zeroed(attributes.size());
     for (std::size_t i = 0; i < attributes.size(); ++i) {
         const auto& attribute = attributes[i];
-        if (VertexFetchOutOfRange(attribute)) {
+        if (NullVertexDescriptor(attribute) || VertexFetchOutOfRange(attribute)) {
             zeroed[i] = zeroVertexBuffer(context, attribute);
             continue;
         }
@@ -1444,7 +1445,7 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
     static const bool trimKey = std::getenv("APS5_NO_DRAW_KEY_TRIM") == nullptr;
     resolved.cacheable = recordable && !noDrawResourceCache && !noTextureCache && std::all_of(shaders.begin(), shaders.end(), [](const CompiledShader& shader) { return shader.program != nullptr && shader.program->PipelineVariantId() != 0; });
     if (resolved.cacheable) {
-        resolved.contentKey = DrawResourceKey(context, shaders, state.color, draw.indexAddress, indexBytes, !trimKey);
+        resolved.contentKey = DrawResourceKey(context, shaders, state.color, static_cast<std::uint32_t>(state.colors.size()), draw.indexAddress, indexBytes, !trimKey);
         if (auto cached = SharedResourceCache().Find(resolved.contentKey)) {
             const bool valid = cached->Revalidate(shaders);
             auto* recorder = Recorder::Active();
@@ -1468,7 +1469,7 @@ ResolvedResources resolveDrawResources(const Context& context, const State& stat
     }
     timer.phase(PhaseLookup);
     if (resolved.resources == nullptr) {
-        resolved.resources = std::make_shared<ShaderResources>(context, shaders, state.color, draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
+        resolved.resources = std::make_shared<ShaderResources>(context, shaders, state.color, static_cast<std::uint32_t>(state.colors.size()), draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
         resolved.built = &resolved.resources->Timing();
         outcome.addressBased = resolved.resources->HoldsLease();
         outcome.kind = outcome.addressBased ? KindBda : KindBuild;
@@ -1943,6 +1944,10 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
     pushDrawConstants(*record.pipeline, commands, state, draw, shaders, resources, record.pushBytes, record.pushStages, meshArguments != nullptr ? meshArguments->DeviceAddress() : 0);
     APS5_LOG_CHARS_OUT_DEBUG("Push constants recorded");
     recordDrawCommands(context, commands, state, draw, inputs, record.indirect, argumentBuffer, argumentOffset);
+    if (record.pipeline->SplitsFaces()) {
+        record.pipeline->ContinueBackFaces(commands, state);
+        recordDrawCommands(context, commands, state, draw, inputs, record.indirect, argumentBuffer, argumentOffset);
+    }
     if (meshArguments != nullptr) recorder->Keep(meshArguments);
     if (args != nullptr) CountIndirectDraw(record.indirect->path, record.indirect->readMs, rewritten);
     auto checkRecords = indirectRecordCheck(record.indirect);
@@ -2256,7 +2261,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     static const bool drawTransitions = std::getenv("APS5_DRAW_TRANSITIONS") != nullptr;
     const bool lean = recorded && !drawTransitions;
     if (!lean && !resolved.moved.empty()) {
-        resolved.resources = std::make_shared<ShaderResources>(context, shaders, state.color, draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
+        resolved.resources = std::make_shared<ShaderResources>(context, shaders, state.color, static_cast<std::uint32_t>(state.colors.size()), draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
         resolved.moved.clear();
     }
     APS5_LOG_CHARS_OUT_DEBUG("Creating Pipeline");
@@ -2467,6 +2472,10 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     pushDrawConstants(*pipeline, commands, state, draw, shaders, *resources, nullptr, 0, meshArguments != nullptr ? meshArguments->DeviceAddress() : 0);
     APS5_LOG_CHARS_OUT_DEBUG("Push constants recorded");
     recordDrawCommands(context, commands, state, draw, inputs, args != nullptr ? &indirect : nullptr, argumentBuffer, argumentOffset);
+    if (pipeline->SplitsFaces()) {
+        pipeline->ContinueBackFaces(commands, state);
+        recordDrawCommands(context, commands, state, draw, inputs, args != nullptr ? &indirect : nullptr, argumentBuffer, argumentOffset);
+    }
     if (meshArguments != nullptr && recorded) recorder->Keep(meshArguments);
     if (args != nullptr) CountIndirectDraw(indirect.path, indirect.readMs, rewritten);
     auto checkRecords = indirectRecordCheck(args != nullptr ? &indirect : nullptr);
