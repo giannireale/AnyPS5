@@ -174,6 +174,17 @@ struct MemoryProfile {
     std::mutex callersMutex;
     std::array<std::pair<unsigned long long, std::uint64_t>, 16> callers{};
     std::array<std::pair<unsigned long long, std::uint64_t>, 16> writeCallers{};
+    struct CollectCaller {
+        unsigned long long offset = 0;
+        std::uint64_t calls = 0;
+        std::uint64_t bytes = 0;
+        std::uint64_t nanoseconds = 0;
+        std::uint64_t minBytes = std::numeric_limits<std::uint64_t>::max();
+        std::uint64_t maxBytes = 0;
+    };
+    std::mutex collectCallersMutex;
+    std::array<CollectCaller, 64> collectCallers{};
+    CollectCaller collectCallerOverflow{};
 };
 
 // Never destroyed: worker threads' counters unregister at thread exit, which can follow static
@@ -316,6 +327,30 @@ bool MemoryProfiled() {
     return profile;
 }
 
+bool CollectCallersProfiled() {
+    static const bool profile = MemoryProfiled() && std::getenv("APS5_PROFILE_COLLECT_CALLERS") != nullptr;
+    return profile;
+}
+
+void RecordCollectCaller(unsigned long long offset, std::uint64_t bytes, std::uint64_t nanoseconds) {
+    auto& profile = Profile();
+    std::lock_guard lock(profile.collectCallersMutex);
+    auto* slot = &profile.collectCallerOverflow;
+    for (auto& candidate : profile.collectCallers) {
+        if (candidate.calls != 0 && candidate.offset == offset) {
+            slot = &candidate;
+            break;
+        }
+        if (candidate.calls == 0 && slot == &profile.collectCallerOverflow) slot = &candidate;
+    }
+    ++slot->calls;
+    slot->bytes += bytes;
+    slot->nanoseconds += nanoseconds;
+    slot->minBytes = std::min(slot->minBytes, bytes);
+    slot->maxBytes = std::max(slot->maxBytes, bytes);
+    if (slot != &profile.collectCallerOverflow) slot->offset = offset;
+}
+
 class TimedAccess {
 public:
     TimedAccess(MemoryCounterKind kind, std::uint64_t bytes) : kind(kind), bytes(bytes), start(MemoryProfiled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
@@ -352,6 +387,15 @@ public:
             if (count != 0) AgcDriver::ProfilePrint_nid_no_patch(" %s=%llu", ReadSiteName(static_cast<ReadSite>(site)), static_cast<unsigned long long>(count));
         }
         AgcDriver::ProfilePrint_nid_no_patch("\n");
+        if (CollectCallersProfiled()) {
+            std::lock_guard lock(state.collectCallersMutex);
+            for (const auto& caller : state.collectCallers) {
+                if (caller.calls == 0) continue;
+                AgcDriver::ProfilePrint_nid_no_patch("[collect-caller] +0x%llx calls %llu MiB %.3f seconds %.3f rangeBytes %llu..%llu (cumulative, includes memo hits/lock time)\n", caller.offset, static_cast<unsigned long long>(caller.calls), caller.bytes / 1048576.0, caller.nanoseconds / 1e9, static_cast<unsigned long long>(caller.minBytes), static_cast<unsigned long long>(caller.maxBytes));
+            }
+            const auto& overflow = state.collectCallerOverflow;
+            if (overflow.calls != 0) AgcDriver::ProfilePrint_nid_no_patch("[collect-caller] overflow calls %llu MiB %.3f seconds %.3f rangeBytes %llu..%llu (cumulative, includes memo hits/lock time)\n", static_cast<unsigned long long>(overflow.calls), overflow.bytes / 1048576.0, overflow.nanoseconds / 1e9, static_cast<unsigned long long>(overflow.minBytes), static_cast<unsigned long long>(overflow.maxBytes));
+        }
     }
 private:
     MemoryCounterKind kind;
@@ -1158,10 +1202,26 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
 }
 
 std::uint64_t CollectWrites(std::uint64_t address, std::size_t bytes) {
+    if (CollectCallersProfiled()) {
+        const auto offset = ModuleOffset(__builtin_return_address(0));
+        const auto start = std::chrono::steady_clock::now();
+        const auto generation = collectWrites(address, bytes, true);
+        const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+        RecordCollectCaller(offset, bytes, static_cast<std::uint64_t>(elapsed));
+        return generation;
+    }
     return collectWrites(address, bytes, true);
 }
 
 std::uint64_t CollectWritesUncached(std::uint64_t address, std::size_t bytes) {
+    if (CollectCallersProfiled()) {
+        const auto offset = ModuleOffset(__builtin_return_address(0));
+        const auto start = std::chrono::steady_clock::now();
+        const auto generation = collectWrites(address, bytes, false);
+        const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+        RecordCollectCaller(offset, bytes, static_cast<std::uint64_t>(elapsed));
+        return generation;
+    }
     return collectWrites(address, bytes, false);
 }
 
