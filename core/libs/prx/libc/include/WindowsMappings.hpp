@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstddef>
@@ -25,6 +26,60 @@ public:
     static WindowsMappings& Get() {
         static WindowsMappings mappings;
         return mappings;
+    }
+
+    // Opt-in Collect sub-phase accounting (APS5_COLLECT_SUBPHASE=1): splits each
+    // Collect walk into lock-wait, shared compare/copy, private GetWriteWatch,
+    // coverage query, shared-page enumeration and arming (alias VirtualProtect).
+    // Disabled by default: one static getenv per function, no counter touched.
+    struct CollectSubphase {
+        // Per-phase triples: timed sections / requested bytes / nanoseconds.
+        // A "timed section" is one now()/now() pair recorded for that phase,
+        // which is also the number of timer pairs its nanoseconds contain.
+        std::uint64_t sharedCalls = 0;
+        std::uint64_t sharedBytes = 0;
+        std::uint64_t sharedNanoseconds = 0;
+        std::uint64_t privateCalls = 0;
+        std::uint64_t privateBytes = 0;
+        std::uint64_t privateNanoseconds = 0;
+        std::uint64_t coverageCalls = 0;
+        std::uint64_t coverageBytes = 0;
+        std::uint64_t coverageNanoseconds = 0;
+        std::uint64_t lockCalls = 0;
+        std::uint64_t lockBytes = 0;
+        std::uint64_t lockNanoseconds = 0;
+        std::uint64_t enumCalls = 0;      // pinned/seen page enumeration (arming path)
+        std::uint64_t enumBytes = 0;
+        std::uint64_t enumNanoseconds = 0;
+        std::uint64_t armCalls = 0;       // alias loop + VirtualProtect (arming path)
+        std::uint64_t armBytes = 0;
+        std::uint64_t armNanoseconds = 0;
+        // Per-walk work counts. Like the triples, every increment happens under
+        // mutex, so no extra locking.
+        std::uint64_t sharedPages = 0;     // shared pages walked (compare branch)
+        std::uint64_t pinnedPages = 0;     // pinned pages enumerated
+        std::uint64_t armedProtectCalls = 0;  // VirtualProtect calls while arming
+        std::uint64_t memcmpBytes = 0;     // bytes compared on shared pages
+        std::uint64_t memcpyBytes = 0;     // bytes copied on shared mismatch
+        std::uint64_t returnedPages = 0;   // pages pushed into the caller buffer
+        // Empty now()/now() pair, one per timed section: the control cost is
+        // controlNanoseconds / controlCalls per section, and total timer
+        // overhead is that times the sum of the *Calls fields above.
+        std::uint64_t controlCalls = 0;
+        std::uint64_t controlNanoseconds = 0;
+    };
+    static bool CollectSubphaseEnabled() {
+        static const bool enabled = std::getenv("APS5_COLLECT_SUBPHASE") != nullptr;
+        return enabled;
+    }
+    // Snapshot and reset in a single lock: taking totals and resetting in two
+    // lock acquisitions would drop every increment a concurrent Collect makes
+    // between them. Callers get per-window deltas without an offline sum.
+    CollectSubphase CollectSubphaseDrain() {
+        std::lock_guard lock(mutex);
+        const auto snapshot = subphase;
+        subphase = CollectSubphase{};
+        return snapshot;
     }
 
     void* Reserve(void* address, std::size_t bytes) {
@@ -220,7 +275,18 @@ public:
     }
 
     bool Collect(std::uintptr_t address, std::size_t bytes, void** pages, std::size_t* count, bool clear) {
+        const auto subphaseOn = CollectSubphaseEnabled();
+        const auto lockStart = subphaseOn ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         std::lock_guard lock(mutex);
+        if (subphaseOn) addSubphase(&CollectSubphase::lockCalls, &CollectSubphase::lockBytes, &CollectSubphase::lockNanoseconds, bytes, lockStart);
+        if (subphaseOn) {
+            // One empty now()/now() pair per Collect: the control cost of a single
+            // timed section. Phase overhead is control per section times the number
+            // of sections, i.e. the sum of the *Calls fields.
+            const auto controlStart = std::chrono::steady_clock::now();
+            ++subphase.controlCalls;
+            subphase.controlNanoseconds += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - controlStart).count());
+        }
         // Diagnostic fallback: compare contents instead of causing write faults in guest code.
         // Set before process startup so no shared view is ever armed in this mode.
         static const bool compareShared = [] {
@@ -255,55 +321,93 @@ public:
                 const auto stop = std::min(end, base + pageBytes);
                 if (view.protection == PAGE_NOACCESS) return false;
                 const bool pinned = view.page->pins != 0;
+                if (subphaseOn && pinned) ++subphase.pinnedPages;
                 if (compareShared && !pinned) {
+                    const auto sharedStart = subphaseOn ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                    if (subphaseOn) ++subphase.sharedPages;
                     const auto* currentBytes = reinterpret_cast<const std::byte*>(base);
-                    if (view.page->comparedBytes.size() != pageBytes ||
-                        std::memcmp(view.page->comparedBytes.data(), currentBytes, pageBytes) != 0) {
+                    // comparedBytes only has a full snapshot after the first mismatch; before that
+                    // the size test short-circuits and no memcmp runs, so count bytes only there.
+                    const bool compareRuns = view.page->comparedBytes.size() == pageBytes;
+                    if (subphaseOn && compareRuns) subphase.memcmpBytes += pageBytes;
+                    if (!compareRuns || std::memcmp(view.page->comparedBytes.data(), currentBytes, pageBytes) != 0) {
                         view.page->comparedBytes.resize(pageBytes);
                         std::memcpy(view.page->comparedBytes.data(), currentBytes, pageBytes);
+                        if (subphaseOn) subphase.memcpyBytes += pageBytes;
                         invalidate(*view.page);
                     }
                     const auto firstChunk = (cursor - base) / 4096;
                     const auto endChunk = (stop - base + 4095) / 4096;
+                    // Bytes are the part of the page actually requested: cursor may start
+                    // mid-page on the first chunk, so stop - base would overstate it.
+                    const auto spanBytes = stop - cursor;
                     for (auto chunk = firstChunk; chunk < endChunk; ++chunk) {
                         if (view.comparedSeen[chunk] == view.page->generation) continue;
-                        if (*count == capacity) return true;
+                        // Capacity truncation is still real shared work: time it before
+                        // returning, otherwise truncated walks vanish from the counters.
+                        if (*count == capacity) {
+                            if (subphaseOn) addSubphase(&CollectSubphase::sharedCalls, &CollectSubphase::sharedBytes, &CollectSubphase::sharedNanoseconds, spanBytes, sharedStart);
+                            return true;
+                        }
                         pages[(*count)++] = reinterpret_cast<void*>(base + chunk * 4096);
+                        if (subphaseOn) ++subphase.returnedPages;
                         if (clear) view.comparedSeen[chunk] = view.page->generation;
                     }
                     cursor = stop;
+                    if (subphaseOn) addSubphase(&CollectSubphase::sharedCalls, &CollectSubphase::sharedBytes, &CollectSubphase::sharedNanoseconds, spanBytes, sharedStart);
                     continue;
                 }
                 if (pinned || view.seen != view.page->generation) {
+                    // Enumeration: every page of the view is pushed, which is the
+                    // production-path (no COMPARE_SHARED_WRITES) cost of this branch.
+                    const auto enumStart = subphaseOn ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                    const auto spanBytes = stop - cursor;
                     const auto needed = (stop - cursor + 4095) / 4096;
                     if (needed > capacity - *count) {
-                        for (auto at = cursor; *count < capacity; at += 4096) pages[(*count)++] = reinterpret_cast<void*>(at);
+                        for (auto at = cursor; *count < capacity; at += 4096) {
+                            pages[(*count)++] = reinterpret_cast<void*>(at);
+                            if (subphaseOn) ++subphase.returnedPages;
+                        }
+                        if (subphaseOn) addSubphase(&CollectSubphase::enumCalls, &CollectSubphase::enumBytes, &CollectSubphase::enumNanoseconds, spanBytes, enumStart);
                         return true;
                     }
-                    for (auto at = cursor; at < stop; at += 4096) pages[(*count)++] = reinterpret_cast<void*>(at);
+                    for (auto at = cursor; at < stop; at += 4096) {
+                        pages[(*count)++] = reinterpret_cast<void*>(at);
+                        if (subphaseOn) ++subphase.returnedPages;
+                    }
+                    if (subphaseOn) addSubphase(&CollectSubphase::enumCalls, &CollectSubphase::enumBytes, &CollectSubphase::enumNanoseconds, spanBytes, enumStart);
                 }
                 if (clear && !pinned) {
+                    // Arming: the alias walk plus one VirtualProtect per unarmed alias.
+                    const auto armStart = subphaseOn ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                     for (const auto alias : view.page->aliases) {
                         auto& other = views.at(alias);
                         if (!writable(other.protection) || other.armed || other.hostWrites != 0) continue;
                         DWORD previous;
                         const DWORD protection = other.protection == PAGE_EXECUTE_READWRITE ? PAGE_EXECUTE_READ : PAGE_READONLY;
                         if (!VirtualProtect(reinterpret_cast<void*>(alias), pageBytes, protection, &previous)) fail("arm shared memory write tracking");
+                        if (subphaseOn) ++subphase.armedProtectCalls;
                         other.armed = true;
                     }
                     view.seen = view.page->generation;
                     rememberClean(base, base + pageBytes);
+                    if (subphaseOn) addSubphase(&CollectSubphase::armCalls, &CollectSubphase::armBytes, &CollectSubphase::armNanoseconds, pageBytes, armStart);
                 }
                 cursor = stop;
             } else {
+                const auto covStart = subphaseOn ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 const auto memory = query(cursor);
-                if (memory.State != MEM_COMMIT || memory.Type != MEM_PRIVATE) return false;
                 const auto stop = std::min(end, reinterpret_cast<std::uintptr_t>(memory.BaseAddress) + memory.RegionSize);
+                if (subphaseOn) addSubphase(&CollectSubphase::coverageCalls, &CollectSubphase::coverageBytes, &CollectSubphase::coverageNanoseconds, stop - cursor, covStart);
+                if (memory.State != MEM_COMMIT || memory.Type != MEM_PRIVATE) return false;
                 ULONG_PTR available = capacity - *count;
                 if (available == 0) return true;
                 DWORD granularity = 0;
+                const auto privStart = subphaseOn ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 if (GetWriteWatch(clear ? WRITE_WATCH_FLAG_RESET : 0, reinterpret_cast<void*>(cursor), stop - cursor, pages + *count, &available, &granularity) != 0) fail("collect private guest writes");
+                if (subphaseOn) addSubphase(&CollectSubphase::privateCalls, &CollectSubphase::privateBytes, &CollectSubphase::privateNanoseconds, stop - cursor, privStart);
                 *count += available;
+                if (subphaseOn) subphase.returnedPages += available;
                 if (*count == capacity) return true;
                 cursor = stop;
             }
@@ -463,9 +567,17 @@ private:
         if (query(address).RegionSize != bytes && !VirtualFree(reinterpret_cast<void*>(address), bytes, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS)) fail("coalesce guest placeholders");
     }
 
+    static void addSubphase(std::uint64_t CollectSubphase::*calls, std::uint64_t CollectSubphase::*bytes, std::uint64_t CollectSubphase::*nanoseconds, std::size_t span, std::chrono::steady_clock::time_point start) {
+        auto& totals = Get().subphase;
+        ++(totals.*calls);
+        (totals.*bytes) += static_cast<std::uint64_t>(span);
+        (totals.*nanoseconds) += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+    }
+
     std::map<std::uintptr_t, std::uintptr_t> cleanRanges;
     std::map<std::uintptr_t, View> views;
     std::map<std::pair<std::uintptr_t, std::uint64_t>, std::weak_ptr<SharedPage>> physical;
+    CollectSubphase subphase;
     std::mutex mutex;
     AllocateFunction allocate = nullptr;
     MapFunction map = nullptr;

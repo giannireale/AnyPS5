@@ -111,6 +111,9 @@ std::atomic<std::uint64_t> collectDirtyRuns{0};
 #endif
 std::atomic<std::uint64_t> trackerWaits{0};
 std::atomic<std::uint64_t> trackerAcquisitions{0};
+// Extra Collect rounds inside walkWrites (buffer full => another pass). Diagnostic,
+// APS5_COLLECT_SUBPHASE only: an extra round costs a whole additional walk.
+std::atomic<std::uint64_t> walkExtraRounds{0};
 std::uintptr_t PagesBase();
 std::size_t PagesSize();
 std::uintptr_t ImagePagesBase();
@@ -370,6 +373,17 @@ public:
         AgcDriver::ProfilePrint_nid_no_patch(" collect-memo hits %llu, collect epochs %llu", static_cast<unsigned long long>(collectMemoHits.load()), static_cast<unsigned long long>(collectEpochBumps.load()));
         AgcDriver::ProfilePrint_nid_no_patch(" collect-dirty %llu tracker waits %llu / %llu", static_cast<unsigned long long>(collectDirty.load()), static_cast<unsigned long long>(trackerWaits.load()), static_cast<unsigned long long>(trackerAcquisitions.load()));
         AgcDriver::ProfilePrint_nid_no_patch(" | arena 0x%llx+0x%llx image 0x%llx+0x%llx forgets %llu (%.0f MiB)", static_cast<unsigned long long>(PagesBase()), static_cast<unsigned long long>(PagesSize()), static_cast<unsigned long long>(ImagePagesBase()), static_cast<unsigned long long>(ImagePagesSize()), static_cast<unsigned long long>(forgetCalls.load()), forgetBytes.load() / 1048576.0);
+        if (std::getenv("APS5_COLLECT_SUBPHASE") != nullptr) {
+            std::uint64_t parts[26] = {};
+            GuestArena::GuestArenaCollectSubphase_nid_postfix(parts);
+            const auto extraRounds = walkExtraRounds.exchange(0, std::memory_order_relaxed);
+            const auto timedSections = parts[0] + parts[3] + parts[6] + parts[9] + parts[12] + parts[15];
+            const auto controlPerSection = parts[24] != 0 ? static_cast<double>(parts[25]) / static_cast<double>(parts[24]) : 0.0;
+            AgcDriver::ProfilePrint_nid_no_patch(" | collect subphase shared %llu/%.0fMiB/%.1fs private %llu/%.0fMiB/%.1fs coverage %llu/%.1fs lock %llu/%.1fs\n", static_cast<unsigned long long>(parts[0]), parts[1] / 1048576.0, parts[2] / 1e9, static_cast<unsigned long long>(parts[3]), parts[4] / 1048576.0, parts[5] / 1e9, static_cast<unsigned long long>(parts[6]), parts[8] / 1e9, static_cast<unsigned long long>(parts[9]), parts[11] / 1e9);
+            AgcDriver::ProfilePrint_nid_no_patch(" | collect enum %llu/%.0fMiB/%.1fs arm %llu/%.0fMiB/%.1fs\n", static_cast<unsigned long long>(parts[12]), parts[13] / 1048576.0, parts[14] / 1e9, static_cast<unsigned long long>(parts[15]), parts[16] / 1048576.0, parts[17] / 1e9);
+            AgcDriver::ProfilePrint_nid_no_patch(" | collect work sharedPages %llu pinned %llu protect %llu memcmp %.0fMiB memcpy %.0fMiB returnedPages %llu extraRounds %llu\n", static_cast<unsigned long long>(parts[18]), static_cast<unsigned long long>(parts[19]), static_cast<unsigned long long>(parts[20]), parts[21] / 1048576.0, parts[22] / 1048576.0, static_cast<unsigned long long>(parts[23]), static_cast<unsigned long long>(extraRounds));
+            AgcDriver::ProfilePrint_nid_no_patch(" | collect timer control %llu empty pairs %.0f ns each => ~%.0f ms of the %.0f ms above is timer overhead\n", static_cast<unsigned long long>(parts[24]), controlPerSection, controlPerSection * static_cast<double>(timedSections) / 1e6, (parts[2] + parts[5] + parts[8] + parts[11] + parts[14] + parts[17]) / 1e6);
+        }
         {
             std::lock_guard lock(state.callersMutex);
             AgcDriver::ProfilePrint_nid_no_patch(" | read callers:");
@@ -1091,6 +1105,7 @@ bool walkWrites(WriteTracker& tracker, std::uint64_t first, std::uint64_t stop, 
     // reset, so a probe pass first (which doubled the walk of every dirty range) buys nothing.
     // APS5_NO_SINGLE_PASS_COLLECT=1 restores the probe pass followed by a resetting pass when dirty.
     static const bool singlePass = std::getenv("APS5_NO_SINGLE_PASS_COLLECT") == nullptr;
+    static const bool subphaseOn = std::getenv("APS5_COLLECT_SUBPHASE") != nullptr;
     auto cursor = first;
     bool dirty = false;
     while (cursor < stop) {
@@ -1107,6 +1122,7 @@ bool walkWrites(WriteTracker& tracker, std::uint64_t first, std::uint64_t stop, 
             if (kind != StampKind::Driver) tracker.noteCpuStore(page, page + WritePageBytes, tracker.generation);
         }
         if (count < tracker.pages.size()) break;
+        if (subphaseOn) walkExtraRounds.fetch_add(1, std::memory_order_relaxed);
         cursor = reinterpret_cast<std::uintptr_t>(tracker.pages[count - 1]) + (granularity != 0 ? granularity : page);
     }
     if (dirty) collectDirty.fetch_add(1, std::memory_order_relaxed);
@@ -1123,6 +1139,7 @@ bool walkWrites(WriteTracker& tracker, std::uint64_t first, std::uint64_t stop, 
                 if (kind != StampKind::Driver) tracker.noteCpuStore(page, page + WritePageBytes, tracker.generation);
             }
             if (count < tracker.pages.size()) break;
+            if (subphaseOn) walkExtraRounds.fetch_add(1, std::memory_order_relaxed);
             cursor = reinterpret_cast<std::uintptr_t>(tracker.pages[count - 1]) + (granularity != 0 ? granularity : page);
         }
     }
