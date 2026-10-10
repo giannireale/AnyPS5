@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <iostream>
 #include <span>
 #include <string>
@@ -23,6 +24,8 @@ constexpr std::uint32_t Threads = 32;
 constexpr std::uint32_t Words = 32;
 constexpr std::uint32_t Size = 16;
 constexpr std::uint32_t Format8888UNorm = 56;
+constexpr std::uint32_t Format16UNorm = 7;
+constexpr std::uint32_t Format32Float = 22;
 constexpr std::uint32_t Type1D = 8;
 constexpr std::uint32_t Type2D = 9;
 constexpr std::uint32_t SampleResult = 8;
@@ -30,6 +33,8 @@ constexpr std::uint32_t LoadResult = 12;
 alignas(256) std::array<std::uint32_t, Threads * Words> Buffer{};
 alignas(256) std::array<std::uint8_t, 16384> Line{};
 alignas(256) std::array<std::uint8_t, 16384> Plane{};
+alignas(256) std::array<std::uint8_t, 16384> DepthLine16{};
+alignas(256) std::array<std::uint8_t, 16384> DepthLine32{};
 
 alignas(256) constexpr std::array<std::uint32_t, 36> Code{
     0x34020087, 0xe0301000, 0x80000201, 0xe0301004, 0x80000301, 0xe0301008, 0x80000401, 0xe030100c,
@@ -43,6 +48,12 @@ alignas(256) constexpr std::array<std::uint32_t, 16> ExplicitLodCode{
     0x34020087, 0xe0301000, 0x80000201, 0xe0301004, 0x80000301, 0xe0301008, 0x80000401, 0xe030100c,
     0x80000501, 0xbf8c3f70, 0xf0900f08, 0x00610c02, 0xbf8c3f70, 0xe0701020, 0x80000c01, 0xbf810000,
 };
+
+alignas(256) constexpr auto DepthCompareCode = [] {
+    auto code = Code;
+    code[14] = 0xf0bc0f08u;
+    return code;
+}();
 
 constexpr std::array<float, 8> LineV{0.0f, 0.5f, 1.0f, 1.5f, -0.25f, 3.0f, 0.25f, 0.75f};
 constexpr std::array<std::uint32_t, 8> LineY{0u, 1u, 2u, 3u, 0xffffffffu, 7u, 0u, 5u};
@@ -95,6 +106,40 @@ std::array<std::uint32_t, 8> PlaneDescriptor() {
     };
 }
 
+std::array<std::uint32_t, 8> DepthLineDescriptor(std::span<std::uint8_t> storage, std::uint32_t format) {
+    const auto address = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(storage.data()));
+    return {
+        static_cast<std::uint32_t>(address >> 8u),
+        static_cast<std::uint32_t>((address >> 40u) & 0xffu) | (format << 20u) | (((Size - 1u) & 3u) << 30u),
+        (Size - 1u) >> 2u,
+        0xfacu | (Type1D << 28u),
+        0u,
+        0u,
+        0u,
+        0u,
+    };
+}
+
+std::array<std::uint32_t, 8> DepthPlaneDescriptor(std::span<std::uint8_t> storage, std::uint32_t format) {
+    const auto address = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(storage.data()));
+    return {
+        static_cast<std::uint32_t>(address >> 8u),
+        static_cast<std::uint32_t>((address >> 40u) & 0xffu) | (format << 20u) | (((Size - 1u) & 3u) << 30u),
+        (Size - 1u) >> 2u,
+        0xfacu | (Type2D << 28u),
+        0u,
+        0u,
+        0u,
+        0u,
+    };
+}
+
+std::array<std::uint32_t, 4> DepthCompareSamplerDescriptor() {
+    constexpr std::uint32_t ClampEdge = 2u;
+    constexpr std::uint32_t LessEqual = 3u;
+    return {ClampEdge | (ClampEdge << 3u) | (ClampEdge << 6u) | (LessEqual << 12u), 0u, 0u, 0u};
+}
+
 void FillTexture(std::span<std::uint8_t> storage, const std::array<std::uint32_t, 8>& descriptor, std::uint32_t rows) {
     const auto geometry = AgcDriver::Graphics::DescribeSurface(AgcDriver::Graphics::DecodeTextureResource(descriptor));
     Require(geometry.guestBytes <= storage.size(), "image plane address on a line: the texture does not fit the texel storage");
@@ -111,6 +156,47 @@ void FillTexture(std::span<std::uint8_t> storage, const std::array<std::uint32_t
     }
 }
 
+float DepthValue(std::uint32_t x, std::uint32_t format) {
+    const float depth = 0.125f + static_cast<float>(x) * 0.05f;
+    if (format == Format16UNorm) {
+        const auto quantized = static_cast<std::uint16_t>(std::lround(depth * 65535.0f));
+        return static_cast<float>(quantized) / 65535.0f;
+    }
+    return depth;
+}
+
+void FillDepthLine(std::span<std::uint8_t> storage, const std::array<std::uint32_t, 8>& descriptor, std::uint32_t format) {
+    const auto geometry = AgcDriver::Graphics::DescribeSurface(AgcDriver::Graphics::DecodeTextureResource(descriptor));
+    Require(geometry.guestBytes <= storage.size(), "depth image plane address on a line: the texture does not fit the texel storage");
+    const auto& mip = geometry.mips.at(0);
+    std::fill(storage.begin(), storage.end(), 0u);
+    const std::uint32_t bytesPerTexel = format == Format16UNorm ? 2u : 4u;
+    for (std::uint32_t x = 0; x < Size; ++x) {
+        auto* texel = &storage[geometry.GuestLayerOffset(0) + mip.tiledOffset + x * bytesPerTexel];
+        if (format == Format16UNorm) {
+            const auto value = static_cast<std::uint16_t>(std::lround((0.125f + static_cast<float>(x) * 0.05f) * 65535.0f));
+            std::memcpy(texel, &value, sizeof(value));
+        } else {
+            const float value = DepthValue(x, format);
+            std::memcpy(texel, &value, sizeof(value));
+        }
+    }
+}
+
+void FillDepthCompareInput(std::uint32_t format) {
+    FillInput(true);
+    for (std::uint32_t tid = 0; tid < Threads; ++tid) {
+        const auto depth = DepthValue(TexelOf(tid), format);
+        const float reference = tid % 2u == 0u ? depth - 0.1f : depth + 0.1f;
+        auto* input = &Buffer[tid * Words];
+        const auto u = input[0];
+        const auto v = input[1];
+        input[0] = Bits(reference);
+        input[1] = u;
+        input[2] = v;
+    }
+}
+
 std::array<std::uint32_t, 4> BufferDescriptor(const void* data, std::uint32_t bytes) {
     const auto address = reinterpret_cast<std::uintptr_t>(data);
     return {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu), bytes, 0x31016facu};
@@ -120,10 +206,10 @@ std::array<std::uint32_t, 4> SamplerDescriptor() {
     return {0u, 0xfffu << 12u, 1u << 26u, 0u};
 }
 
-void Run(AgcDriver::VulkanDevice& device, std::span<const std::uint32_t> code, const std::array<std::uint32_t, 8>& texture) {
+void Run(AgcDriver::VulkanDevice& device, std::span<const std::uint32_t> code, const std::array<std::uint32_t, 8>& texture,
+    const std::array<std::uint32_t, 4>& sampler = SamplerDescriptor()) {
     std::vector<std::uint32_t> userData(16, 0u);
     const auto buffer = BufferDescriptor(Buffer.data(), static_cast<std::uint32_t>(Buffer.size() * 4u));
-    const auto sampler = SamplerDescriptor();
     std::copy(buffer.begin(), buffer.end(), userData.begin());
     std::copy(texture.begin(), texture.end(), userData.begin() + 4);
     std::copy(sampler.begin(), sampler.end(), userData.begin() + 12);
@@ -164,6 +250,18 @@ void CheckPlane() {
     }
 }
 
+void CheckDepthCompare(std::uint32_t format) {
+    for (std::uint32_t tid = 0; tid < Threads; ++tid) {
+        const auto depth = DepthValue(TexelOf(tid), format);
+        const auto reference = std::bit_cast<float>(Buffer[tid * Words]);
+        const float expected = reference <= depth ? 1.0f : 0.0f;
+        const float actual = std::bit_cast<float>(Buffer[tid * Words + SampleResult]);
+        Require(actual == expected, "image_sample_c_lz 2d depth comparison on a native 1D texture format " + std::to_string(format) +
+            " with u=" + std::to_string(TexelOf(tid)) + " v=" + std::to_string(LineV[tid % LineV.size()]) +
+            " dref=" + std::to_string(reference) + " returned " + std::to_string(actual) + ", expected " + std::to_string(expected));
+    }
+}
+
 void RequireRefused(AgcDriver::VulkanDevice& device) {
     std::string refusal;
     try {
@@ -184,6 +282,16 @@ int main() {
         FillInput(true);
         Run(*device, Code, LineDescriptor());
         CheckLine();
+        FillDepthLine(DepthLine16, DepthLineDescriptor(DepthLine16, Format16UNorm), Format16UNorm);
+        FillDepthCompareInput(Format16UNorm);
+        Run(*device, DepthCompareCode, DepthPlaneDescriptor(DepthLine16, Format16UNorm), DepthCompareSamplerDescriptor());
+        CheckDepthCompare(Format16UNorm);
+        Run(*device, DepthCompareCode, DepthLineDescriptor(DepthLine16, Format16UNorm), DepthCompareSamplerDescriptor());
+        CheckDepthCompare(Format16UNorm);
+        FillDepthLine(DepthLine32, DepthLineDescriptor(DepthLine32, Format32Float), Format32Float);
+        FillDepthCompareInput(Format32Float);
+        Run(*device, DepthCompareCode, DepthLineDescriptor(DepthLine32, Format32Float), DepthCompareSamplerDescriptor());
+        CheckDepthCompare(Format32Float);
         FillTexture(Plane, PlaneDescriptor(), Size);
         FillInput(false);
         Run(*device, Code, PlaneDescriptor());
