@@ -1,4 +1,5 @@
 #include "prx/libc/include/GuestArena.hpp"
+#include "prx/libc/include/GuestWriteWatch.hpp"
 #include "prx/libc/include/WindowsMappings.hpp"
 #include <algorithm>
 #include <atomic>
@@ -113,13 +114,19 @@ private:
         GetSystemInfo(&system);
         const std::uintptr_t granularity = system.dwAllocationGranularity;
         const std::uintptr_t end = ApplicationAreaEnd;
+        std::uint32_t retries = 0;
         for (std::uintptr_t cursor = ArenaStart; cursor < end;) {
             MEMORY_BASIC_INFORMATION info{};
             if (VirtualQuery(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) == 0) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "query the guest arena range");
             const auto regionEnd = std::min(end, reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize);
             const auto first = info.State == MEM_FREE ? std::min(regionEnd, alignUp(cursor, granularity)) : regionEnd;
             const auto last = std::max(first, regionEnd & ~(granularity - 1));
-            if (first < last && WindowsMappings::Get().Reserve(reinterpret_cast<void*>(first), last - first) == nullptr) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "reserve the guest arena range");
+            if (first < last && WindowsMappings::Get().Reserve(reinterpret_cast<void*>(first), last - first) == nullptr) {
+                const auto error = GetLastError();
+                if (error == ERROR_INVALID_ADDRESS && ++retries < 64u) continue;
+                throw std::system_error(static_cast<int>(error), std::system_category(), "reserve the guest arena range");
+            }
+            retries = 0;
             if (cursor < first) _holes.emplace_back(cursor, first);
             if (last < regionEnd) _holes.emplace_back(last, regionEnd);
             cursor = regionEnd;
@@ -270,8 +277,7 @@ bool GuestArenaBeginHostWrite_nid_postfix(void* pointer, std::size_t bytes) {
 #ifdef _WIN32
     return WindowsMappings::Get().BeginHostWrite(reinterpret_cast<std::uintptr_t>(pointer), bytes);
 #else
-    (void)pointer;
-    (void)bytes;
+    GuestWriteWatch::GuestWriteWatchBeginHostWrite_nid_postfix(pointer, bytes);
     return true;
 #endif
 }
@@ -280,8 +286,7 @@ void GuestArenaEndHostWrite_nid_postfix(void* pointer, std::size_t bytes) {
 #ifdef _WIN32
     WindowsMappings::Get().EndHostWrite(reinterpret_cast<std::uintptr_t>(pointer), bytes);
 #else
-    (void)pointer;
-    (void)bytes;
+    GuestWriteWatch::GuestWriteWatchEndHostWrite_nid_postfix(pointer, bytes);
 #endif
 }
 
@@ -289,11 +294,21 @@ void GuestArenaEndHostWrite_nid_postfix(void* pointer, std::size_t bytes) {
 namespace {
 
 std::atomic<SharedBackingResolver> sharedBackingResolver{nullptr};
+std::atomic<SharedBackingWriter> sharedBackingWriter{nullptr};
 
 }
 
 void GuestArenaSetSharedBacking_nid_postfix(SharedBackingResolver resolver) {
     sharedBackingResolver.store(resolver, std::memory_order_release);
+}
+
+void GuestArenaSetSharedBackingWriter_nid_no_patch(SharedBackingWriter writer) {
+    sharedBackingWriter.store(writer, std::memory_order_release);
+}
+
+bool GuestArenaWriteSharedBacking_nid_no_patch(std::uintptr_t address, const void* source, std::size_t bytes) {
+    const auto writer = sharedBackingWriter.load(std::memory_order_acquire);
+    return writer != nullptr && writer(address, source, bytes);
 }
 
 bool GuestArenaSharedBacking_nid_postfix(std::uintptr_t address, std::size_t bytes, int* file, std::uint64_t* offset) {

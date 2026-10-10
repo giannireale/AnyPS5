@@ -7,7 +7,7 @@
 
 namespace AgcDriver {
 
-bool NarrowSubgroupClock(VkDriverId driver, std::string_view deviceName, std::uint32_t deviceId = 0);
+bool NarrowSubgroupClock(VkDriverId driver, std::uint32_t deviceId, std::string_view deviceName);
 
 }
 

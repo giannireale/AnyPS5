@@ -11,12 +11,12 @@
 namespace ShaderRecompiler
 {
 
-void EmitModuleHeader(SpirvModule& module, const IrProgram& program, const BindingAllocationResult& bindings) {
+void EmitModuleHeader(SpirvModule& module, const IrProgram& program, const CompiledBindingLayout& bindings) {
     CheckBindings(program, bindings);
     EmitBaseHeader(module, program);
 }
 
-void EmitModuleHeader(SpirvEmitterState& state, const BindingAllocationResult& bindings) {
+void EmitModuleHeader(SpirvEmitterState& state, const CompiledBindingLayout& bindings) {
     CheckBindings(state.program, bindings);
     DefineModule(state);
 }
@@ -134,7 +134,7 @@ void DefineModule(SpirvEmitterState& state) {
     const bool fragmentBarycentric = StageOf(state) == IrShaderStage::Pixel && std::any_of(state.inputs.begin(), state.inputs.end(), [](const SpirvInputBinding& input) {
         return input.perVertex || input.kind == StageInputKind::BaryCoordSmooth || input.kind == StageInputKind::BaryCoordNoPerspective;
     });
-    if (fragmentBarycentric) {
+    if (fragmentBarycentric && !state.program.Metadata().barycentricEmulation) {
         constexpr std::string_view barycentricExtension = "SPV_KHR_fragment_shader_barycentric";
         const bool capable = std::find(state.supportedCapabilities.begin(), state.supportedCapabilities.end(), static_cast<std::uint32_t>(spv::CapabilityFragmentBarycentricKHR)) != state.supportedCapabilities.end();
         const bool extended = std::find(state.supportedExtensions.begin(), state.supportedExtensions.end(), barycentricExtension) != state.supportedExtensions.end();

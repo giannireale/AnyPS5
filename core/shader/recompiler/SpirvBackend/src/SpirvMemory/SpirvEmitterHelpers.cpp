@@ -1,4 +1,6 @@
+#include "Optimization/ResourceMaterializer.hpp"
 #include "BdaAbi.hpp"
+#include "PipelineSpecialization.hpp"
 #include "SpirvBackend/SpirvEmitterHelpers.hpp"
 #include "SpirvBackend/SpirvMemory/SpirvTypes.hpp"
 #include "SpirvBackend/SpirvMemory/SpirvConstants.hpp"
@@ -80,6 +82,7 @@ std::uint32_t BuiltInForInput(StageInputKind kind) {
 std::uint32_t PerVertexType(SpirvEmitterState& state) {
     return state.module.DecoratedType(spv::OpTypeStruct,
         {{spv::OpMemberDecorate, {0u, spv::DecorationBuiltIn, spv::BuiltInPosition}},
+         {spv::OpMemberDecorate, {0u, spv::DecorationInvariant}},
          {spv::OpDecorate, {spv::DecorationBlock}}},
         TypeF32Vector(state, 4u));
 }
@@ -124,66 +127,13 @@ std::uint32_t PushConstantBlockType(SpirvEmitterState& state) {
 
 }
 
-void CheckBindings(const IrProgram& program, const BindingAllocationResult& bindings) {
+void CheckBindings(const IrProgram& program, const CompiledBindingLayout& bindings) {
     const IrProgramMetadata& metadata = program.Metadata();
     if (!metadata.bindingLayoutComplete) {
         FailEmit("shader binding layout has not been allocated for this program");
     }
     if (!(bindings.layout == metadata.bindings)) {
         FailEmit("binding allocation result does not match the program's committed binding layout");
-    }
-    if (bindings.bindings.size() != bindings.layout.descriptors.size()) {
-        FailEmit("binding allocation result has a different descriptor count than the binding layout");
-    }
-    const IrShaderStage stage = program.Resources().stage;
-    for (std::size_t index = 0; index < bindings.layout.descriptors.size(); index++) {
-        const IrDescriptorBinding& logical = bindings.layout.descriptors[index];
-        const DescriptorBinding& physical = bindings.bindings[index];
-        const std::uint32_t expectedCount = logical.resources.empty() ? 1u : static_cast<std::uint32_t>(logical.resources.size());
-        if (physical.count != expectedCount) {
-            FailEmit("descriptor binding " + std::to_string(index) + " has an incorrect descriptor count");
-        }
-        if (physical.descriptorSet != 0u) {
-            FailEmit("descriptor binding " + std::to_string(index) + " is bound to the wrong descriptor set");
-        }
-        if (physical.binding != NativeBinding(stage, logical.kind)) {
-            FailEmit("descriptor binding " + std::to_string(index) + " is bound to the wrong native binding slot");
-        }
-        DescriptorKind expectedKind = DescriptorKind::StorageBuffer;
-        DescriptorRole expectedRole = DescriptorRole::GuestBuffers;
-        if (logical.kind == DescriptorBindingKind::Samplers) {
-            expectedKind = DescriptorKind::Sampler;
-            expectedRole = DescriptorRole::GuestSamplers;
-        } else if (logical.kind == DescriptorBindingKind::Gds) {
-            expectedRole = DescriptorRole::Gds;
-        } else if (logical.kind == DescriptorBindingKind::BdaPagetable) {
-            expectedRole = DescriptorRole::BdaPagetable;
-        } else if (logical.kind == DescriptorBindingKind::FaultBuffer) {
-            expectedRole = DescriptorRole::FaultBuffer;
-        } else if (logical.kind == DescriptorBindingKind::FlattenedSrt) {
-            expectedRole = DescriptorRole::FlattenedSrt;
-        } else if (logical.kind == DescriptorBindingKind::ShaderData) {
-            expectedRole = DescriptorRole::ShaderData;
-        } else {
-            const auto imageClass = ImageBindingResourceClass(logical.kind);
-            if (imageClass == ImageResourceClass::Sampled) {
-                expectedKind = DescriptorKind::SampledImage;
-                expectedRole = DescriptorRole::GuestImages;
-            } else if (imageClass == ImageResourceClass::Storage) {
-                expectedKind = DescriptorKind::StorageImage;
-                expectedRole = DescriptorRole::GuestImages;
-            } else if (logical.kind == DescriptorBindingKind::Buffers) {
-                expectedRole = DescriptorRole::GuestBuffers;
-            } else {
-                FailEmit("descriptor binding " + std::to_string(index) + " has an unmapped binding kind");
-            }
-        }
-        if (physical.kind != expectedKind) {
-            FailEmit("descriptor binding " + std::to_string(index) + " has an incorrect descriptor kind");
-        }
-        if (physical.role != expectedRole) {
-            FailEmit("descriptor binding " + std::to_string(index) + " has an incorrect descriptor role");
-        }
     }
 }
 
@@ -223,6 +173,15 @@ void DefineInputs(SpirvEmitterState& state) {
         }
     }
     const bool pixelStage = state.program.Resources().stage == IrShaderStage::Pixel;
+    const bool emulated = pixelStage && state.program.Metadata().barycentricEmulation;
+    BarycentricEmulationLayout emulation;
+    if (emulated) {
+        const auto parameters = DescribeFragmentParameters(state.program, state.inputInfo);
+        const auto reads = [&](StageInputKind kind) {
+            return std::any_of(state.inputs.begin(), state.inputs.end(), [&](const SpirvInputBinding& input) { return input.kind == kind; });
+        };
+        emulation = LayoutBarycentricEmulation(parameters, {true, reads(StageInputKind::BaryCoordSmooth), reads(StageInputKind::BaryCoordNoPerspective)});
+    }
     for (auto& input : state.inputs) {
         if (pixelStage && input.kind == StageInputKind::Parameter) {
             const auto location = PixelParameterLocation(state, input.location);
@@ -286,7 +245,15 @@ void DefineInputs(SpirvEmitterState& state) {
         }
         if (input.kind == StageInputKind::Parameter) {
             const auto flat = PixelParameterIsFlat(state, input.location);
-            if (input.perVertex) {
+            auto location = PixelParameterLocation(state, input.location);
+            if (input.perVertex && emulated) {
+                const auto relocated = std::find_if(emulation.perVertexLocations.begin(), emulation.perVertexLocations.end(), [&](const auto& entry) { return entry.first == location; });
+                if (relocated == emulation.perVertexLocations.end()) {
+                    throw std::runtime_error("SPIR-V module emission failed: per-vertex parameter " + std::to_string(location) + " has no emulated location");
+                }
+                location = relocated->second;
+                state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationFlat);
+            } else if (input.perVertex) {
                 state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationPerVertexKHR);
             } else if (flat) {
                 state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationFlat);
@@ -294,7 +261,13 @@ void DefineInputs(SpirvEmitterState& state) {
             if (!flat && !input.perVertex && PixelParameterIsLinear(state, input.location)) {
                 state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationNoPerspective);
             }
-            state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationLocation, PixelParameterLocation(state, input.location));
+            state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationLocation, location);
+        } else if (emulated && (input.kind == StageInputKind::BaryCoordSmooth || input.kind == StageInputKind::BaryCoordNoPerspective)) {
+            const bool linear = input.kind == StageInputKind::BaryCoordNoPerspective;
+            if (linear) {
+                state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationNoPerspective);
+            }
+            state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationLocation, linear ? emulation.linearLocation : emulation.smoothLocation);
         } else if (const auto builtin = BuiltInForInput(input.kind); builtin != NoBuiltIn) {
             state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationBuiltIn, builtin);
         }
@@ -393,7 +366,10 @@ void DefineDescriptors(SpirvEmitterState& state) {
             return variable;
         };
         const auto ArrayType = [&](std::uint32_t type) {
-            return state.module.Type(spv::OpTypeArray, type, ConstantU32(state, static_cast<std::uint32_t>(binding.resources.size())));
+            const bool heap = binding.kind == DescriptorBindingKind::Samplers || ImageBindingResourceClass(binding.kind) != ImageResourceClass::None;
+            const auto count = static_cast<std::uint32_t>(binding.resources.size());
+            const auto length = heap ? state.module.SpecializationConstant(TypeU32(state), PipelineSpecialization::HeapCountBase + static_cast<std::uint32_t>(binding.kind), count) : ConstantU32(state, count);
+            return state.module.Type(spv::OpTypeArray, type, length);
         };
         switch (binding.kind) {
         case DescriptorBindingKind::Buffers:
@@ -430,7 +406,10 @@ void DefineDescriptors(SpirvEmitterState& state) {
             if (ImageBindingResourceClass(binding.kind) == ImageResourceClass::None) {
                 FailEmit("descriptor binding has an unmapped image resource class");
             }
-            const ImageResource& image = state.program.Info().images.at(binding.resources.front());
+            const auto modes = ResourceMaterializer::RuntimeImageModes(state.program.Info().images.at(binding.resources.front()));
+            const auto selected = std::ranges::find_if(modes, [&](const ImageResource& mode) { return DescriptorBindingForImage(mode) == binding.kind; });
+            if (selected == modes.end()) FailEmit("static image heap has no runtime mode");
+            const auto& image = *selected;
             const auto name = "image_" + std::to_string(static_cast<std::uint32_t>(binding.kind));
             state.imageVariables.at(ImageBindingIndex(binding.kind)) = Define(ArrayType(ImageType(state, image)), name.c_str(), spv::StorageClassUniformConstant);
             if (image.dimension == RdnaImageDimension::Dim1D || image.dimension == RdnaImageDimension::Dim1DArray) {

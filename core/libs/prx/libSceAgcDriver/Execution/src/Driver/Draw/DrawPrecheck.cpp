@@ -35,9 +35,6 @@ std::optional<DrawVerdict> Driver::precheckDraw(const QueueState& queue, const S
         if (!colorWrites && !queue.shader.contains(0x8)) {
             const auto word = [&](std::uint32_t offset) { const auto it = queue.context.find(offset); return it == queue.context.end() ? 0u : it->second; };
             if ((word(0x200) & 3u) == 0 || ((word(0x010) & 3u) == 0 && (word(0x011) & 1u) == 0)) return DrawVerdict::Nothing;
-            // Depth/stencil-only draw without a pixel shader: treat as a no-op pass.
-            // The game uses this for depth prepass and shadow cascade updates.
-            return DrawVerdict::Nothing;
         }
     }
     if (drawParameters.indexed) {

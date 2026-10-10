@@ -1,10 +1,14 @@
 #include "prx/libSceAgc/Shader/include/InterpolantMapping.hpp"
 
 #include <cstdio>
+#include <array>
+#include <algorithm>
 #include <stdexcept>
 #include <prx/libc/include/General.hpp>
 
 #include "SceShaders.hpp"
+#include "prx/libSceAgcDriver/Execution/include/ShaderPreparationScope.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgc/Shader/include/ShaderUtils.hpp"
 #include "prx/libSceAgc/Shader/include/ShaderConstants.hpp"
 
@@ -53,10 +57,23 @@ int CreateInterpolantMapping(const char* fn, ShaderRegister* regs, const Shader*
     if (regs == nullptr) {
         throw std::runtime_error(std::string(fn) + ": regs is null");
     }
+    if (ps != nullptr && ps->num_input_semantics > 32) {
+        throw std::runtime_error(std::string(fn) + ": input semantic count exceeds 32");
+    }
 
+    AgcDriver::ShaderPreparationScope transaction;
+    std::array<ShaderRegister, 32> values{};
+    auto* output = regs;
+    regs = values.data();
     if (ps == nullptr || ps->num_input_semantics == 0) {
         for (std::uint32_t i = 0; i < 32; ++i)
             SetInterpolantRegister(regs, i, identityUnused ? i : 0);
+        if (ps != nullptr) {
+            AgcDriverResolveShaderAbi_nid_postfix(ps, {regs, 32}, {});
+            if (gs != nullptr) AgcDriverResolveGraphicsAbi_nid_postfix(gs, ps, 0);
+        }
+        transaction.Commit();
+        std::copy(values.begin(), values.end(), output);
         return 0;
     }
 
@@ -84,12 +101,15 @@ int CreateInterpolantMapping(const char* fn, ShaderRegister* regs, const Shader*
 
     for (std::uint32_t i = ps->num_input_semantics; i < 32; ++i)
         SetInterpolantRegister(regs, i, identityUnused ? i : 0);
+    AgcDriverResolveShaderAbi_nid_postfix(ps, {regs, 32}, {});
+    AgcDriverResolveGraphicsAbi_nid_postfix(gs, ps, 0);
+    transaction.Commit();
+    std::copy(values.begin(), values.end(), output);
     return 0;
 }
 }
 
 extern "C" {
-APS5_EXPORT("HV4j+E0MBHE", sceAgcCreateInterpolantMapping);
 int APS5_VABI sceAgcCreateInterpolantMapping(ShaderRegister* regs, const Shader* gs, const Shader* ps) {
     return CreateInterpolantMapping(__func__, regs, gs, ps, CreateInterpolantValue, true);
 }
@@ -114,6 +134,10 @@ int APS5_VABI sceAgcCreateInterpolantMappingSdk(ShaderRegister* regs, const Shad
 }
 
 extern "C" {
+
+int APS5_VABI sceAgcCreateInterpolantMapping_0100(ShaderRegister* regs, const Shader* gs, const Shader* ps) {
+    return CreateInterpolantMapping(__func__, regs, gs, ps, CreateInterpolantValue, true);
+}
 
 APS5_EXPORT("dbOlWdppb4o", sceAgcUnknownCreateInterpolantMapping);
 int APS5_VABI sceAgcUnknownCreateInterpolantMapping(ShaderRegister* regs, const Shader* gs, const Shader* ps) {

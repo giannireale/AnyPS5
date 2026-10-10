@@ -35,6 +35,7 @@ public:
     VulkanDevice& operator=(const VulkanDevice&) = delete;
     std::string DeviceName() const;
     ShaderRecompiler::SpirvTarget Target() const;
+    std::optional<ShaderRecompiler::GeometryStageLimits> GeometryLimits() const;
     ShaderRecompiler::SpirvTarget ComputeTarget(std::uint32_t waveSize) const;
     // Distinguishes this device from every earlier one in the process (a memo keyed by the device
     // cannot rely on the pointer, which a replacement may reuse).
@@ -66,11 +67,9 @@ public:
     // once that work completed; the batch is submitted by the queue worker's flush rules (or at once
     // with APS5_LABEL_SUBMIT_NOW=1). `stamp` is the record-order stamp and `queue` the recording
     // queue for the recorder's pending-label table. Returns 0 when recorded on the GPU, 5 when kept
-    // as a completion action behind pending write-backs and 6 when kept as one because the memory is
-    // not host-imported so the GPU cannot store it (both land when their batch is reaped), else why
-    // the CPU must write it:
+    // as a completion action behind pending write-backs, else why the CPU must write it:
     // 1 nothing recorded (the write is already ordered), 2 write-backs pending and 3 memory not
-    // imported (both only with APS5_DRAIN_COMPLETION_LABELS=1), 4 unsuitable size or alignment.
+    // imported, 4 unsuitable size or alignment.
     // `reapFirst` retires finished batches before the checks; a caller recording a group of labels
     // under one lock passes it for the first label only.
     int WriteLabelOnGpu(std::uint64_t address, std::span<const std::byte> bytes, std::uint64_t stamp, std::uint32_t queue, bool reapFirst = true);
@@ -162,6 +161,8 @@ public:
     bool PrimitiveListRestart() const;
     bool SamplerFilterMinmax() const;
     bool ConservativeRasterization() const;
+    VkShaderStageFlags SubgroupStages() const;
+    bool ProvokingVertexLast() const;
     // A presentation is a few steps so the presenter holds GuestMemory::GpuMutex only while it
     // touches the queue. Presentations are slots (FlipInFlight() + 1, each with its own command
     // buffer, fence, kept resident image and dump buffer): RetirePresents(keep) (no mutex) retires
@@ -300,6 +301,7 @@ private:
     // The device's Graphics::Context: a copy of the one built at setup (its instance functions
     // resolved then, its function table filled then), or with APS5_NO_CONTEXT_CACHE=1 built anew.
     Graphics::Context graphicsContext() const;
+    ShaderRecompiler::SpirvTarget buildTarget() const;
     Graphics::Context buildContext() const;
     // Body of Dispatch and DispatchIndirect: `arguments` 0 dispatches x, y, z groups.
     IndirectOutcome dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint64_t arguments, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t programAddress, std::shared_ptr<PreparedDispatch> prepared, std::shared_ptr<const Recipe>* recipe);
