@@ -151,7 +151,7 @@ struct Context {
         bool valid = false;
         void reset() { lastLayout = VK_NULL_HANDLE; lastSet0 = VK_NULL_HANDLE; lastSet1 = VK_NULL_HANDLE; valid = false; }
     };
-    DescriptorSetCache descSetCache;
+    mutable DescriptorSetCache descSetCache;
     // Indirect draw features of the device: records with a non-zero first instance, several records
     // per call, and a GPU-side draw count (VK_KHR_draw_indirect_count).
     bool drawIndirectFirstInstance = false;
@@ -251,6 +251,8 @@ inline void EndRenderPass(const Context& context, VkCommandBuffer commands) {
     if (context.graphicsPipelineLibrary) context.Resolved(&DeviceFunctions::cmdEndRendering, "vkCmdEndRenderingKHR")(commands);
     else context.Resolved(&DeviceFunctions::cmdEndRenderPass, "vkCmdEndRenderPass")(commands);
     context.descSetCache.reset();
+}
+
 }
 
 #endif
