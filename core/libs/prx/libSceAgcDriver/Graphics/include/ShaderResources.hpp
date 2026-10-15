@@ -395,6 +395,13 @@ private:
         const StorageTexture* source = nullptr;
         bool depth = false;
         bool valid = false;
+        // Snapshot textures the lookup left in the texture cache: their cache key (descriptor words,
+        // component mapping, depth compare; the device is the context's), so a proof over memory
+        // without write generations can repeat the lookup's hit check on the entry (fastRevalidate).
+        bool keyed = false;
+        std::array<std::uint32_t, 8> keyWords{};
+        std::array<std::uint32_t, 4> keyComponents{};
+        bool keyDepthCompare = false;
     };
     void captureValidation();
     // A surface of this object the fast proof found a foreign image pending over: the element

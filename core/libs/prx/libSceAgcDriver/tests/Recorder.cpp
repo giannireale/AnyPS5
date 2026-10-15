@@ -6472,6 +6472,160 @@ void Run(Context context) {
 }
 #endif
 
+#ifdef _WIN32
+// Templates over memory the write watch does not cover (outside the arena, as the host regions
+// are): CollectWrites has no generation there, so the fast proof cannot use stamps. Under
+// APS5_FAST_REVALIDATE a view is proved by its image's Refresh and a snapshot by its cache entry's
+// hit check; without it every such Revalidate takes the full walk. Either way a CPU write between
+// two uses must reach the GPU (the view's image uploads again, the snapshot's template is refused),
+// and a proof that fails after a view's Refresh passed must leave the walk to decide.
+void unwatchedRevalidateTests(const Device& device, Recorder& recorder) {
+    auto context = device.GetContext();
+    context.nullDescriptors = device.NullDescriptors();
+    if (context.hostImportAlignment == 0 || !context.nullDescriptors || !AgcDriver::GuestMemory::WriteWatched()) {
+        std::cout << "skipped, host imports, null descriptors or write watching unavailable\n";
+        return;
+    }
+    const bool fastGate = std::getenv("APS5_FAST_REVALIDATE") != nullptr;
+    constexpr std::size_t bytes = 131072;
+    auto* viewBlock = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    auto* snapshotBlock = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    Require(viewBlock != nullptr && snapshotBlock != nullptr, "cannot allocate the unwatched texture blocks");
+    std::memset(viewBlock, 0x11, bytes);
+    std::memset(snapshotBlock, 0x22, bytes);
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(viewBlock, bytes, true, true, true);
+    }
+    struct Release {
+        const Context& context;
+        Recorder& recorder;
+        std::uint8_t* viewBlock;
+        std::uint8_t* snapshotBlock;
+        ~Release() {
+            recorder.Sync();
+            ClearCachedTextures(context.device);
+            {
+                GuestAllocations::Mutation mutation;
+                mutation.Remove(viewBlock);
+            }
+            HostImportFor(context, reinterpret_cast<std::uint64_t>(viewBlock), 65536);
+            VirtualFree(viewBlock, 0, MEM_RELEASE);
+            VirtualFree(snapshotBlock, 0, MEM_RELEASE);
+        }
+    } release{context, recorder, viewBlock, snapshotBlock};
+    const auto view = reinterpret_cast<std::uint64_t>(viewBlock);
+    const auto snapshot = reinterpret_cast<std::uint64_t>(snapshotBlock);
+    if (AgcDriver::GuestMemory::CollectWrites(view, 4096) != 0 || AgcDriver::GuestMemory::CollectWrites(snapshot, 4096) != 0) {
+        std::cout << "skipped, memory outside the arena is write-watched here\n";
+        return;
+    }
+    if (HostImportFor(context, view, bytes) == nullptr) {
+        std::cout << "skipped, host import of the view block refused\n";
+        return;
+    }
+    TextureDetiler detiler(context);
+    auto imageContext = context;
+    imageContext.detiler = &detiler;
+    TextureCache textureCache(imageContext);
+    imageContext.textureCache = &textureCache;
+    const auto descriptor = [](std::uint64_t address) {
+        return std::array<std::uint32_t, 8>{static_cast<std::uint32_t>(address >> 8), static_cast<std::uint32_t>(address >> 40) | (56u << 20) | (3u << 30), 15u | (63u << 14), 0x91b00fac, 0, 0, 0, 0};
+    };
+    const auto program = [&](std::initializer_list<std::uint64_t> addresses) {
+        ShaderRecompiler::RecompileResult result;
+        ShaderRecompiler::DescriptorBinding binding;
+        binding.kind = ShaderRecompiler::DescriptorKind::SampledImage;
+        binding.role = ShaderRecompiler::DescriptorRole::GuestImages;
+        binding.descriptorSet = 0;
+        binding.binding = ShaderRecompiler::RuntimeAbi::FirstImageBinding;
+        binding.count = static_cast<std::uint32_t>(addresses.size());
+        binding.imageShape = ShaderRecompiler::DescriptorImageShape::Image2D;
+        for (const auto address : addresses) {
+            const auto words = descriptor(address);
+            binding.guestDescriptor.insert(binding.guestDescriptor.end(), words.begin(), words.end());
+            binding.imageSamplers.push_back(0);
+        }
+        result.bindings.push_back(binding);
+        return result;
+    };
+    const auto viewProgram = program({view});
+    const auto snapshotProgram = program({snapshot});
+    const auto bothProgram = program({view, snapshot});
+    const CompiledShader viewCompute{ShaderRecompiler::ShaderStage::Compute, &viewProgram, 0};
+    const CompiledShader snapshotCompute{ShaderRecompiler::ShaderStage::Compute, &snapshotProgram, 0};
+    const CompiledShader bothCompute{ShaderRecompiler::ShaderStage::Compute, &bothProgram, 0};
+    using Path = ShaderResources::ProofPath;
+    // One use of the template: a new collect epoch first (a new submission), as the queue worker
+    // makes it, so no memoized walk or compare hides a write made since the previous use.
+    const auto revalidate = [&](const std::shared_ptr<ShaderResources>& resources, const CompiledShader& compute, Path& path) {
+        AgcDriver::GuestMemory::BumpCollectEpoch();
+        ShaderResources::ProofReport report;
+        const bool valid = resources->Revalidate(std::span(&compute, 1), &report);
+        path = report.path;
+        recorder.Sync();
+        return valid;
+    };
+    const auto expectedPath = fastGate ? Path::Fast : Path::Full;
+    Path path = Path::Fast;
+
+    // (i) A view over unwatched memory: unchanged, it is proved (fast under the gate); after a CPU
+    // write its image uploads again and the proof is not the fast one.
+    {
+        AgcDriver::GuestMemory::BumpCollectEpoch();
+        auto resources = std::make_shared<ShaderResources>(imageContext, viewCompute);
+        recorder.Sync();
+        Require(resources->StorageImages().size() == 1 && resources->SampledTextures().size() == 1, "the unwatched view did not use imported texture storage");
+        const auto image = resources->SampledTextures().front()->SharedStorageSource();
+        Require(image != nullptr, "the unwatched view has no storage source");
+        Require(revalidate(resources, viewCompute, path) && path == expectedPath, "an unchanged unwatched view did not revalidate on the expected path");
+        const auto version = image->Version();
+        for (std::size_t offset = 0; offset < bytes; offset += 4096) viewBlock[offset] ^= 0xffu;
+        const bool valid = revalidate(resources, viewCompute, path);
+        Require(path != Path::Fast, "a CPU write into an unwatched view was taken by the fast proof");
+        Require(image->Version() != version, "a CPU write into an unwatched view did not upload its image again");
+        if (valid) Require(revalidate(resources, viewCompute, path) && path == expectedPath, "an unwatched view did not revalidate again after its upload");
+    }
+    ClearCachedTextures(context.device);
+
+    // (i) A snapshot over unwatched memory: unchanged, it is proved; after a CPU write the template
+    // is refused (the lookup makes another snapshot) and the proof is not the fast one.
+    {
+        AgcDriver::GuestMemory::BumpCollectEpoch();
+        auto resources = std::make_shared<ShaderResources>(imageContext, snapshotCompute);
+        recorder.Sync();
+        Require(resources->StorageImages().empty() && resources->SampledTextures().size() == 1, "the unwatched snapshot is not a snapshot texture");
+        Require(revalidate(resources, snapshotCompute, path) && path == expectedPath, "an unchanged unwatched snapshot did not revalidate on the expected path");
+        snapshotBlock[64] ^= 0xffu;
+        Require(!revalidate(resources, snapshotCompute, path), "a CPU write into an unwatched snapshot kept the stale template");
+        Require(path != Path::Fast, "a CPU write into an unwatched snapshot was taken by the fast proof");
+    }
+    ClearCachedTextures(context.device);
+
+    // (ii) A view whose Refresh passes ahead of a snapshot that fails: the proof fails after the
+    // view's refresh, the walk refuses the template, and the view's image is not uploaded.
+    {
+        AgcDriver::GuestMemory::BumpCollectEpoch();
+        auto resources = std::make_shared<ShaderResources>(imageContext, bothCompute);
+        recorder.Sync();
+        Require(resources->StorageImages().size() == 1 && resources->SampledTextures().size() == 2, "the mixed template does not hold one view and one snapshot");
+        const auto image = resources->SampledTextures().front()->SharedStorageSource();
+        Require(image != nullptr, "the mixed template's first texture is not the view");
+        Require(revalidate(resources, bothCompute, path) && path == expectedPath, "an unchanged mixed template did not revalidate on the expected path");
+        const auto version = image->Version();
+        snapshotBlock[64] ^= 0xffu;
+        Require(!revalidate(resources, bothCompute, path), "a CPU write into the snapshot behind a refreshed view kept the stale template");
+        Require(path != Path::Fast, "the failing snapshot behind a refreshed view was taken by the fast proof");
+        Require(image->Version() == version, "the unchanged view was uploaded again when the snapshot behind it failed");
+        AgcDriver::GuestMemory::BumpCollectEpoch();
+        auto rebuilt = std::make_shared<ShaderResources>(imageContext, bothCompute);
+        recorder.Sync();
+        Require(revalidate(rebuilt, bothCompute, path) && path == expectedPath, "the rebuilt mixed template did not revalidate on the expected path");
+    }
+    std::cout << "Unwatched view and snapshot revalidation tests passed (APS5_FAST_REVALIDATE " << (fastGate ? "on" : "off") << ")\n";
+}
+#endif
+
 int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--queued-write-groups-only") {
@@ -6530,6 +6684,12 @@ int main(int argc, char** argv) {
             copiedDirectOrderingTests(device, recorder);
             return 0;
         }
+#ifdef _WIN32
+        if (argc == 2 && std::string_view(argv[1]) == "--unwatched-revalidate-only") {
+            unwatchedRevalidateTests(device, recorder);
+            return 0;
+        }
+#endif
         if (argc == 2 && (std::string_view(argv[1]) == "--storage-upload-lifetime-only" || std::string_view(argv[1]) == "--storage-upload-failure-only")) {
             storageUploadLifetimeTests(device, recorder, std::string_view(argv[1]) == "--storage-upload-failure-only");
             return 0;

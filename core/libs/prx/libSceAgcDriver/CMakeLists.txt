@@ -975,6 +975,13 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test(NAME agc_copied_direct_ordering COMMAND agc_driver_recorder_tests --copied-direct-only)
+    if(WIN32)
+        add_test(NAME agc_unwatched_revalidate COMMAND agc_driver_recorder_tests --unwatched-revalidate-only)
+        add_test(NAME agc_unwatched_revalidate_fast COMMAND agc_driver_recorder_tests --unwatched-revalidate-only)
+        set_tests_properties(agc_unwatched_revalidate agc_unwatched_revalidate_fast PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60 ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+        set_tests_properties(agc_unwatched_revalidate_fast PROPERTIES ENVIRONMENT APS5_FAST_REVALIDATE=1)
+    endif()
     set_tests_properties(agc_copied_direct_ordering PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
     if(WIN32)
         set_tests_properties(agc_copied_direct_ordering PROPERTIES ENVIRONMENT_MODIFICATION
