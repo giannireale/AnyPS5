@@ -143,11 +143,15 @@ struct Context {
     DrawQueue* drawQueue = nullptr;
     GraphicsPipelineCache* graphicsPipelines = nullptr;
     // Batches GPU work across guest commands (see Recorder); null before the device finished setup.
-    Recorder* recorder = nullptr;
-    // Per-device caches of the immutable descriptor objects a ShaderResources build needs (set
-    // layouts, descriptor pools, samplers); null (tests) means every build makes and destroys its own.
-    DescriptorCache* descriptorCache = nullptr;
-    SamplerCache* samplerCache = nullptr;
+    // Descriptor set cache for reuse optimization (APS5_DESC_SET_REUSE=1)
+    struct DescriptorSetCache {
+        VkPipelineLayout lastLayout = VK_NULL_HANDLE;
+        VkDescriptorSet lastSet0 = VK_NULL_HANDLE;
+        VkDescriptorSet lastSet1 = VK_NULL_HANDLE;
+        bool valid = false;
+        void reset() { lastLayout = VK_NULL_HANDLE; lastSet0 = VK_NULL_HANDLE; lastSet1 = VK_NULL_HANDLE; valid = false; }
+    };
+    DescriptorSetCache descSetCache;
     // Indirect draw features of the device: records with a non-zero first instance, several records
     // per call, and a GPU-side draw count (VK_KHR_draw_indirect_count).
     bool drawIndirectFirstInstance = false;
@@ -246,8 +250,7 @@ struct Context {
 inline void EndRenderPass(const Context& context, VkCommandBuffer commands) {
     if (context.graphicsPipelineLibrary) context.Resolved(&DeviceFunctions::cmdEndRendering, "vkCmdEndRenderingKHR")(commands);
     else context.Resolved(&DeviceFunctions::cmdEndRenderPass, "vkCmdEndRenderPass")(commands);
-}
-
+    context.descSetCache.reset();
 }
 
 #endif
