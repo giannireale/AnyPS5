@@ -3,6 +3,7 @@
 
 #include "Recompiler.hpp"
 #include <array>
+#include <atomic>
 #include <bitset>
 #include <cstddef>
 #include <cstdint>
