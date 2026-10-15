@@ -99,6 +99,18 @@ endif()
 
 if(BUILD_TESTING)
     add_test_executable(pad_sdl_tests tests/PadSdl.cpp)
+    add_test_executable(physical_input_tests tests/PhysicalInput.cpp)
+    target_include_directories(physical_input_tests PRIVATE ${LIBS_INCLUDE_DIR} ${ANYPS5_SDL2_INCLUDE_DIR})
+    target_link_libraries(physical_input_tests PRIVATE libSceVideoOut libScePad libSceMouse libSceKeyboard libc SDL2-static)
+    configure_windows_unwind(physical_input_tests)
+    add_test(NAME physical_input_isolation COMMAND physical_input_tests)
+    set_tests_properties(physical_input_isolation PROPERTIES
+        ENVIRONMENT "APS5_NO_PHYSICAL_INPUT=1;APS5_PAD_SCRIPT=0:4000:600000"
+        TIMEOUT 30)
+    if(WIN32)
+        set_tests_properties(physical_input_isolation PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceVideoOut>;PATH=path_list_prepend:$<TARGET_FILE_DIR:libScePad>;PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceMouse>;PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceKeyboard>;PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>;PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
     target_link_libraries(pad_sdl_tests PRIVATE SDL2-static)
     add_test(NAME pad_sdl COMMAND pad_sdl_tests)
     add_test_executable(pad_input_mapping_tests tests/InputMapping.cpp src/InputMapping.cpp)

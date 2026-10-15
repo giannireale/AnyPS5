@@ -9,6 +9,7 @@
 
 #include "SDL.h"
 #include "prx/libSceVideoOut/include/PadInput.hpp"
+#include "prx/libSceVideoOut/include/PhysicalInput.hpp"
 #include "prx/libSceVideoOut/include/DisplayWindow.hpp"
 #include "prx/libScePad/include/PadState.hpp"
 #include "prx/libScePad/include/PadInputTypes.hpp"
@@ -19,6 +20,10 @@ PadInput::PadInput() : PadInput(Pad::LoadInputMapping()) {
 
 PadInput::PadInput(Pad::InputConfiguration configuration) : keyboardMouse(std::move(configuration)) {
     openFirstAvailableController();
+    if (PhysicalInputDisabled()) {
+        publish();
+        std::fprintf(stderr, "[input] physical input disabled; scripted pad input remains enabled\n");
+    }
 }
 
 PadInput::~PadInput() {
@@ -26,6 +31,7 @@ PadInput::~PadInput() {
 }
 
 void PadInput::openFirstAvailableController() {
+    if (PhysicalInputDisabled()) return;
     if (controller != nullptr) return;
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1");
@@ -191,6 +197,7 @@ PadInputState PadInput::sampleController() const {
 }
 
 void PadInput::HandleEvent(const SDL_Event& event, DisplayWindow& window) {
+    if (PhysicalInputDisabled() && event.type != SDL_WINDOWEVENT) return;
     if (event.type == SDL_CONTROLLERDEVICEADDED) {
         openController(event.cdevice.which);
         return;
