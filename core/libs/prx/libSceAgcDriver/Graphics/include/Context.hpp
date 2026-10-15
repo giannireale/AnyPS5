@@ -143,6 +143,11 @@ struct Context {
     DrawQueue* drawQueue = nullptr;
     GraphicsPipelineCache* graphicsPipelines = nullptr;
     // Batches GPU work across guest commands (see Recorder); null before the device finished setup.
+    Recorder* recorder = nullptr;
+    // Per-device caches of the immutable descriptor objects a ShaderResources build needs (set
+    // layouts, descriptor pools, samplers); null (tests) means every build makes and destroys its own.
+    DescriptorCache* descriptorCache = nullptr;
+    SamplerCache* samplerCache = nullptr;
     // Descriptor set cache for reuse optimization (APS5_DESC_SET_REUSE=1)
     struct DescriptorSetCache {
         VkPipelineLayout lastLayout = VK_NULL_HANDLE;
