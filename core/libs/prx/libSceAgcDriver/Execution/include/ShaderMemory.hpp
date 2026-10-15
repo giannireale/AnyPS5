@@ -3,7 +3,6 @@
 
 #include "Recompiler.hpp"
 #include <array>
-#include <atomic>
 #include <bitset>
 #include <cstddef>
 #include <cstdint>
@@ -69,32 +68,6 @@ public:
     // included, the initial regions excluded: one stage's own reads on the draw path's shared
     // ShaderMemory (Regions() stays the union). The spans point into the pages, as Regions()'s do.
     [[nodiscard]] std::vector<ShaderRecompiler::MemoryRegion> TakeRecentRegions();
-    // The driver's source handle memo outcomes, for the [capture] line (APS5_PROFILE_DRAW).
-    // The capture profile totals (captures, pages, reads, handle memo hits/misses), for the [capture] line (APS5_PROFILE_DRAW).
-    struct CaptureProfile {
-        std::atomic<std::uint64_t> captures{0};
-        std::atomic<std::uint64_t> pages{0};
-        std::atomic<std::uint64_t> pagesWordwise{0};
-        std::atomic<std::uint64_t> reads{0};
-        std::atomic<std::uint64_t> observationsSkipped{0};
-        std::atomic<std::uint64_t> wordsKnown{0};
-        std::atomic<std::uint64_t> wordsKnownVerified{0};
-        std::atomic<std::uint64_t> wordsKnownMismatches{0};
-        std::atomic<std::uint64_t> wordsRaw{0};
-        std::atomic<std::uint64_t> wordsVerified{0};
-        std::atomic<std::uint64_t> wordMismatches{0};
-        std::atomic<std::uint64_t> wordWaits{0};
-        std::atomic<std::uint64_t> wordWaitNanoseconds{0};
-        std::atomic<std::uint64_t> pageReadNanoseconds{0};
-        std::atomic<std::uint64_t> captureNanoseconds{0};
-        std::atomic<std::uint64_t> resolveNanoseconds{0};
-        std::atomic<std::uint64_t> specializationNanoseconds{0};
-        std::atomic<std::uint64_t> hookWaitNanoseconds{0};
-        std::atomic<std::uint64_t> handleHits{0};
-        std::atomic<std::uint64_t> handleMisses{0};
-    };
-    static CaptureProfile& CaptureTotals();
-
     // The driver's source handle memo outcomes, for the [capture] line (APS5_PROFILE_DRAW).
     static void CountHandleMemo(bool hit);
 
