@@ -7,3 +7,7 @@
 ### Functional
 
 - [retail-only answers](../../../core/libs/prx/libSceGnmDriverForNeoMode/Export.cpp) (libSceGnmDriverForNeoMode) - the debug resets, the resource and owner registration calls, the SDMA calls and the SQ counter calls return `0x8EEE00FF`, the five `sceGnmDriverInternalRetrieveGnmInterface*` calls return `0x80000000`, `sceGnmGetDbgGcHandle` returns -1, `sceGnmDriverTraceInProgress` and `sceGnmValidateOnSubmitEnabled` return 0 and the other validation calls return `0x80D13FFF`. These are the values [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/a808e76/src/core/libraries/gnmdriver/gnmdriver.cpp) returns for calls it marks as not available in retail firmware; they are not measured on a console, and the arguments are not read
+
+### Silent stubs
+
+- [sceGnmDriverTraceInProgress, sceGnmGetDbgGcHandle, sceGnmValidateOnSubmitEnabled](../../../core/libs/prx/libSceGnmDriverForNeoMode/Export.cpp) (libSceGnmDriverForNeoMode) - declared without a known signature to resolve the import; the call throws through `NotImplemented_nid_no_patch`
