@@ -22,3 +22,7 @@
 - [sceSaveDataGetMountInfo, sceSaveDataGetParam, sceSaveDataLoadIcon, sceSaveDataSaveIcon, sceSaveDataSetParam, sceSaveDataUmount2](../../../core/libs/prx/libSceSaveData.native/Export.cpp) (libSceSaveData.native) - null pointer arguments return `SAVE_DATA_ERROR_PARAMETER` instead of throwing C++ exceptions; unmounted targets return `SAVE_DATA_ERROR_NOT_MOUNTED`, and parameter type or buffer size violations return `SAVE_DATA_ERROR_PARAMETER` after slot lookup
 
 - [sceSaveDataSyncSaveDataMemory](../../../core/libs/prx/libSceSaveData.native/Export.cpp) (libSceSaveData.native) - validates library initialization and parameters; since in-memory saves flush synchronously on write, sync confirms existence and readiness of the memory blob
+
+### Silent stubs
+
+- [sceSaveDataCheckIpmiIfSize, sceSaveDataDebug, sceSaveDataDebugCheckBackupData, sceSaveDataDebugCleanMount, sceSaveDataDebugCompiledSdkVersion, sceSaveDataDebugCreateSaveDataRoot, sceSaveDataDebugProspero, sceSaveDataDebugRemoveSaveDataRoot, sceSaveDataDebugTarget](../../../core/libs/prx/libSceSaveData.native/Export.cpp) (libSceSaveData.native) - declared without a known signature to resolve the import; the call throws through `NotImplemented_nid_no_patch`
