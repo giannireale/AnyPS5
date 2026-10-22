@@ -679,6 +679,7 @@ private:
         std::shared_ptr<Physical> slot;
         std::size_t viewBytes = pageBytes;
         std::array<std::uint64_t, 4> comparedSeen{};
+            std::uint32_t hostImports = 0;
     };
     struct Run {
         std::uintptr_t end;

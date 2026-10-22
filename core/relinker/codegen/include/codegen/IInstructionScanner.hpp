@@ -18,7 +18,9 @@ public:
 };
 
 // Validation must reject incomplete instructions; only conversion may ignore a truncated tail.
-std::unique_ptr<IInstructionScanner> MakeInstructionScanner(std::function<void(std::uint64_t, std::uint64_t)> progress = {}, bool allowTruncatedTail = false);
+std::unique_ptr<IInstructionScanner> MakeInstructionScanner(std::function<void(std::uint64_t, std::uint64_t)> progress = {}, bool allowTruncatedTail = false, std::vector<Domain::CodeRange> unwindRanges = {});
+
+std::vector<Domain::CodeRange> MergeCodeRanges(std::vector<Domain::CodeRange> ranges);
 
 }
 

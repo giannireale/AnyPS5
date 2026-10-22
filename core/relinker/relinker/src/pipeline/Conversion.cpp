@@ -129,7 +129,7 @@ ConversionOutput Conversion::Convert(ConversionInput input, const ConversionOpti
     if (macos) {
         patcher = std::make_shared<Elfpatcher::MacOs::MacOsMachOPatcher>(options.MacosFixedBase);
     } else if (windows) {
-        patcher = std::make_shared<Elfpatcher::Windows::WindowsPePatcher>(options.WindowsGui, std::move(input.Icon), input.IconName, [&](auto completed, auto total) { inputProgress.Report({Domain::ProgressStage::Image, {}, completed, total}); }, options.WindowsFixedBase, options.TraceImports);
+        patcher = std::make_shared<Elfpatcher::Windows::WindowsPePatcher>(options.WindowsGui, std::move(input.Icon), input.IconName, [&](auto completed, auto total) { inputProgress.Report({Domain::ProgressStage::Image, {}, completed, total}); }, options.WindowsFixedBase, options.TraceImports, [&](std::string_view text) { inputProgress.Message(text); });
     } else {
         patcher = std::make_shared<Elfpatcher::Linux::LinuxElfPatcher>(
             std::make_shared<Elfpatcher::EntryStubBuilder>(),

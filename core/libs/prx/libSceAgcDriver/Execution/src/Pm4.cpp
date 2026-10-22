@@ -943,12 +943,21 @@ void NoteDispatchRegisters(std::span<const std::uint32_t> packet, QueueState& qu
     }
 }
 
+bool IndirectRegistersValid(std::span<const std::uint32_t> pairs) {
+    for (std::size_t i = 0; i < pairs.size(); i += 2) {
+        if (pairs[i] == 0xffffffffu || (pairs[i] & ~0x70000000u) > 0xffffu) return false;
+    }
+    return true;
+}
+
 void ExecuteIndirectRegisters(std::span<const std::uint32_t> packet, std::span<const std::uint32_t> pairs, QueueState& queue) {
     const auto opcode = (packet[0] >> 8u) & 0xffu;
     require(packet.size() == 5 && IndirectRegisterOpcode(opcode), "expected indirect register packet");
     require(pairs.size() == static_cast<std::size_t>(packet[4]) * 2, "indirect register list does not match its packet");
+    const auto usable = [&](std::uint32_t value) { return !skipInvalid || IndirectRegistersValid(std::span(&value, 1)); };
     for (std::size_t i = 0; i < pairs.size(); i += 2) {
-        if (pairs[i] == 0xffffffffu || (pairs[i] & ~0x70000000u) <= 0xffffu) {
+        if (skipInvalid && !IndirectRegistersValid(std::span(&pairs[i], 1))) continue;
+        if (pairs[i] != 0xffffffffu && (pairs[i] & ~0x70000000u) > 0xffffu) {
             registerOffset(pairs[i]);
             continue;
         }
@@ -963,7 +972,9 @@ void ExecuteIndirectRegisters(std::span<const std::uint32_t> packet, std::span<c
         }
         throw std::runtime_error("indirect register load 0x" + ToHex(opcode) + " count 0x" + ToHex(packet[4]) + ": pair " + std::to_string(i / 2) + " has register dword 0x" + ToHex(pairs[i]) + "; first dwords:" + dump);
     }
-    for (std::size_t i = 0; i < pairs.size(); i += 2) writeRegister(queue, opcode, registerOffset(pairs[i]), pairs[i + 1]);
+    for (std::size_t i = 0; i < pairs.size(); i += 2) {
+        if (usable(pairs[i])) writeRegister(queue, opcode, registerOffset(pairs[i]), pairs[i + 1]);
+    }
     if (queue.savedContext.has_value() && TraceContextState()) {
         std::fprintf(stderr, "[context]   indirect 0x%x:", opcode);
         for (std::size_t i = 0; i < pairs.size(); i += 2) std::fprintf(stderr, " %x", registerOffset(pairs[i]));

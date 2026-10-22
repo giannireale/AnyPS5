@@ -1010,8 +1010,8 @@ ShaderStages DecodeShaderStages(const QueueState& queue, bool vertexWorkgroup) {
         const auto maxVertices = read(queue.context, 0x1ff);
         const auto verticesPerPrimitive = vertexWorkgroup ? 3u : read(queue.context, 0x2ce);
         const auto outputType = read(queue.context, 0x29b);
-        validate(outputType == 2 || (outputType == 1 && !vertexWorkgroup), "VGT_GS_OUT_PRIM_TYPE other than a triangle strip, or a line strip from a geometry program, is unsupported");
-        const auto outputSize = outputType == 1 ? 2u : 3u;
+        validate(outputType == 2 || ((outputType == 0 || outputType == 1) && !vertexWorkgroup), "VGT_GS_OUT_PRIM_TYPE other than a triangle strip, or a point list or line strip from a geometry program, is unsupported");
+        const auto outputSize = outputType == 0 ? 1u : outputType == 1 ? 2u : 3u;
         validate((primitive == 1 || primitive == 2 || primitive == 3 || primitive == 4 || primitive == 5 || primitive == 6) && verticesPerPrimitive >= outputSize, "unsupported geometry input or output assembly");
         ShaderRecompiler::ShaderMeshInputInfo input;
         input.inputPrimitive = primitive;

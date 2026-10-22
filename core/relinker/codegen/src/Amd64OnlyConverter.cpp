@@ -391,7 +391,7 @@ void Amd64OnlyConverter::_convertSegment(
         fileBytes.begin() + static_cast<std::ptrdiff_t>(segOffset + segSize)
     );
 
-    const auto scanner = MakeInstructionScanner([&](auto offset, auto) { if (progress) progress(completed + offset, total); }, true);
+    const auto scanner = MakeInstructionScanner([&](auto offset, auto) { if (progress) progress(completed + offset, total); }, true, {});
     const auto matches = _atFileOffset(ph.Offset, [&] { return scanner->ScanCodeSection(seg, 0, seg.size()); });
 
     if (progress) progress(completed + segSize, total);
