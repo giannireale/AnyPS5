@@ -142,6 +142,7 @@ if(BUILD_TESTING)
         set_tests_properties(shader_cache_runtime_sources PROPERTIES TIMEOUT 180)
         add_test(NAME pr_overlap_encoding COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_pr_overlap_encoding.py)
+        set_tests_properties(pr_overlap_encoding PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME pr_overlap_dependencies COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_pr_overlap_dependencies.py)
         add_test(NAME pr_overlap_tools COMMAND ${Python3_EXECUTABLE}
