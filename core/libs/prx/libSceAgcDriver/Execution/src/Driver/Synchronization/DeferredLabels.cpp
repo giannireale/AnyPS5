@@ -2,15 +2,21 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Synchronization/DeferredLabels.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Synchronization/SynchronizationStatistics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
-#include "prx/libc/include/HostThreadLocal.hpp"
+#include "prx/libc/include/HostThreadSlot.hpp"
+#include "ThreadOwned.hpp"
 #include <cstdlib>
 
 namespace AgcDriver::DriverDetail {
 
-// Host FLS, not thread_local: on MinGW the emutls block of a worker is freed before its C++
-// thread_local destructors run (the object held HeapFree's FEEEFEEE fill at the destructor call).
-struct DeferredLabelsTag {};
-DeferredLabels& deferredLabels() { return HostThreadLocal<DeferredLabels, DeferredLabelsTag>(); }
+DeferredLabels& deferredLabels() {
+    struct Slot {};
+    auto* deferred = HostThreadSlot<DeferredLabels*, Slot>::Get();
+    if (deferred == nullptr) {
+        ShaderRecompiler::ThreadOwned(deferred);
+        HostThreadSlot<DeferredLabels*, Slot>::Set(deferred);
+    }
+    return *deferred;
+}
 
 bool DeferLabels() {
 

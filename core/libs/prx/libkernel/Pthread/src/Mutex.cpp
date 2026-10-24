@@ -149,16 +149,6 @@ int APS5_VABI scePthreadMutexattrSettype(PthreadMutexattr* attr, int type) {
     return 0;
 }
 
-int APS5_VABI scePthreadMutexattrSetprotocol(PthreadMutexattr* attr, int protocol) {
-    if (!attr || !*attr)
-        return SCE_KERNEL_ERROR_EINVAL;
-    constexpr int PrioNone = 0;
-    constexpr int PrioProtect = 2;
-    if (protocol < PrioNone || protocol > PrioProtect)
-        return SCE_KERNEL_ERROR_EINVAL;
-    return 0;
-}
-
 int APS5_VABI scePthreadMutexInit(PthreadMutex* mutex, const PthreadMutexattr* attr, const char*) {
     if (!mutex)
         throw std::invalid_argument("Mutex pointer is null");
@@ -201,10 +191,12 @@ int APS5_VABI scePthreadMutexLock(PthreadMutex* mutex) {
 }
 
 int APS5_VABI scePthreadMutexUnlock(PthreadMutex* mutex) {
-    auto* current = resolveMutex(mutex, false);
-    if (!current)
+    if (!mutex)
+        throw std::invalid_argument("Mutex pointer is null");
+    auto* current = std::atomic_ref<PthreadMutex>(*mutex).load(std::memory_order_acquire);
+    if (current == destroyedMutex())
         return SCE_KERNEL_ERROR_EINVAL;
-    if (current->_owner.load(std::memory_order_acquire) != std::this_thread::get_id())
+    if (!isInitializedMutex(current) || current->_owner.load(std::memory_order_acquire) != std::this_thread::get_id())
         return sceNotPermitted;
     bool released = true;
     if (current->_type == MutexType::Recursive) {

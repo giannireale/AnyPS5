@@ -5,9 +5,13 @@
 #include <elfpatcher/general/SectionHeaderTableRequest.hpp>
 #include <codegen/x86/Amd64OnlySubstitutionTable.hpp>
 #include <codegen/x86/StubBodyBuilder.hpp>
+#include <domain/ImportModule.hpp>
 #include <io/BufferUtils.hpp>
+#include <nid/NidCompute.hpp>
 #include <algorithm>
 #include <limits>
+#include <map>
+#include <set>
 #include <span>
 #include <sstream>
 #include <string>
@@ -81,7 +85,6 @@ std::vector<std::uint8_t> RebasedRelocations(const std::vector<std::uint8_t>& ta
         case R_X86_64_GLOB_DAT:
         case R_X86_64_JUMP_SLOT:
         case R_X86_64_32:
-        case R_X86_64_32S:
         case R_X86_64_DTPMOD64:
         case R_X86_64_DTPOFF64:
         case R_X86_64_TPOFF64:
@@ -144,6 +147,115 @@ void SeparateSharedLoadPages(std::vector<std::uint8_t>& buf, std::vector<Domain:
     }
 }
 
+struct TracedImport {
+    std::uint64_t Slot;
+    std::string Name;
+    std::string Library;
+};
+
+std::string ReadDynamicString(const std::vector<std::uint8_t>& strings, const std::uint32_t offset) {
+    if (offset >= strings.size())
+        throw Domain::RelinkerException("Import symbol name lies outside the dynamic string table");
+    std::string value;
+    for (std::size_t index = offset; index < strings.size() && strings[index] != 0; ++index)
+        value.push_back(static_cast<char>(strings[index]));
+    return value;
+}
+
+std::vector<TracedImport> TracedImports(const Domain::SysVDynamicSection& dynSection) {
+    std::vector<TracedImport> imports;
+    const auto collect = [&](const std::vector<std::uint8_t>& table) {
+        RequireWholeEntries(table, kRelaEntrySize, "Relocation table");
+        for (std::size_t entry = 0; entry < table.size(); entry += kRelaEntrySize) {
+            const auto info = Io::ReadU64(table, entry + 8);
+            const auto type = static_cast<std::uint32_t>(info);
+            const auto symbol = info >> 32;
+            const auto target = Io::ReadU64(table, entry);
+            if ((type != R_X86_64_GLOB_DAT && type != R_X86_64_JUMP_SLOT) || symbol == 0 || Io::ReadU64(table, entry + 16) != 0)
+                continue;
+            if (type == R_X86_64_GLOB_DAT && !dynSection.FunctionImports.contains(target))
+                continue;
+            if (symbol >= dynSection.DynSymData.size() / kSymEntrySize)
+                throw Domain::RelinkerException("Invalid import symbol index", target);
+            const auto symbolOffset = static_cast<std::size_t>(symbol * kSymEntrySize);
+            if (Io::ReadU16(dynSection.DynSymData, symbolOffset + 6) != SHN_UNDEF || dynSection.DynSymData[symbolOffset + 4] >> 4 == STB_WEAK)
+                continue;
+            auto name = ReadDynamicString(dynSection.DynStrData, Io::ReadU32(dynSection.DynSymData, symbolOffset));
+            if (name.empty())
+                continue;
+            const auto library = dynSection.ImportModules.find(target);
+            imports.push_back({target, std::move(name), library == dynSection.ImportModules.end() ? std::string{} : library->second});
+        }
+    };
+    collect(dynSection.RelaData);
+    collect(dynSection.RelaPltData);
+    return imports;
+}
+
+Domain::SysVDynamicSection ImportsByNid(Domain::SysVDynamicSection dynSection) {
+    RequireWholeEntries(dynSection.DynamicSegmentData, kDynEntrySize, "Executable dependency table");
+    for (std::size_t entry = 0; entry < dynSection.DynamicSegmentData.size(); entry += kDynEntrySize) {
+        if (static_cast<std::int64_t>(Io::ReadU64(dynSection.DynamicSegmentData, entry)) != DT_NEEDED)
+            continue;
+        const auto offset = Io::ReadU64(dynSection.DynamicSegmentData, entry + 8);
+        if (offset >= dynSection.DynStrData.size())
+            throw Domain::RelinkerException("DT_NEEDED string offset is out of bounds", offset);
+        const auto name = ReadDynamicString(dynSection.DynStrData, static_cast<std::uint32_t>(offset));
+        const auto library = Domain::NeededLibraryName(name);
+        if (library == name)
+            continue;
+        Io::WriteU64(dynSection.DynamicSegmentData, entry + 8, dynSection.DynStrData.size());
+        Io::AppendString(dynSection.DynStrData, library);
+    }
+    for (auto& library : dynSection.NeededLibraries)
+        library = Domain::NeededLibraryName(library);
+
+    std::set<std::uint64_t> symbols;
+    for (const auto* table : {&dynSection.RelaData, &dynSection.RelaPltData}) {
+        RequireWholeEntries(*table, kRelaEntrySize, "Relocation table");
+        for (std::size_t entry = 0; entry < table->size(); entry += kRelaEntrySize)
+            if (dynSection.NamedImports.contains(Io::ReadU64(*table, entry)))
+                symbols.insert(Io::ReadU64(*table, entry + 8) >> 32);
+    }
+    for (const auto symbol : symbols) {
+        if (symbol >= dynSection.DynSymData.size() / kSymEntrySize)
+            throw Domain::RelinkerException("Invalid import symbol index", symbol);
+        const auto symbolOffset = static_cast<std::size_t>(symbol * kSymEntrySize);
+        const auto name = ReadDynamicString(dynSection.DynStrData, Io::ReadU32(dynSection.DynSymData, symbolOffset));
+        if (name.empty() || name.find('#') != std::string::npos)
+            continue;
+        if (dynSection.DynStrData.size() > std::numeric_limits<std::uint32_t>::max())
+            throw Domain::RelinkerException("Dynamic string table too large");
+        Io::WriteU32(dynSection.DynSymData, symbolOffset, static_cast<std::uint32_t>(dynSection.DynStrData.size()));
+        Io::AppendString(dynSection.DynStrData, Nid::ComputeNid(name, ""));
+    }
+    return dynSection;
+}
+
+std::vector<std::uint8_t> TracePrologue(const std::uint64_t vaddr, const std::uint64_t table, const std::uint64_t tableEnd, const std::uint64_t function) {
+    std::vector<std::uint8_t> code = {0x52, 0x53, 0x41, 0x54, 0x48, 0x83, 0xec, 0x08};
+    const auto rip = [&](std::initializer_list<std::uint8_t> opcode, const std::uint64_t target) {
+        code.insert(code.end(), opcode);
+        const auto displacement = static_cast<std::int64_t>(target) - static_cast<std::int64_t>(vaddr + code.size() + 4);
+        if (displacement < std::numeric_limits<std::int32_t>::min() || displacement > std::numeric_limits<std::int32_t>::max())
+            throw Domain::RelinkerException("Import trace table exceeds rel32 range");
+        Io::AppendU32(code, static_cast<std::uint32_t>(displacement));
+    };
+    rip({0x48, 0x8d, 0x1d}, table);
+    rip({0x4c, 0x8d, 0x25}, tableEnd);
+    const auto loop = code.size();
+    code.insert(code.end(), {0x4c, 0x39, 0xe3, 0x73, 0x00});
+    const auto exit = code.size();
+    code.insert(code.end(), {0x48, 0x8b, 0x03, 0x48, 0x8b, 0x3c, 0x03, 0x48, 0x8b, 0x73, 0x08, 0x48, 0x01, 0xde, 0x48, 0x8b, 0x53, 0x10, 0x48, 0x01, 0xda});
+    rip({0xff, 0x15}, function);
+    code.insert(code.end(), {0x48, 0x8b, 0x3b, 0x48, 0x01, 0xdf, 0x48, 0x81, 0xe7, 0x00, 0xf0, 0xff, 0xff, 0xbe, 0x00, 0x10, 0x00, 0x00, 0xba, 0x07, 0x00, 0x00, 0x00, 0x50, 0xb8, 0x0a, 0x00, 0x00, 0x00, 0x0f, 0x05, 0x58});
+    code.insert(code.end(), {0x48, 0x8b, 0x0b, 0x48, 0x89, 0x04, 0x0b, 0x48, 0x83, 0xc3, 0x18, 0xeb});
+    code.push_back(static_cast<std::uint8_t>(static_cast<std::int8_t>(static_cast<std::int64_t>(loop) - static_cast<std::int64_t>(code.size() + 1))));
+    code[exit - 1] = static_cast<std::uint8_t>(code.size() - exit);
+    code.insert(code.end(), {0x48, 0x83, 0xc4, 0x08, 0x41, 0x5c, 0x5b, 0x5a});
+    return code;
+}
+
 void RebaseProgramHeaders(std::vector<std::uint8_t>& buf, const std::uint64_t tableOffset, const std::uint16_t entrySize, const std::uint16_t count, const std::uint64_t base) {
     for (std::uint16_t index = 0; index < count; ++index) {
         const auto header = static_cast<std::size_t>(tableOffset + static_cast<std::uint64_t>(index) * entrySize);
@@ -198,13 +310,14 @@ void LinuxElfPatcher::_appendTrampoline(
 std::vector<std::uint8_t> LinuxElfPatcher::Patch(
     std::vector<std::uint8_t> sourceElf,
     const std::vector<Domain::ProgramHeader>& originalHeaders,
-    const Domain::SysVDynamicSection& dynSection,
+    const Domain::SysVDynamicSection& sourceDynSection,
     const std::uint64_t originalPltGotVaddr,
     const std::string& runPath,
     const bool lazyBinding,
     const bool dependencyDiagnostics,
     const std::vector<Codegen::TrampolineSite>& trampolines)
 {
+    const auto dynSection = ImportsByNid(sourceDynSection);
     if (dependencyDiagnostics)
         throw Domain::RelinkerException("Linux target does not support --windows-diagnostics");
     if (_fixedBase && lazyBinding)
