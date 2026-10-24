@@ -3,6 +3,11 @@
 #include <cstdint>
 #include <cstddef>
 #include <limits>
+#include <cstdio>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/FilesystemError.hpp"

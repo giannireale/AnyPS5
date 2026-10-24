@@ -15,6 +15,7 @@
 #include <span>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace Elfpatcher::Linux {

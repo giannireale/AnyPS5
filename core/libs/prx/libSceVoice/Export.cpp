@@ -1,5 +1,14 @@
 #include <cstdint>
 #include <cstddef>
+#include <cstring>
+#include <cmath>
+#include <deque>
+#include <map>
+#include <mutex>
+#include <set>
+#include <stdexcept>
+#include <string>
+#include <utility>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
@@ -83,10 +92,17 @@ bool VoiceFrame(std::int32_t bitrate, std::uint16_t& frameSize, std::uint16_t& f
 
 extern "C" {
 
-int APS5_VABI sceVoiceSetThreadsParams(void* params) {
- (void)params;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+int APS5_VABI sceVoiceInit(const VoiceInitParam* param, std::int32_t version) {
+    auto& voice = State();
+    std::lock_guard lock(voice.mutex);
+    if (voice.initialized) return static_cast<std::int32_t>(0x804e0802u);
+    if (!param || version != 100) return InvalidArgument;
+    if (param->app_type != 4 && param->app_type != 0x08000000 && param->app_type != 0x10000000 && param->app_type != 0x20000000) return InvalidArgument;
+    voice.appType = param->app_type;
+    voice.freePorts.clear();
+    for (std::uint32_t id = 0; id < 128; ++id) voice.freePorts.push_back(id);
+    voice.initialized = true;
+    return 0;
 }
 
 int APS5_VABI sceVoiceSetThreadsParams(const VoiceThreadsParams* params) {

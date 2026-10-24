@@ -2,7 +2,12 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <cstdint>
 #include <cstdlib>
+#include <cmath>
+#include <cstring>
+#include <initializer_list>
+#include <limits>
 #include <stdexcept>
+#include <vector>
 
 extern "C" {
 int APS5_VABI sceVoiceInit(VoiceInitParam*, std::int32_t);

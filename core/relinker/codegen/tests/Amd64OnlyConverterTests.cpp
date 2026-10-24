@@ -30,6 +30,9 @@
 #include <sys/mman.h>
 #endif
 #include <functional>
+#include <optional>
+#include <span>
+#include <vector>
 #include <iostream>
 #include <stdexcept>
 #include <string>

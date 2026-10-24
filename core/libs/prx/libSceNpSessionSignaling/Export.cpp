@@ -3,6 +3,8 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include <atomic>
+#include <array>
+#include <mutex>
 
 // Peer-to-peer signaling needs the network: contexts exist, but sessions never activate.
 static constexpr int SCE_NP_SESSION_SIGNALING_ERROR_INVALID_ARGUMENT = static_cast<int>(0x80553303);

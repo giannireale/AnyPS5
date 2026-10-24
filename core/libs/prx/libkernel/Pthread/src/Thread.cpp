@@ -45,6 +45,7 @@ static constexpr std::size_t THREAD_NAME_CAPACITY = 32;
 #ifdef _WIN32
 #include <windows.h>
 #include <process.h>
+#include <immintrin.h>
 #endif
 
 struct ThreadArgs {
