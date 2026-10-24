@@ -538,12 +538,15 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/src/general/SectionHeaderTableBuilder.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/io/src/ByteWriter.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/io/src/BufferUtils.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../libs/nid/src/NidCompute.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../libs/nid/src/Sha1.cpp
     )
     target_include_directories(amd64_only_converter_upstream_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/domain/include
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/include
         ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/include
         ${CMAKE_CURRENT_SOURCE_DIR}/io/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/../libs/nid/include
     )
     add_test(NAME amd64_only_converter_upstream COMMAND amd64_only_converter_upstream_tests)
 
