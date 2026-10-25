@@ -960,7 +960,7 @@ bool IndirectRegistersValid(std::span<const std::uint32_t> pairs) {
     return true;
 }
 
-void ExecuteIndirectRegisters(std::span<const std::uint32_t> packet, std::span<const std::uint32_t> pairs, QueueState& queue) {
+void ExecuteIndirectRegisters(std::span<const std::uint32_t> packet, std::span<const std::uint32_t> pairs, QueueState& queue, bool skipInvalid) {
     const auto opcode = (packet[0] >> 8u) & 0xffu;
     require(packet.size() == 5 && IndirectRegisterOpcode(opcode), "expected indirect register packet");
     require(pairs.size() == static_cast<std::size_t>(packet[4]) * 2, "indirect register list does not match its packet");
@@ -987,7 +987,7 @@ void ExecuteIndirectRegisters(std::span<const std::uint32_t> packet, std::span<c
     }
     if (queue.savedContext.has_value() && TraceContextState()) {
         std::fprintf(stderr, "[context]   indirect 0x%x:", opcode);
-        for (std::size_t i = 0; i < pairs.size(); i += 2) std::fprintf(stderr, " %x", registerOffset(pairs[i]));
+        for (std::size_t i = 0; i < pairs.size(); i += 2) if (usable(pairs[i])) std::fprintf(stderr, " %x", registerOffset(pairs[i]));
         std::fprintf(stderr, "\n");
     }
 }
