@@ -39,9 +39,16 @@ if(MINGW)
     check_cxx_source_compiles("#ifdef __USING_SJLJ_EXCEPTIONS__\n#error\n#endif\nint main() { return 0; }" ANYPS5_MINGW_DWARF_EXCEPTIONS)
     unset(CMAKE_REQUIRED_FLAGS)
     if(NOT ANYPS5_MINGW_DWARF_EXCEPTIONS)
-        message(FATAL_ERROR "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} selects SjLj exceptions with -fno-asynchronous-unwind-tables; the libraries need DWARF unwinding. Use the MinGW-w64 toolchain listed in docs/dev/BUILD.md.")
+        check_cxx_source_compiles("#if !defined(__SEH__) || defined(__USING_SJLJ_EXCEPTIONS__)\n#error\n#endif\n[[gnu::sysv_abi, gnu::noinline]] void Throw() { throw 1; }\n[[gnu::sysv_abi, gnu::noinline]] int Catch() { try { Throw(); } catch (int value) { return value; } return 0; }\nint main() { return Catch() != 1; }" ANYPS5_MINGW_SYSV_SEH_EXCEPTIONS)
+        if(NOT ANYPS5_MINGW_SYSV_SEH_EXCEPTIONS)
+            message(FATAL_ERROR "The Windows libraries require DWARF exceptions or GCC with System V ABI SEH support. Use the toolchains listed in docs/dev/BUILD.md.")
+        endif()
+        add_library(windows_seh_personalities OBJECT ${CMAKE_CURRENT_SOURCE_DIR}/prx/libc/src/specifics/windows/SehPersonalities.cpp)
+        target_link_options(windows_seh_personalities INTERFACE LINKER:--undefined=LibcSehPersonalities_nid_no_patch)
+        link_libraries(windows_seh_personalities)
+    else()
+        add_compile_options(-fno-asynchronous-unwind-tables)
     endif()
-    add_compile_options(-fno-asynchronous-unwind-tables)
 endif()
 
 function(configure_windows_unwind target)
@@ -50,7 +57,7 @@ function(configure_windows_unwind target)
             message(FATAL_ERROR "Windows DWARF unwinding requires objcopy")
         endif()
         add_custom_command(TARGET ${target} POST_BUILD
-                COMMAND "${CMAKE_OBJCOPY}" --rename-section .eh_frame=.ehfram "$<TARGET_FILE:${target}>"
+                COMMAND "${CMAKE_OBJCOPY}" --rename-section .eh_frame=.ehfram --rename-section .eh_fram=.ehfram "$<TARGET_FILE:${target}>"
                 VERBATIM
         )
     endif()
@@ -94,6 +101,9 @@ add_library(libc SHARED EXCLUDE_FROM_ALL)
 set(LIBS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 add_subdirectory(${LIBC_DIR} ${CMAKE_CURRENT_BINARY_DIR}/prx/libc)
 target_include_directories(libc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+if(WIN32)
+    target_compile_options(libc PRIVATE "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/prx/libc/include/HostStandardStreams.hpp")
+endif()
 configure_windows_unwind(libc)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(libc PRIVATE LINKER:-z,now)
@@ -151,6 +161,9 @@ foreach(LIB_DIR ${LIBS_DIRS})
             configure_windows_unwind(${LIB_NAME})
         endif()
 
+        if(WIN32)
+            target_compile_options(${LIB_NAME} PRIVATE "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/prx/libc/include/HostStandardStreams.hpp")
+        endif()
         if(LIB_NAME STREQUAL "libkernel")
             target_link_libraries(${LIB_NAME} PUBLIC libc)
         else()
@@ -191,6 +204,8 @@ foreach(LIB_DIR ${LIBS_DIRS})
         list(APPEND PATCHED_OUTPUTS ${PATCHED_FILE})
     endif()
 endforeach()
+
+target_link_libraries(libSceUsbStorageDialog PRIVATE libSceUserService)
 
 if(APS5_ENABLE_TRACY)
     set_target_properties(TracyClient PROPERTIES
@@ -418,6 +433,9 @@ if(BUILD_TESTING)
 
     if(WIN32)
         add_test_executable(undeliverable_host_exception_tests tests/UndeliverableHostException.cpp)
+        if(MINGW)
+            target_compile_options(undeliverable_host_exception_tests PRIVATE -fno-asynchronous-unwind-tables -fno-exceptions)
+        endif()
         add_dependencies(undeliverable_host_exception_tests libc)
         add_test(NAME undeliverable_host_exception COMMAND undeliverable_host_exception_tests $<TARGET_FILE:libc>)
         set_tests_properties(undeliverable_host_exception PROPERTIES
@@ -539,7 +557,7 @@ if(BUILD_TESTING)
 
     add_test_executable(guest_offline_imports_tests tests/GuestOfflineImports.cpp)
     target_include_directories(guest_offline_imports_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(guest_offline_imports_tests PRIVATE libSceHttp libSceNpEntitlementAccess libSceRudp libc)
+    target_link_libraries(guest_offline_imports_tests PRIVATE libSceHttp libSceNpEntitlementAccess libSceRudp libSceVideoRecordingP libc)
     configure_windows_unwind(guest_offline_imports_tests)
     add_test(NAME guest_offline_imports COMMAND guest_offline_imports_tests)
     if(Python3_Interpreter_FOUND)
@@ -574,7 +592,7 @@ if(BUILD_TESTING)
 
     add_test_executable(guest_usb_storage_dialog_tests tests/GuestUsbStorageDialog.cpp)
     target_include_directories(guest_usb_storage_dialog_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(guest_usb_storage_dialog_tests PRIVATE libSceUsbStorageDialog libc)
+    target_link_libraries(guest_usb_storage_dialog_tests PRIVATE libSceUsbStorageDialog libSceUserService libc)
     configure_windows_unwind(guest_usb_storage_dialog_tests)
     add_test(NAME guest_usb_storage_dialog COMMAND guest_usb_storage_dialog_tests)
     if(WIN32)
@@ -662,6 +680,16 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceRudp>")
     endif()
 
+    add_test_executable(guest_rudp_poll_tests tests/GuestRudpPoll.cpp)
+    target_include_directories(guest_rudp_poll_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_rudp_poll_tests PRIVATE libSceRudp libc)
+    configure_windows_unwind(guest_rudp_poll_tests)
+    add_test(NAME guest_rudp_poll COMMAND guest_rudp_poll_tests)
+    if(WIN32)
+        set_tests_properties(guest_rudp_poll PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceRudp>")
+    endif()
+
     add_test_executable(guest_memory_pool_stats_tests tests/GuestMemoryPoolStats.cpp)
     target_include_directories(guest_memory_pool_stats_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(guest_memory_pool_stats_tests PRIVATE libSceSsl libSceHttp2 libSceNet libkernel libc)
@@ -735,7 +763,6 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME host_thread_local COMMAND host_thread_local_tests)
     set_tests_properties(host_thread_local PROPERTIES TIMEOUT 15)
-    # Tests of fork-only implementations (NGS2 mixer, AJM wrapper, AudioOut timing, Audio3d, sync on address).
     add_test_executable(ajm_wrapper_tests tests/AjmWrapper.cpp)
     target_include_directories(ajm_wrapper_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(ajm_wrapper_tests PRIVATE libSceAjm libc)
@@ -783,8 +810,6 @@ if(BUILD_TESTING)
         set_tests_properties(voice_ports PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
-
-
 
     if(MINGW)
         add_test(NAME prx_thread_local_destructors COMMAND ${CMAKE_COMMAND} -DNM=${CMAKE_NM} -DOBJDUMP=${CMAKE_OBJDUMP}
@@ -871,7 +896,6 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceSaveData>")
         set_tests_properties(savedata_native_write_replacement PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceSaveData.native>")
-
     endif()
 
     add_test_executable(guest_kernel_sys_aio_tests tests/GuestKernelSysAio.cpp)

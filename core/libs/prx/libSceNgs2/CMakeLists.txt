@@ -1,9 +1,15 @@
-add_library(libSceNgs2 SHARED EXCLUDE_FROM_ALL
-        ${CMAKE_CURRENT_SOURCE_DIR}/Export.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/Ngs2.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/Ngs2Mixer.cpp
-)
-target_include_directories(libSceNgs2 PRIVATE ${LIBS_INCLUDE_DIR})
-set_target_properties(libSceNgs2 PROPERTIES CXX_EXTENSIONS OFF)
-configure_windows_unwind(libSceNgs2)
-target_link_libraries(libSceNgs2 PRIVATE libc libkernel)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../libSceNgs2.native/Ngs2Library.cmake)
+add_sce_ngs2_library(libSceNgs2)
+target_sources(libSceNgs2 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/PendingExports.cpp)
+
+if(BUILD_TESTING)
+    add_test_executable(ngs2_core_render_tests ${CMAKE_CURRENT_SOURCE_DIR}/../libSceNgs2.native/tests/Ngs2Render.cpp)
+    target_include_directories(ngs2_core_render_tests PRIVATE ${LIBS_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/3rdparty/LibAtrac9/C/src)
+    target_link_libraries(ngs2_core_render_tests PRIVATE libSceNgs2 atrac9 libkernel libc)
+    configure_windows_unwind(ngs2_core_render_tests)
+    add_test(NAME ngs2_core_render COMMAND ngs2_core_render_tests)
+    if(WIN32)
+        set_tests_properties(ngs2_core_render PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceNgs2>")
+    endif()
+endif()
