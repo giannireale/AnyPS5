@@ -5,7 +5,6 @@
 #include "../include/ThreadLifecycle.hpp"
 #include "../include/Cancel.hpp"
 #include "prx/libc/include/General.hpp"
-#include "prx/libkernel/KernelErrors.hpp"
 #include "../include/Pthread.hpp"
 #include "Common.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
@@ -48,6 +47,7 @@ int APS5_VABI scePthreadSetcanceltype(int type, int* old_type);
 void APS5_VABI scePthreadTestcancel();
 int APS5_VABI scePthreadSetprio(Pthread thread, int prio);
 int APS5_VABI scePthreadGetprio(Pthread thread, int* prio);
+void APS5_VABI scePthreadYield();
 }
 
 static constexpr int GUEST_SCHED_FIFO = 1;
@@ -217,6 +217,15 @@ int APS5_VABI pthread_getschedparam_nid_postfix(Pthread thread, int* policy, Ker
     return PosixThread::ToErrno(scePthreadGetschedparam(thread, policy, param));
 }
 
+int APS5_VABI pthread_getprio_nid_postfix(Pthread thread) {
+    const auto lock = LockLiveGuestThread(thread);
+    if (!lock.owns_lock()) {
+        *__error_nid_postfix() = PosixThread::GUEST_ESRCH;
+        return -1;
+    }
+    return thread->priority.load(std::memory_order_relaxed);
+}
+
 int APS5_VABI pthread_getaffinity_np_nid_postfix(Pthread thread, std::size_t cpusetSize, void* cpuset) {
     if (!thread) return PosixThread::GUEST_EINVAL;
     if (cpusetSize != GUEST_CPUSET_BYTES) return GUEST_ERANGE;
@@ -336,7 +345,7 @@ int APS5_VABI pthread_getcpuclockid_nid_postfix(Pthread thread, int* clockId) {
 }
 
 int APS5_VABI sched_yield_nid_postfix(void) {
-    std::this_thread::yield();
+    scePthreadYield();
     return 0;
 }
 
@@ -366,7 +375,7 @@ void APS5_VABI pthread_testcancel_nid_postfix(void) {
 }
 
 void APS5_VABI pthread_yield_nid_postfix(void) {
-    std::this_thread::yield();
+    scePthreadYield();
 }
 
 unsigned int APS5_VABI sleep_nid_postfix(unsigned int seconds) {
