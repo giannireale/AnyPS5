@@ -9,6 +9,7 @@ import tempfile
 
 from test_linux_load_alignment import fixture
 
+LINUX_BASE = 0x400000
 CODE_VADDR = 0x10
 DATA_VADDR = 0x100
 CODE_OFFSET = 0x4000 + CODE_VADDR
@@ -92,7 +93,7 @@ def relink(relinker, work, name, relocated, branch=False, shani=False, expect="E
     elf = work / (name + ".elf")
     output = work / (name + ".out")
     elf.write_bytes(source(relocated, branch, shani, counted, incoming))
-    result = subprocess.run([str(relinker), "--skip-sce-module", "--skip-syscall-check", "--to-intel",
+    result = subprocess.run([str(relinker), "--skip-sce-module", "--skip-syscall-check", "--to-intel", "--linux-fixed-base", hex(LINUX_BASE),
                              str(elf), str(output)], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, (name, result.stdout, result.stderr)
     assert expect in result.stdout, result.stdout
@@ -106,15 +107,15 @@ def main():
         elf = work / "input.elf"
         output = work / "output.elf"
         elf.write_bytes(source())
-        result = subprocess.run([str(relinker), "--skip-sce-module", "--skip-syscall-check", "--to-intel",
+        result = subprocess.run([str(relinker), "--skip-sce-module", "--skip-syscall-check", "--to-intel", "--linux-fixed-base", hex(LINUX_BASE),
                                  str(elf), str(output)], capture_output=True, text=True, timeout=60)
         assert result.returncode == 0, (result.stdout, result.stderr)
         assert "EXTRQ register form" in result.stdout, result.stdout
 
         relinked = output.read_bytes()
-        site = read_vaddr(relinked, CODE_VADDR + 16, 5)
+        site = read_vaddr(relinked, LINUX_BASE + CODE_VADDR + 16, 5)
         assert site[0] == 0xE9, "the AMD-only site was not replaced by a jump"
-        target = CODE_VADDR + 21 + struct.unpack_from("<i", site, 1)[0]
+        target = LINUX_BASE + CODE_VADDR + 21 + struct.unpack_from("<i", site, 1)[0]
         stub = read_vaddr(relinked, target, 0x200)
         assert stub[0] == 0x48, "the stub does not start with the red-zone skip"
         executable = [header for header in segments(relinked)
