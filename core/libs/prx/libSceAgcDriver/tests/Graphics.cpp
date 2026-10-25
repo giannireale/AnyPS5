@@ -7382,6 +7382,412 @@ void sampleLocationGridFallbackTests() {
     mock = MockVulkan{};
 }
 
+std::string varyingIndex(std::span<const std::uint32_t> code) {
+    Require(code.size() > 5 && code[0] == spv::MagicNumber, "a sample order shader is not a SPIR-V module");
+    std::set<std::uint32_t> constants;
+    for (std::size_t at = 5; at < code.size();) {
+        const auto count = code[at] >> 16u;
+        const auto opcode = static_cast<spv::Op>(code[at] & 0xffffu);
+        Require(count != 0 && at + count <= code.size(), "a sample order shader holds a malformed instruction");
+        if (opcode == spv::OpConstant) constants.insert(code[at + 2]);
+        if (opcode == spv::OpVectorExtractDynamic || opcode == spv::OpVectorInsertDynamic) return "a vector component chosen per invocation (opcode " + std::to_string(opcode) + ")";
+        if (opcode == spv::OpAccessChain || opcode == spv::OpInBoundsAccessChain || opcode == spv::OpPtrAccessChain || opcode == spv::OpInBoundsPtrAccessChain) {
+            for (std::size_t operand = 4; operand < count; ++operand) {
+                if (!constants.contains(code[at + operand])) return "an access chain into %" + std::to_string(code[at + 3]) + " through the non-constant index %" + std::to_string(code[at + operand]);
+            }
+        }
+        at += count;
+    }
+    return {};
+}
+
+VkSampleCountFlags orderStorageCounts = VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
+bool orderSixteenBitStencil = true;
+std::vector<VkSampleMask> pipelineSampleMasks;
+
+VKAPI_ATTR VkResult VKAPI_CALL sampleOrderImageProperties(VkPhysicalDevice, VkFormat, VkImageType, VkImageTiling, VkImageUsageFlags usage, VkImageCreateFlags, VkImageFormatProperties* properties) {
+    *properties = {};
+    properties->maxExtent = {16384, 16384, 1};
+    properties->maxMipLevels = 1;
+    properties->maxArrayLayers = 1;
+    properties->sampleCounts = (usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0 ? orderStorageCounts : VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL sampleOrderFormatProperties(VkPhysicalDevice, VkFormat format, VkFormatProperties* properties) {
+    *properties = {};
+    if (format == VK_FORMAT_D16_UNORM_S8_UINT && !orderSixteenBitStencil) return;
+    properties->optimalTilingFeatures = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL sampleOrderCreateGraphicsPipelines(VkDevice device, VkPipelineCache cache, std::uint32_t count, const VkGraphicsPipelineCreateInfo* infos, const VkAllocationCallbacks* allocator, VkPipeline* pipelines) {
+    const auto* samples = infos[0].pMultisampleState;
+    pipelineSampleMasks.push_back(samples != nullptr && samples->pSampleMask != nullptr ? *samples->pSampleMask : ~VkSampleMask{0});
+    return sampleLocationCreateGraphicsPipelines(device, cache, count, infos, allocator, pipelines);
+}
+
+PFN_vkVoidFunction VKAPI_CALL sampleOrderProc(VkDevice device, const char* name) {
+    if (std::string_view(name) == "vkCreateGraphicsPipelines") return reinterpret_cast<PFN_vkVoidFunction>(sampleOrderCreateGraphicsPipelines);
+    return sampleLocationProc(device, name);
+}
+
+struct DepthOrderEvent {
+    bool copy = false;
+    VkImage image = VK_NULL_HANDLE;
+    VkImageLayout from = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImageLayout to = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImageAspectFlags aspects = 0;
+    VkExtent2D grid{};
+    std::vector<VkSampleLocationEXT> locations;
+};
+
+std::vector<DepthOrderEvent> depthOrderEvents;
+
+VKAPI_ATTR VkResult VKAPI_CALL depthOrderCreateImage(VkDevice, const VkImageCreateInfo*, const VkAllocationCallbacks*, VkImage* image) {
+    *image = makeHandle<VkImage>();
+    ++mock.live;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL depthOrderDestroyImage(VkDevice, VkImage, const VkAllocationCallbacks*) { --mock.live; }
+VKAPI_ATTR void VKAPI_CALL depthOrderImageRequirements(VkDevice, VkImage, VkMemoryRequirements* requirements) { *requirements = {256, 1, 1}; }
+VKAPI_ATTR VkResult VKAPI_CALL depthOrderBindImage(VkDevice, VkImage, VkDeviceMemory, VkDeviceSize) { return VK_SUCCESS; }
+
+VKAPI_ATTR VkResult VKAPI_CALL depthOrderCreateView(VkDevice, const VkImageViewCreateInfo*, const VkAllocationCallbacks*, VkImageView* view) {
+    *view = makeHandle<VkImageView>();
+    ++mock.live;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL depthOrderDestroyView(VkDevice, VkImageView, const VkAllocationCallbacks*) { --mock.live; }
+
+VKAPI_ATTR void VKAPI_CALL depthOrderBarrier(VkCommandBuffer, VkPipelineStageFlags, VkPipelineStageFlags, VkDependencyFlags, std::uint32_t, const VkMemoryBarrier*, std::uint32_t, const VkBufferMemoryBarrier*, std::uint32_t count, const VkImageMemoryBarrier* barriers) {
+    for (std::uint32_t index = 0; index < count; ++index) {
+        const auto& barrier = barriers[index];
+        DepthOrderEvent event{false, barrier.image, barrier.oldLayout, barrier.newLayout, barrier.subresourceRange.aspectMask, {}, {}};
+        const auto* locations = static_cast<const VkSampleLocationsInfoEXT*>(barrier.pNext);
+        if (locations != nullptr && locations->sType == VK_STRUCTURE_TYPE_SAMPLE_LOCATIONS_INFO_EXT) {
+            event.grid = locations->sampleLocationGridSize;
+            event.locations.assign(locations->pSampleLocations, locations->pSampleLocations + locations->sampleLocationsCount);
+        }
+        depthOrderEvents.push_back(event);
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL depthOrderCopy(VkCommandBuffer, VkImage source, VkImageLayout layout, VkImage, VkImageLayout, std::uint32_t, const VkImageCopy*) {
+    depthOrderEvents.push_back({true, source, layout, layout, 0, {}, {}});
+}
+
+VKAPI_ATTR void VKAPI_CALL depthOrderEndPass(VkCommandBuffer) {}
+VKAPI_ATTR void VKAPI_CALL depthOrderDraw(VkCommandBuffer, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t) {}
+VKAPI_ATTR void VKAPI_CALL depthOrderStencil(VkCommandBuffer, VkStencilFaceFlags, std::uint32_t) {}
+
+PFN_vkVoidFunction VKAPI_CALL depthOrderProc(VkDevice device, const char* name) {
+    static const std::map<std::string_view, PFN_vkVoidFunction> table{
+        {"vkCreateImage", reinterpret_cast<PFN_vkVoidFunction>(depthOrderCreateImage)},
+        {"vkDestroyImage", reinterpret_cast<PFN_vkVoidFunction>(depthOrderDestroyImage)},
+        {"vkGetImageMemoryRequirements", reinterpret_cast<PFN_vkVoidFunction>(depthOrderImageRequirements)},
+        {"vkBindImageMemory", reinterpret_cast<PFN_vkVoidFunction>(depthOrderBindImage)},
+        {"vkCreateImageView", reinterpret_cast<PFN_vkVoidFunction>(depthOrderCreateView)},
+        {"vkDestroyImageView", reinterpret_cast<PFN_vkVoidFunction>(depthOrderDestroyView)},
+        {"vkCmdPipelineBarrier", reinterpret_cast<PFN_vkVoidFunction>(depthOrderBarrier)},
+        {"vkCmdCopyImage", reinterpret_cast<PFN_vkVoidFunction>(depthOrderCopy)},
+        {"vkCmdEndRenderPass", reinterpret_cast<PFN_vkVoidFunction>(depthOrderEndPass)},
+        {"vkCmdDraw", reinterpret_cast<PFN_vkVoidFunction>(depthOrderDraw)},
+        {"vkCmdSetStencilWriteMask", reinterpret_cast<PFN_vkVoidFunction>(depthOrderStencil)},
+        {"vkCmdSetStencilReference", reinterpret_cast<PFN_vkVoidFunction>(depthOrderStencil)}
+    };
+    const auto it = table.find(name);
+    return it != table.end() ? it->second : sampleLocationProc(device, name);
+}
+
+void sampleOrderTests() {
+    using namespace AgcDriver::Graphics;
+    auto queue = makeState();
+    queue.context[0x2f8] = 0x00100001;
+    queue.context[0x292] = 3;
+    queue.context[0x3b8] = 0x0dc00000u;
+    queue.context[0x31d] = 0x9000;
+    queue.context[0x1b3] = 2;
+    queue.context[0x1b4] = 2;
+    const auto decode = [&](std::array<std::uint32_t, 4> words) {
+        for (std::uint32_t pixel = 0; pixel < 4; ++pixel) queue.context[0x2fe + pixel * 4u] = words[pixel];
+        return DecodeState(queue);
+    };
+    const auto village = decode({0x0c04u, 0x0c04u, 0x040cu, 0x040cu});
+    const auto residentEvil4 = decode({0x040cu, 0x040cu, 0x0c04u, 0x0c04u});
+    const auto uniform = decode({0x0c04u, 0x0c04u, 0x0c04u, 0x0c04u});
+    const auto moved = decode({0x0c04u, 0x0c04u, 0x040bu, 0x040bu});
+    const SampleOrder rowSwap{KeptSampleOrder, KeptSampleOrder, 0x76543201u, 0x76543201u};
+    Require(SameSetSampleOrder(village) == rowSwap, "the 2x checkerboard (PPSA01556) did not reorder only its odd rows' two samples");
+    Require(SameSetSampleOrder(residentEvil4) == rowSwap, "the 2x checkerboard with its rows swapped (PPSA07411) did not reorder only its odd rows' two samples");
+    Require(!SameSetSampleOrder(uniform) && !SameSetSampleOrder(moved), "a uniform pattern or one whose odd rows hold other positions was taken as a reordering of one set");
+    State four{};
+    four.samples = 4;
+    four.customSampleLocations = true;
+    four.sampleLocationGrid = true;
+    const std::array<std::uint8_t, 4> positions{0x2eu, 0xe6u, 0x2au, 0x62u};
+    const std::array<std::array<std::uint32_t, 4>, 4> placed{{{0, 1, 2, 3}, {1, 0, 3, 2}, {2, 3, 1, 0}, {3, 2, 0, 1}}};
+    for (std::uint32_t pixel = 0; pixel < 4; ++pixel) {
+        for (std::uint32_t sample = 0; sample < 4; ++sample) four.sampleLocations[pixel * 8u + placed[pixel][sample]] = positions[sample];
+    }
+    const SampleOrder fourOrder{KeptSampleOrder, 0x76542301u, 0x76540132u, 0x76541023u};
+    Require(SameSetSampleOrder(four) == fourOrder, "a 4x pattern whose pixels hold one set of positions in four orders did not give each pixel its order");
+    Require(InvertSampleOrder(0x76543201u) == 0x76543201u && InvertSampleOrder(0x76540132u) == 0x76541023u && InvertSampleOrder(KeptSampleOrder) == KeptSampleOrder, "inverting a sample order did not undo it");
+    Require(HostSampleBits(0x1u, 0x76543201u) == 0x2u && HostSampleBits(0x1u, 0x76540132u) == 0x8u && HostSampleBits(0xffffffffu, 0x76540132u) == 0xffffffffu, "a guest sample mask did not move to the host samples at its guest samples' locations");
+    Require(ReordersSamples(rowSwap) && !ReordersSamples(SampleOrder{}) && !ReordersSamples(SampleOrder{KeptSampleOrder, KeptSampleOrder, KeptSampleOrder, KeptSampleOrder}), "a sample order that keeps every index counted as a reordering");
+    Require(!HostsSampleLocationGrid({0, 0}) && !HostsSampleLocationGrid({1, 1}) && !HostsSampleLocationGrid({2, 1}) && !HostsSampleLocationGrid({3, 2}) && HostsSampleLocationGrid({2, 2}) && HostsSampleLocationGrid({4, 2}), "a device's largest sample location grid was taken for one that holds a 2x2 grid, or not, wrongly");
+    std::size_t module = 0;
+    for (const auto code : SampleOrderShaderModules()) {
+        const auto varying = varyingIndex(code);
+        Require(varying.empty(), "sample order shader " + std::to_string(module) + " picks a pixel's order word or a held sample through " + varying);
+        ++module;
+    }
+
+    const auto capable = [] {
+        auto context = mockContext();
+        context.physical = makeHandle<VkPhysicalDevice>();
+        context.device = makeHandle<VkDevice>();
+        context.deviceProc = sampleOrderProc;
+        context.imageFormatProperties = sampleOrderImageProperties;
+        context.formatProperties = sampleOrderFormatProperties;
+        context.sampleLocationSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
+        context.sampleLocationGridSampleCounts = 0;
+        context.storageImageMultisample = true;
+        context.sampleRateShading = true;
+        context.shaderStencilExport = true;
+        context.limits.framebufferNoAttachmentsSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
+        context.limits.framebufferDepthSampleCounts = VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
+        context.limits.framebufferColorSampleCounts = VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
+        context.limits.maxColorAttachments = 8;
+        context.limits.maxFramebufferWidth = 64;
+        context.limits.maxFramebufferHeight = 64;
+        context.limits.maxFramebufferLayers = 1;
+        return context;
+    };
+    const auto attached = [](const State& decoded, VkFormat depthFormat, bool stencil) {
+        State state = decoded;
+        ColorTarget color{};
+        color.address = 0x100000u;
+        color.extent = {64, 64};
+        color.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+        color.elementBytes = 8;
+        color.samples = state.samples;
+        state.colors = {color};
+        state.color = color;
+        state.hasColorTarget = true;
+        VkPipelineColorBlendAttachmentState blend{};
+        blend.colorWriteMask = 0xf;
+        state.blends = {blend};
+        state.renderExtent = {64, 64};
+        if (depthFormat != VK_FORMAT_UNDEFINED) {
+            state.depth = DepthTarget{0x200000u, stencil ? 0x300000u : 0u, {64, 64}, depthFormat, 1.0f, 0};
+            state.depth->samples = state.samples;
+        }
+        return state;
+    };
+    const auto withStencil = attached(village, VK_FORMAT_D32_SFLOAT_S8_UINT, true);
+    {
+        const auto context = capable();
+        const auto host = HostSampleLocationsFor(context, withStencil);
+        Require(host.grid.width == 1 && host.grid.height == 1 && host.order == rowSwap, "a 2x checkerboard on a device without a 2x2 grid that can reorder samples did not take the stand-in with its odd rows reordered");
+        auto gridded = context;
+        gridded.sampleLocationGridSampleCounts = VK_SAMPLE_COUNT_2_BIT;
+        const auto native = HostSampleLocationsFor(gridded, withStencil);
+        Require(native.grid.width == 2 && native.grid.height == 2 && !ReordersSamples(native.order), "a 2x checkerboard on a device with a 2x2 grid was reordered");
+        Require(!ReordersSamples(HostSampleLocationsFor(context, attached(uniform, VK_FORMAT_D32_SFLOAT, false)).order) && !ReordersSamples(HostSampleLocationsFor(context, attached(moved, VK_FORMAT_D32_SFLOAT, false)).order), "a uniform pattern, or one whose pixels hold other positions, was reordered");
+        const auto refused = [&](Context device, const State& state, std::string_view reason, const std::string& what) {
+            Require(!ReordersSamples(HostSampleLocationsFor(device, state).order), what + " was reordered");
+            Require(SampleOrderRefusal(device, state).find(reason) != std::string::npos, what + " was not refused for " + std::string(reason) + ": " + SampleOrderRefusal(device, state));
+        };
+        auto noStorage = context;
+        noStorage.storageImageMultisample = false;
+        auto depthOnly = withStencil;
+        depthOnly.colors.clear();
+        depthOnly.blends.clear();
+        depthOnly.hasColorTarget = false;
+        Require(ReordersSamples(HostSampleLocationsFor(context, depthOnly).order), "a depth-only pass on a device with multisampled storage images was not reordered");
+        refused(noStorage, depthOnly, "lacks shaderStorageImageMultisample", "a depth-only pass on a device without multisampled storage images");
+        Require(HostSampleLocationsFor(noStorage, depthOnly).order == HostSampleLocationsFor(noStorage, withStencil).order, "a depth-only pass and a color pass on one depth target took different sample orders on a device without multisampled storage images");
+        refused(noStorage, withStencil, "lacks shaderStorageImageMultisample", "a color target on a device without multisampled storage images");
+        auto noSampleShading = context;
+        noSampleShading.sampleRateShading = false;
+        refused(noSampleShading, withStencil, "sampleRateShading", "a device without sample-rate shading");
+        orderStorageCounts = VK_SAMPLE_COUNT_4_BIT;
+        refused(context, withStencil, "has no storage view at 2 samples", "a color format without 2x storage");
+        orderStorageCounts = VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
+        auto twentyFour = context;
+        twentyFour.physical = makeHandle<VkPhysicalDevice>();
+        orderSixteenBitStencil = false;
+        refused(twentyFour, attached(village, VK_FORMAT_D16_UNORM_S8_UINT, true), "is not written back exactly", "16-bit depth with stencil kept as 24-bit depth");
+        orderSixteenBitStencil = true;
+        auto sixteen = context;
+        sixteen.physical = makeHandle<VkPhysicalDevice>();
+        Require(ReordersSamples(HostSampleLocationsFor(sixteen, attached(village, VK_FORMAT_D16_UNORM_S8_UINT, true)).order), "16-bit depth with stencil kept as 16-bit depth was not reordered");
+
+        using Method = SampleOrderMethod;
+        const auto steps = [](const std::vector<SampleOrderStep>& plan, std::initializer_list<SampleOrderStep> expected, const std::string& what) {
+            Require(plan.size() == expected.size(), what + " planned " + std::to_string(plan.size()) + " attachments");
+            std::size_t index = 0;
+            for (const auto& step : expected) {
+                const auto& planned = plan[index++];
+                Require(planned.attachment == step.attachment && planned.method == step.method && planned.toHost == step.toHost && planned.toGuest == step.toGuest, what + " planned attachment " + std::to_string(planned.attachment) + " differently");
+            }
+        };
+        steps(PlanSampleOrder(context, withStencil, rowSwap), {{0, Method::Storage, true, true}, {1, Method::DepthStencilExport, true, true}}, "a color and depth-stencil pass with stencil export");
+        auto noExport = context;
+        noExport.shaderStencilExport = false;
+        steps(PlanSampleOrder(noExport, withStencil, rowSwap), {{0, Method::Storage, true, true}, {1, Method::DepthStencilBits, true, true}}, "a color and depth-stencil pass without stencil export");
+        steps(PlanSampleOrder(context, attached(village, VK_FORMAT_D32_SFLOAT, false), rowSwap), {{0, Method::Storage, true, true}, {1, Method::Depth, true, true}}, "a color and depth pass");
+        steps(PlanSampleOrder(context, attached(village, VK_FORMAT_D32_SFLOAT_S8_UINT, false), rowSwap), {{0, Method::Storage, true, true}, {1, Method::Depth, true, true}}, "a depth target whose host format has stencil but the guest's has none");
+        steps(PlanSampleOrder(context, withStencil, rowSwap, VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE), {{0, Method::Storage, false, true}, {1, Method::DepthStencilExport, false, true}}, "a pass that clears its attachments");
+        steps(PlanSampleOrder(context, withStencil, rowSwap, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_DONT_CARE), {{0, Method::Storage, true, false}, {1, Method::DepthStencilExport, true, false}}, "a pass that discards its attachments");
+        steps(PlanSampleOrder(context, withStencil, rowSwap, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE), {}, "a pass that neither loads nor stores");
+        steps(PlanSampleOrder(context, withStencil, SampleOrder{}), {}, "a pass that keeps the guest's order");
+        auto single = withStencil;
+        single.samples = 1;
+        single.colors[0].samples = 1;
+        single.depth->samples = 1;
+        steps(PlanSampleOrder(context, single, rowSwap), {}, "a single-sampled pass");
+    }
+
+    auto masked = attached(village, VK_FORMAT_UNDEFINED, false);
+    masked.quadSampleMask = {1, 1, 1, 1};
+    Require(SampleMaskFollowsOrder(masked, rowSwap) && QuadSampleMasks(masked, rowSwap) == std::array<std::uint16_t, 4>{1, 1, 1, 1} && QuadSampleMasks(masked) == std::array<std::uint16_t, 4>{0xffffu, 0xffffu, 0xffffu, 0xffffu}, "a uniform mask of sample 0 did not move to the pixel shader under the checkerboard's order");
+    auto empty = masked;
+    empty.quadSampleMask = {0, 0, 0, 0};
+    Require(!SampleMaskFollowsOrder(empty, rowSwap) && !SampleMaskFollowsOrder(masked, SampleOrder{}), "an empty mask, or a mask without a reordering, moved to the pixel shader");
+    {
+        auto earlyTested = attached(village, VK_FORMAT_D32_SFLOAT, false);
+        earlyTested.quadSampleMask = {1, 1, 1, 1};
+        earlyTested.pixelEarlyZ = true;
+        earlyTested.depthTest = true;
+        ShaderRecompiler::RecompileResult memoryWriter, memoryKeeper;
+        memoryWriter.spirv = makeModule({.fragment = true});
+        memoryKeeper.spirv = memoryWriter.spirv;
+        ShaderRecompiler::DescriptorBinding written{};
+        written.kind = ShaderRecompiler::DescriptorKind::StorageBuffer;
+        written.role = ShaderRecompiler::DescriptorRole::GuestBuffers;
+        written.count = 1;
+        written.bufferWritten = {true};
+        memoryWriter.bindings.push_back(written);
+        const std::array<CompiledShader, 1> writing{{{ShaderRecompiler::ShaderStage::Fragment, &memoryWriter, 0}}};
+        const std::array<CompiledShader, 1> notWriting{{{ShaderRecompiler::ShaderStage::Fragment, &memoryKeeper, 0}}};
+        const auto context = capable();
+        Require(SampleMaskFollowsOrder(earlyTested, HostSampleLocationsFor(context, earlyTested).order), "a uniform mask of sample 0 with a depth target did not move to the pixel shader under the checkerboard's order");
+        expectFailure([&] { ValidateSampleMask(context, earlyTested, writing); }, "from a pixel program with early depth or stencil tests that writes memory, is unsupported");
+        ValidateSampleMask(context, earlyTested, notWriting);
+        auto gridded = context;
+        gridded.sampleLocationGridSampleCounts = VK_SAMPLE_COUNT_2_BIT;
+        ValidateSampleMask(gridded, earlyTested, writing);
+    }
+
+    ShaderRecompiler::RecompileResult vertex, fragment;
+    vertex.spirv = makeModule({});
+    fragment.spirv = makeModule({.fragment = true});
+    vertex.variantId = 1;
+    fragment.variantId = 2;
+    const std::array<CompiledShader, 2> shaders{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &fragment, PipelinePushSlotBytes}}};
+    const std::array<std::uint32_t, 1> mainKey{41};
+    const std::array<VkSampleLocationEXT, 2> pixelZero{{{0.75f, 0.5f}, {0.25f, 0.5f}}};
+    for (const bool libraries : {false, true}) {
+        for (const bool maskedPass : {false, true}) {
+            mock = MockVulkan{};
+            pipelineSampleLocations.clear();
+            passSampleLocations.clear();
+            pipelineSampleMasks.clear();
+            auto context = capable();
+            context.graphicsPipelineLibrary = libraries;
+            context.pipelineLinkTimeOptimization = false;
+            auto state = maskedPass ? masked : attached(village, VK_FORMAT_UNDEFINED, false);
+            const PipelineSetLayouts resources{makeHandle<VkDescriptorSetLayout>(), VK_NULL_HANDLE, false, mainKey, {}};
+            std::size_t reorderedMasks = 0;
+            {
+                Pipeline pipeline(context, state, VertexInputLayout{}, resources, shaders, VK_IMAGE_LAYOUT_GENERAL);
+                Require(pipeline.ReordersSamples() && pipeline.HostSampleOrder() == rowSwap, "a 2x checkerboard pipeline on a device without a 2x2 grid did not reorder its odd rows");
+                reorderedMasks = pipelineSampleMasks.size();
+                auto gridded = context;
+                gridded.sampleLocationGridSampleCounts = VK_SAMPLE_COUNT_2_BIT;
+                Pipeline native(gridded, state, VertexInputLayout{}, resources, shaders, VK_IMAGE_LAYOUT_GENERAL);
+                Require(!native.ReordersSamples(), "a 2x checkerboard pipeline on a device with a 2x2 grid reordered its samples");
+            }
+            ClearPipelineLibraries(context.device);
+            Require(mock.live == 0, "sample order pipeline tests leaked Vulkan objects");
+            Require(!pipelineSampleLocations.empty(), "the reordered pipeline took no sample locations");
+            const auto& standIn = pipelineSampleLocations.front();
+            Require(standIn.grid.width == 1 && standIn.grid.height == 1 && standIn.locations.size() == 2 && standIn.locations[0].x == pixelZero[0].x && standIn.locations[1].x == pixelZero[1].x, "the reordered pipeline did not draw with pixel (0,0)'s locations");
+            const auto keepsMask = [&](std::size_t begin, std::size_t end) { return std::any_of(pipelineSampleMasks.begin() + static_cast<std::ptrdiff_t>(begin), pipelineSampleMasks.begin() + static_cast<std::ptrdiff_t>(end), [](VkSampleMask mask) { return mask == 1u; }); };
+            Require(reorderedMasks != 0 && !keepsMask(0, reorderedMasks), "the reordered pipeline kept a static sample mask its odd rows would apply to the other sample");
+            Require(keepsMask(reorderedMasks, pipelineSampleMasks.size()) == maskedPass, "the pipeline on a device with a 2x2 grid did not keep the static sample mask exactly when the pass has one");
+        }
+    }
+    mock = MockVulkan{};
+
+    {
+        auto context = capable();
+        context.deviceProc = depthOrderProc;
+        context.memory.memoryTypes[0].propertyFlags |= VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        const auto commands = makeHandle<VkCommandBuffer>();
+        const auto depthImage = makeHandle<VkImage>();
+        const SampleOrderTarget target{depthImage, makeHandle<VkImageView>(), VK_FORMAT_D32_SFLOAT_S8_UINT, {16, 8}, 2, SampleOrderMethod::Depth, nullptr};
+        const auto onTarget = [&] {
+            std::vector<DepthOrderEvent> events;
+            for (const auto& event : depthOrderEvents) {
+                if (event.image == depthImage) events.push_back(event);
+            }
+            return events;
+        };
+        const auto located = [](const DepthOrderEvent& event, VkImageLayout from, VkImageLayout to, VkImageAspectFlags aspects, VkExtent2D grid, std::span<const VkSampleLocationEXT> locations) {
+            if (event.copy || event.from != from || event.to != to || event.aspects != aspects || event.grid.width != grid.width || event.grid.height != grid.height || event.locations.size() != locations.size()) return false;
+            for (std::size_t index = 0; index < locations.size(); ++index) {
+                if (event.locations[index].x != locations[index].x || event.locations[index].y != locations[index].y) return false;
+            }
+            return true;
+        };
+        constexpr VkImageAspectFlags depthStencil = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+        std::vector<std::shared_ptr<void>> kept;
+        for (const bool standIn : {true, false}) {
+            depthOrderEvents.clear();
+            SampleOrderPass pass{rowSwap, {16, 8}, {}, standIn};
+            std::copy(pixelZero.begin(), pixelZero.end(), pass.locations.begin());
+            RecordSampleOrder(context, commands, pass, std::span(&target, 1u), false, kept);
+            const auto events = onTarget();
+            if (standIn) {
+                Require(events.size() == 3 && located(events[0], VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, depthStencil, {1, 1}, pixelZero) && events[1].copy && events[1].from == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL && located(events[2], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, depthStencil, {1, 1}, pixelZero), "the depth swap did not copy its target between transitions that name the stand-in sample locations it was rendered with");
+            } else {
+                Require(events.size() == 1 && events[0].copy && events[0].from == VK_IMAGE_LAYOUT_GENERAL, "the depth swap of a pass without sample locations transitioned its target");
+            }
+        }
+        depthOrderEvents.clear();
+        DepthSampleLocations depth;
+        depth.image = depthImage;
+        depth.format = VK_FORMAT_D32_SFLOAT;
+        depth.samples = 2;
+        depth.grid = {2, 2};
+        const std::array<VkSampleLocationEXT, 8> grid{{{0.75f, 0.5f}, {0.25f, 0.5f}, {0.75f, 0.5f}, {0.25f, 0.5f}, {0.25f, 0.5f}, {0.75f, 0.5f}, {0.25f, 0.5f}, {0.75f, 0.5f}}};
+        std::copy(grid.begin(), grid.end(), depth.locations.begin());
+        RecordDepthSampleLocations(context, commands, depth);
+        const auto events = onTarget();
+        Require(events.size() == 2 && located(events[0], VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT, {2, 2}, grid) && located(events[1], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_DEPTH_BIT, {2, 2}, grid), "a depth target drawn on a 2x2 sample location grid was not left in the general layout through transitions that name that grid's locations");
+        kept.clear();
+        ClearSampleOrders(context.device);
+        Require(mock.live == 0, "the depth swap tests leaked Vulkan objects");
+        depthOrderEvents.clear();
+    }
+    mock = MockVulkan{};
+
+    ShaderRecompiler::RecompileRequest request{};
+    request.shader = {ShaderRecompiler::ShaderStage::Fragment, 0x20000u, {}, 0, {}};
+    request.context.waveSize = 64;
+    request.context.pixel = ShaderRecompiler::ShaderPixelStageInfo{};
+    const auto keptHash = ShaderRecompiler::RecompileCacheKey::ContextHash(request);
+    request.context.pixel->sampleOrder = rowSwap;
+    Require(ShaderRecompiler::RecompileCacheKey::ContextHash(request) != keptHash, "the pixel shader's sample order did not key its variant");
+    const ShaderRecompiler::RequestSerializer serializer;
+    const auto back = serializer.Deserialize(serializer.Serialize(request));
+    Require(back.request.context.pixel.has_value() && back.request.context.pixel->sampleOrder == rowSwap, "the recompile request lost the pixel shader's sample order");
+}
+
 void pipelineLibrarySetTests() {
     using namespace AgcDriver::Graphics;
     for (const auto mask : {0u, 1u, 2u, 3u}) {
@@ -7484,6 +7890,38 @@ void pipelineLibraryClearWaitsForBuildTests() {
     Require(waited, "clearing pipeline libraries did not wait for an active part build");
     Require(cleared.load(std::memory_order_acquire), "clearing pipeline libraries did not complete after the part build");
     Require(mock.live == 0, "clearing during a library build leaked Vulkan objects");
+}
+
+void tessellationPipelineLibraryCacheTests() {
+    using namespace AgcDriver::Graphics;
+    for (const auto shared : {true, false}) {
+        mock = MockVulkan{};
+        auto context = mockContext();
+        context.graphicsPipelineLibrary = true;
+        context.tessellationShader = true;
+        context.tessellationPipelineCache = shared;
+        context.limits.maxTessellationPatchSize = 32;
+        context.limits.maxPushConstantsSize = 256;
+        context.limits.framebufferNoAttachmentsSampleCounts = VK_SAMPLE_COUNT_1_BIT;
+        State state{};
+        state.stages.path = ShaderPath::Tessellation;
+        state.stages.tessellation = ShaderRecompiler::TessellationConfiguration{3, 3, 2, 1, 4, 128, 16, false};
+        ShaderRecompiler::RecompileResult vertex, control, evaluation, fragment;
+        vertex.spirv = makeModule({});
+        control.spirv = makeModule({});
+        evaluation.spirv = makeModule({});
+        fragment.spirv = makeModule({.fragment = true});
+        vertex.variantId = 201;
+        control.variantId = 202;
+        evaluation.variantId = 203;
+        fragment.variantId = 204;
+        const std::array<CompiledShader, 4> shaders{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::TessellationControl, &control, 0}, {ShaderRecompiler::ShaderStage::TessellationEvaluation, &evaluation, 0}, {ShaderRecompiler::ShaderStage::Fragment, &fragment, PipelinePushSlotBytes}}};
+        std::array<std::uint32_t, 1> mainKey{31};
+        const PipelineSetLayouts resources{makeHandle<VkDescriptorSetLayout>(), VK_NULL_HANDLE, false, mainKey, {}};
+        Require(Pipeline::Prebuild(context, state, VertexInputLayout{}, resources, shaders) == shared, shared ? "tessellation pipelines skipped graphics pipeline libraries with a shared pipeline cache" : "tessellation pipelines without the pipeline cache were built from graphics pipeline libraries");
+        ClearPipelineLibraries(context.device);
+        Require(mock.live == 0, "tessellation pipeline library tests leaked Vulkan objects");
+    }
 }
 
 void framebufferOwnerTests() {
@@ -7665,7 +8103,7 @@ void barycentricEmulationTests() {
         }
         return values;
     };
-    auto patches = BuildBarycentricTessellationShaders(vertex, fragment, tessellationTarget, 128u);
+    auto patches = BuildBarycentricTessellationShaders(vertex, fragment, tessellationTarget, 128u, 0u);
     Require(modes(patches.control) == std::vector<std::uint32_t>{spv::ExecutionModeOutputVertices, spv::ExecutionModeTriangles, spv::ExecutionModeSpacingEqual, spv::ExecutionModeVertexOrderCw}, "the generated control stage does not declare three output vertices and the triangle domain");
     Require(modes(patches.evaluation) == std::vector<std::uint32_t>{spv::ExecutionModeTriangles, spv::ExecutionModeSpacingEqual, spv::ExecutionModeVertexOrderCw}, "the generated evaluation stage does not declare the triangle domain");
     const std::array<CompiledShader, 4> patchShaders{{{ShaderStage::Vertex, &vertex, 0}, {ShaderStage::TessellationControl, &patches.control, 0}, {ShaderStage::TessellationEvaluation, &patches.evaluation, 0}, {ShaderStage::Fragment, &fragment, 0}}};
@@ -7681,27 +8119,27 @@ void barycentricEmulationTests() {
     state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     const std::array<CompiledShader, 4> plainPatchShaders{{{ShaderStage::Vertex, &vertex, 0}, {ShaderStage::TessellationControl, &patches.control, 0}, {ShaderStage::TessellationEvaluation, &patches.evaluation, 0}, {ShaderStage::Fragment, &plain, 0}}};
     expectFailure([&] { ValidateShaders(plainPatchShaders, state, subgroup, false); }, "stage count");
-    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, plain, tessellationTarget, 128u)); }, "does not emulate barycentrics");
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, plain, tessellationTarget, 128u, 0u)); }, "does not emulate barycentrics");
     auto noTessellation = tessellationTarget;
     noTessellation.tessellation.reset();
-    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, noTessellation, 128u)); }, "tessellation shaders are unavailable");
-    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, target, 128u)); }, "tessellation shaders are unavailable");
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, noTessellation, 128u, 0u)); }, "tessellation shaders are unavailable");
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, target, 128u, 0u)); }, "tessellation shaders are unavailable");
     auto noCapability = tessellationTarget;
     noCapability.supportedCapabilities = std::span<const std::uint32_t>(capabilities).first(1);
-    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, noCapability, 128u)); }, "tessellation capability is unavailable");
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, noCapability, 128u, 0u)); }, "tessellation capability is unavailable");
     auto smallPatches = tessellationTarget;
     smallPatches.tessellation->maxEvaluationOutputComponents = 4u;
-    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, smallPatches, 128u)); }, "exceeds device limits");
-    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, tessellationTarget, 0u)); }, "exceeds device limits");
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, smallPatches, 128u, 0u)); }, "exceeds device limits");
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, tessellationTarget, 0u, 0u)); }, "exceeds device limits");
 
     RecompileResult clipped;
     clipped.spirv = makeModule({.parameterOutput = true, .clipDistanceLength = 2});
     clipped.parameterExports = {0u};
-    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(clipped, fragment, tessellationTarget, 128u)); }, "need shaderClipDistance");
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(clipped, fragment, tessellationTarget, 128u, 0u)); }, "need shaderClipDistance");
     const std::array<std::uint32_t, 3> clipCapabilities{spv::CapabilityShader, spv::CapabilityTessellation, spv::CapabilityClipDistance};
     auto clipTarget = tessellationTarget;
     clipTarget.supportedCapabilities = clipCapabilities;
-    auto clippedPatches = BuildBarycentricTessellationShaders(clipped, fragment, clipTarget, 128u);
+    auto clippedPatches = BuildBarycentricTessellationShaders(clipped, fragment, clipTarget, 128u, 0u);
     const auto memberBuiltIn = [](const RecompileResult& result, spv::BuiltIn builtin) {
         const auto& words = result.spirv.Words();
         for (std::size_t at = 5; at < words.size() && (words[at] >> 16u) != 0; at += words[at] >> 16u) {
@@ -7726,7 +8164,7 @@ void barycentricEmulationTests() {
     const std::array<CompiledShader, 4> clippedShaders{{{ShaderStage::Vertex, &clipped, 0}, {ShaderStage::TessellationControl, &clippedPatches.control, 0}, {ShaderStage::TessellationEvaluation, &clippedPatches.evaluation, 0}, {ShaderStage::Fragment, &fragment, 0}}};
     ValidateShaders(clippedShaders, state, subgroup, false, false, false, false, false, false, true);
     vertex.parameterExports.clear();
-    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, tessellationTarget, 128u)); }, "not exported by the vertex shader");
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, tessellationTarget, 128u, 0u)); }, "not exported by the vertex shader");
     expectFailure([&] { static_cast<void>(BuildBarycentricGeometryShader(vertex, fragment, target, limits)); }, "not exported by the vertex shader");
 }
 
@@ -11319,6 +11757,7 @@ int main(int argc, char** argv) {
         retainedPixelStageTests();
         pipelineLibrarySetTests();
         pipelineLibraryClearWaitsForBuildTests();
+        tessellationPipelineLibraryCacheTests();
         framebufferOwnerTests();
         hdrComponentSwapTests();
         depthMaintenanceTests();

@@ -96,7 +96,6 @@ static int NativeClose(int fd) {
     _set_thread_local_invalid_parameter_handler(previous);
     return result;
 }
-
 static int NativeUnlink(const std::filesystem::path& p) {
     const auto path = p.wstring();
     struct _stat64 status{};
@@ -263,7 +262,10 @@ extern "C" {
 
 int APS5_VABI sceKernelOpen(const char* path, int flags, std::uint16_t mode) {
     if (File::InvalidOpenFlags(flags)) return SCE_KERNEL_ERROR_EINVAL;
-    if (path != nullptr && *path == '\0') return SCE_KERNEL_ERROR_ENOENT;
+    std::string copy;
+    if (const int error = CopyGuestPath_nid_no_patch(path, copy)) return SceKernelError(error);
+    path = copy.c_str();
+    if (copy.empty()) return SCE_KERNEL_ERROR_ENOENT;
     APS5_LOG_OUT("path=%s flags=0x%X nativeFlags=0x%X mode=0%o", path, flags, MapFlags(flags), mode);
     if (path != nullptr && File::IsRandomDevicePath(path)) {
         if ((flags & SCE_KERNEL_O_ACCMODE) != SCE_KERNEL_O_RDONLY) throw std::runtime_error(std::string(__func__) + ": writing to " + path + " is not implemented");
@@ -322,13 +324,12 @@ std::int64_t APS5_VABI sceKernelRead(int d, void* buf, std::size_t nbytes) {
         return n < 0 ? SceKernelError(*__error_nid_postfix()) : n;
     }
     if (buf == nullptr) {
-        if (nbytes != 0) return SceIoErrorFromErrno(EFAULT);
+        if (nbytes != 0) return SceIoErrorFromErrno(DescriptorIsOpen_nid_no_patch(d) ? EFAULT : EBADF);
         char empty = 0;
         return sceKernelRead(d, &empty, 0);
     }
     const GuestArena::HostWrite destination(buf, nbytes);
-    const bool validDestination = destination.Open();
-    if (!validDestination) errno = EFAULT;
+    if (!destination.Open()) errno = EFAULT;
     else if (File::ReadRandomDevice(d, buf, nbytes)) return static_cast<std::int64_t>(nbytes);
     else if (const auto archived = File::ReadArchivedFile(d, buf, nbytes, nullptr)) return *archived;
     auto n = destination.Open() ? NativeRead(d, buf, nbytes) : -1;
@@ -342,7 +343,7 @@ std::int64_t APS5_VABI sceKernelWrite(int d, const void* buf, std::size_t nbytes
         return n < 0 ? SceKernelError(*__error_nid_postfix()) : n;
     }
     if (buf == nullptr) {
-        if (nbytes != 0) return SceIoErrorFromErrno(EFAULT);
+        if (nbytes != 0) return SceIoErrorFromErrno(DescriptorIsOpen_nid_no_patch(d) ? EFAULT : EBADF);
         const char empty = 0;
         return sceKernelWrite(d, &empty, 0);
     }
@@ -387,16 +388,12 @@ std::int64_t APS5_VABI sceKernelLseek(int d, std::int64_t offset, int whence) {
 
 constexpr int GuestEfault = 14;
 
-int APS5_VABI sceKernelStat(const char* path, FileStat* sb) {
-    if (path == nullptr) return SceErrorFromErrno(GuestEfault);
-    if (*path == '\0') return SceErrorFromErrno(2);
-    std::filesystem::path native;
-    if (const int error = ResolvePathError_nid_no_patch(path, native, true, true)) return SceKernelError(error);
+static int StatNative(const std::filesystem::path& native, bool directory, FileStat* sb) {
     std::error_code error;
     constexpr int GuestEnotdir = 20;
     FileStat archived{};
     if (File::FillArchivedStat(native, &archived)) {
-        if (std::string_view(path).back() == '/' && (archived.st_mode & 0170000) != 0040000) return SceErrorFromErrno(GuestEnotdir);
+        if (directory && (archived.st_mode & 0170000) != 0040000) return SceErrorFromErrno(GuestEnotdir);
         if (sb == nullptr) return SceErrorFromErrno(GuestEfault);
         *sb = archived;
         return 0;
@@ -415,16 +412,40 @@ int APS5_VABI sceKernelStat(const char* path, FileStat* sb) {
 #endif
         return SceErrorFromErrno(NotFoundError_nid_no_patch(native));
     }
-    const std::string_view guestPath(path);
-    if (!guestPath.empty() && guestPath.back() == '/' && !std::filesystem::is_directory(status)) return SceErrorFromErrno(GuestEnotdir);
+    if (directory && !std::filesystem::is_directory(status)) return SceErrorFromErrno(GuestEnotdir);
     if (sb == nullptr) return SceErrorFromErrno(GuestEfault);
-    if (!File::TryFillFileStat(metadataPath, sb)) return SceStatErrorFromErrno(errno);
+    FileStat result{};
+    if (!File::TryFillFileStat(metadataPath, &result)) return SceStatErrorFromErrno(errno);
+    if (!GuestCopyOut_nid_no_patch(sb, &result, sizeof(result))) return SceErrorFromErrno(GuestEfault);
+    return 0;
+}
+
+int APS5_VABI sceKernelStat(const char* path, FileStat* sb) {
+    std::string copy;
+    if (const int error = CopyGuestPath_nid_no_patch(path, copy)) return SceErrorFromErrno(error);
+    path = copy.c_str();
+    if (copy.empty()) return SceErrorFromErrno(2);
+    std::filesystem::path native;
+    if (const int error = ResolvePathError_nid_no_patch(path, native, true, true)) return SceKernelError(error);
+    return StatNative(native, std::string_view(path).back() == '/', sb);
+}
+
+int StatInDirectory_nid_no_patch(int directory, const char* path, FileStat* sb, bool follow) {
+    int error = 0;
+    const char* base = GetDirectoryDescriptorPath_nid_no_patch(directory, &error);
+    if (base == nullptr) return SceErrorFromErrno(error);
+    const auto native = std::filesystem::path(reinterpret_cast<const char8_t*>(base)) / std::filesystem::path(reinterpret_cast<const char8_t*>(path));
+    if (follow) return StatNative(native, std::string_view(path).back() == '/', sb);
+    if (sb == nullptr) return SceErrorFromErrno(GuestEfault);
+    if (!File::FillLinkStat(native, sb)) return SceErrorFromErrno(errno);
     return 0;
 }
 
 int APS5_VABI sceKernelUnlink(const char* path) {
-    if (path == nullptr) return SceErrorFromErrno(GuestEfault);
-    if (*path == '\0') return SceErrorFromErrno(2);
+    std::string copy;
+    if (const int error = CopyGuestPath_nid_no_patch(path, copy)) return SceErrorFromErrno(error);
+    path = copy.c_str();
+    if (copy.empty()) return SceErrorFromErrno(2);
     if (const int dot = RenameDotError_nid_no_patch(path)) return SceKernelError(dot);
     std::filesystem::path native;
     if (const int error = ResolvePathError_nid_no_patch(path, native)) return SceKernelError(error);
