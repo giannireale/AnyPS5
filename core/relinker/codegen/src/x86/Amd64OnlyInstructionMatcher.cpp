@@ -504,7 +504,9 @@ std::optional<Amd64OnlyMatch> Amd64OnlyInstructionMatcher::_matchMixedSequence(
     const char* name = nullptr;
     for (const auto& instruction : instructions) {
         const DecodedInstruction instr{instruction.data(), instruction.size()};
-        const auto emitted = _emitOutOfLine(body, instr);
+        auto emitted = _emitOutOfLine(body, instr);
+        if (emitted == nullptr && name != nullptr)
+            emitted = _emitInPlace(body, instr);
         if (emitted == nullptr)
             return std::nullopt;
         if (name == nullptr)

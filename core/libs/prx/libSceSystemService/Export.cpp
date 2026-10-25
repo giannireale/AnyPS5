@@ -1,3 +1,4 @@
+#include "prx/libSceSystemService/include/SystemService.hpp"
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
@@ -417,14 +418,17 @@ int APS5_VABI sceSystemServiceOpenChallengeActivity(void) {
  return SYSTEM_SERVICE_OK;
 }
 
-int APS5_VABI sceSystemServiceOpenTournamentOccurrence(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+static_assert(sizeof(SystemServiceTournamentOccurrenceParam) == 32);
+static_assert(offsetof(SystemServiceTournamentOccurrenceParam, occurrenceId) == 8);
+static_assert(offsetof(SystemServiceTournamentOccurrenceParam, userId) == 16);
+static_assert(offsetof(SystemServiceTournamentOccurrenceParam, context) == 24);
+
+int APS5_VABI sceSystemServiceOpenTournamentOccurrence(const SystemServiceTournamentOccurrenceParam* param) {
+ return SYSTEM_SERVICE_OK;
 }
 
-int APS5_VABI sceSystemServiceShowControllerSettings(int user_id) {
-    (void)user_id;
-    return SYSTEM_SERVICE_OK;
+int APS5_VABI sceSystemServiceShowControllerSettings(void) {
+ return SYSTEM_SERVICE_OK;
 }
 
 int APS5_VABI sceSystemServiceAddLocalProcessForPsmKit(const char*, const char* const*, const void*) {

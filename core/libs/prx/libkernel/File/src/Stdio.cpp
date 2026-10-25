@@ -1,4 +1,5 @@
-#include "prx/libc/include/general/ExportMacros.hpp"
+#include "prx/libkernel/include/Api.hpp"
+#include "prx/libc/include/Api.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <cstddef>
@@ -45,10 +46,6 @@
 #include <utility>
 #include <vector>
 
-struct KernelIovec {
-    void* base;
-    std::size_t length;
-};
 static_assert(sizeof(KernelIovec) == sizeof(GuestSockets::Iovec));
 static_assert(sizeof(KernelIovec) == sizeof(AppArchiveBuffer) && offsetof(KernelIovec, length) == offsetof(AppArchiveBuffer, Length));
 
@@ -456,7 +453,10 @@ static int SceErrorFromErrno(int error) {
     return static_cast<int>(0x80020000u | static_cast<unsigned>(guest));
 }
 
-extern "C" int* APS5_VABI __error_nid_postfix();
+static int PathLookupFailure(const std::error_code& error) {
+    const bool lookup = error == std::errc::filename_too_long || error == std::errc::too_many_symbolic_link_levels;
+    return lookup ? SceErrorFromErrno(error.default_error_condition().value()) : 0;
+}
 
 static int PosixFailure(int error) {
     *__error_nid_postfix() = error;
@@ -601,11 +601,10 @@ static bool HasNonDirectoryPrefix(const std::filesystem::path& native) {
     return false;
 }
 
-extern "C" int APS5_VABI dup_nid_postfix(int d);
-extern "C" int APS5_VABI close_nid_postfix(int d);
-
 int File::DuplicateFrom(int fd, int start) {
 #ifdef _WIN32
+    GuestResourceLimit openFileLimit{};
+    if (getrlimit_nid_postfix(8, &openFileLimit) == 0 && start >= openFileLimit.rlim_cur) return PosixFailure(GUEST_EINVAL);
     std::vector<int> below;
     int duplicate;
     while ((duplicate = dup_nid_postfix(fd)) >= 0 && duplicate < start) below.push_back(duplicate);
