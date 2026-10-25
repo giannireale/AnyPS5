@@ -1,30 +1,9 @@
+#include "prx/libSceContentExport/include/Api.hpp"
 #include "SceTypes.hpp"
 #include <cstdint>
 #include <cstdlib>
 #include <set>
 #include <stdexcept>
-
-extern "C" int APS5_VABI sceContentExportAddToFavorites(void);
-extern "C" int APS5_VABI sceContentExportDataProvideFunction(void);
-extern "C" int APS5_VABI sceContentExportFree(void);
-extern "C" int APS5_VABI sceContentExportFrom(void);
-extern "C" int APS5_VABI sceContentExportFromFileForSf(void);
-extern "C" int APS5_VABI sceContentExportFromFileWithContentIdList(void);
-extern "C" int APS5_VABI sceContentExportFromFileWithTitleIdList(void);
-extern "C" int APS5_VABI sceContentExportInit(void);
-extern "C" int APS5_VABI sceContentExportMalloc(void);
-extern "C" int APS5_VABI sceContentExportRemoveFromFavorites(void);
-extern "C" int APS5_VABI sceContentExportRenameContent(void);
-extern "C" int APS5_VABI sceContentExportValidateContents(void);
-
-extern "C" int APS5_VABI sceContentExportInit2(const ContentExportInitParam2* init_param);
-extern "C" int APS5_VABI sceContentExportTerm(void);
-extern "C" int APS5_VABI sceContentExportStart(void);
-extern "C" int APS5_VABI sceContentExportFinish(std::int32_t expId);
-extern "C" int APS5_VABI sceContentExportGetProgress(std::int32_t expId);
-extern "C" int APS5_VABI sceContentExportCancel(std::int32_t expId);
-extern "C" int APS5_VABI sceContentExportFromDataWithThumbnail(std::int32_t expId, const ContentExportParam* param, const ContentExportCallbackParam* contentCallbackParam,
-    const char* thumbnailType, const ContentExportCallbackParam* thumbnailCallbackParam, char* path, std::size_t pathBufferLength);
 
 namespace {
 
@@ -48,6 +27,7 @@ void Export(std::int32_t expId) {
     ContentExportCallbackParam content{};
     ContentExportCallbackParam thumbnail{};
     sceContentExportFromDataWithThumbnail(expId, &param, &content, "image/png", &thumbnail, path, sizeof(path));
+
 }
 
 }

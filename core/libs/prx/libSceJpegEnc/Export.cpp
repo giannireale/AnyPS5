@@ -1,3 +1,4 @@
+#include "prx/libSceJpegEnc/include/Api.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <cstddef>
@@ -206,7 +207,7 @@ int32_t APS5_VABI sceJpegEncEncode(void* handle, const JpegEncEncodeParam* param
         output_info->size = static_cast<std::uint32_t>(jpeg.size());
         output_info->height = param->image_height;
     }
-    return 0;
+    return static_cast<std::int32_t>(jpeg.size());
 }
 
 int32_t APS5_VABI sceJpegEncQueryMemorySize(const JpegEncCreateParam* param) {
