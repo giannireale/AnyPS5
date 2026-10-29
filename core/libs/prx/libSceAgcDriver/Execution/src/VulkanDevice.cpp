@@ -932,7 +932,6 @@ struct VulkanDevice::State {
             scaler.reset();
             hdrScaler.reset();
             pipelineCache.reset();
-            Graphics::ClearGuestBufferMirrors(device);
             context.bufferPool.reset();
             bufferPool.reset();
             const auto destroyFence = reinterpret_cast<PFN_vkDestroyFence>(deviceProc(device, "vkDestroyFence"));

@@ -135,16 +135,16 @@ int APS5_VABI sceNpEntitlementAccessDeleteRequest(std::int64_t requestId) {
     return 0;
 }
 
-int APS5_VABI sceNpEntitlementAccessGenerateTransactionId(void* transaction_id) {
+int APS5_VABI sceNpEntitlementAccessGenerateTransactionId(NpEntitlementAccessTransactionId* transaction_id) {
  if (!transaction_id) return SCE_NP_ENTITLEMENT_ACCESS_ERROR_PARAMETER;
  return SCE_NP_ERROR_SIGNED_OUT;
 }
 
-int APS5_VABI sceNpEntitlementAccessPollConsumeEntitlement(void) {
+int APS5_VABI sceNpEntitlementAccessPollConsumeEntitlement(std::int64_t requestId, std::int32_t* result, std::int32_t* countResult) {
  return SCE_NP_ERROR_SIGNED_OUT;
 }
 
-int APS5_VABI sceNpEntitlementAccessRequestConsumeUnifiedEntitlement(void) {
+int APS5_VABI sceNpEntitlementAccessRequestConsumeUnifiedEntitlement(std::int32_t userId, std::uint32_t serviceLabel, const NpUnifiedEntitlementLabel* entitlementLabel, const NpEntitlementAccessTransactionId* transactionId, std::int32_t count, std::int64_t* requestId) {
  return SCE_NP_ERROR_SIGNED_OUT;
 }
 
@@ -156,15 +156,15 @@ int APS5_VABI sceNpEntitlementAccessPollServiceEntitlementInfo(std::int64_t requ
     return SCE_NP_ERROR_SIGNED_OUT;
 }
 
-int APS5_VABI sceNpEntitlementAccessPollUnifiedEntitlementInfo(void) {
+int APS5_VABI sceNpEntitlementAccessPollUnifiedEntitlementInfo(std::int64_t requestId, std::int32_t* result, NpEntitlementAccessUnifiedInfo* info) {
     return SCE_NP_ERROR_SIGNED_OUT;
 }
 
-int APS5_VABI sceNpEntitlementAccessRequestServiceEntitlementInfo(void) {
+int APS5_VABI sceNpEntitlementAccessRequestServiceEntitlementInfo(std::int32_t userId, std::uint32_t serviceLabel, const NpServiceEntitlementLabel* entitlementLabel, std::int64_t* requestId) {
     return SCE_NP_ERROR_SIGNED_OUT;
 }
 
-int APS5_VABI sceNpEntitlementAccessRequestUnifiedEntitlementInfo(void) {
+int APS5_VABI sceNpEntitlementAccessRequestUnifiedEntitlementInfo(std::int32_t userId, std::uint32_t serviceLabel, const NpUnifiedEntitlementLabel* entitlementLabel, std::int64_t* requestId) {
     return SCE_NP_ERROR_SIGNED_OUT;
 }
 
@@ -183,16 +183,16 @@ int APS5_VABI sceNpEntitlementAccessGetGameTrialsFlag(uint32_t* flag) {
 }
 
 // No PSN account: remaining entitlement queries report a signed-out user.
-std::int32_t APS5_VABI sceNpEntitlementAccessPollServiceEntitlementInfoList(const void*, const void*, const void*, const void*) {
+int APS5_VABI sceNpEntitlementAccessPollServiceEntitlementInfoList(std::int64_t requestId, std::int32_t* result, NpEntitlementAccessServiceInfo* infos, std::uint32_t capacity, std::int32_t* firstResult, std::int32_t* secondResult, std::int32_t* thirdResult) {
     return SCE_NP_ERROR_SIGNED_OUT;
 }
-std::int32_t APS5_VABI sceNpEntitlementAccessPollUnifiedEntitlementInfoList(const void*, const void*, const void*, const void*) {
+int APS5_VABI sceNpEntitlementAccessPollUnifiedEntitlementInfoList(std::int64_t requestId, std::int32_t* result, NpEntitlementAccessUnifiedInfo* infos, std::uint32_t capacity, std::int32_t* firstResult, std::int32_t* secondResult, std::int32_t* thirdResult) {
     return SCE_NP_ERROR_SIGNED_OUT;
 }
-std::int32_t APS5_VABI sceNpEntitlementAccessRequestServiceEntitlementInfoList(const void*, const void*, const void*, const void*) {
+int APS5_VABI sceNpEntitlementAccessRequestServiceEntitlementInfoList(std::int32_t userId, std::uint32_t serviceLabel, const NpServiceEntitlementLabel* entitlementLabels, std::uint32_t labelCount, const NpEntitlementAccessListParameter* parameter, std::int64_t* requestId) {
     return SCE_NP_ERROR_SIGNED_OUT;
 }
-std::int32_t APS5_VABI sceNpEntitlementAccessRequestUnifiedEntitlementInfoList(const void*, const void*, const void*, const void*) {
+int APS5_VABI sceNpEntitlementAccessRequestUnifiedEntitlementInfoList(std::int32_t userId, std::uint32_t serviceLabel, const NpUnifiedEntitlementLabel* entitlementLabels, std::uint32_t labelCount, const NpEntitlementAccessListParameter* parameter, std::int64_t* requestId) {
     return SCE_NP_ERROR_SIGNED_OUT;
 }
 

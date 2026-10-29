@@ -1363,7 +1363,7 @@ int APS5_VABI sceKernelMkdir(const char* path, uint16_t mode) {
     return 0;
 }
 
-static int CheckIovecs(const KernelIovec* iov, int iovcnt) {
+static int CopyIovecs(const KernelIovec* iov, int iovcnt, std::vector<KernelIovec>& vectors) {
     if (iovcnt < 0 || iovcnt > KERNEL_IOV_MAX) return SceErrorFromErrno(GUEST_EINVAL);
     if (iovcnt == 0) return 0;
     const auto bytes = static_cast<std::size_t>(iovcnt) * sizeof(KernelIovec);
