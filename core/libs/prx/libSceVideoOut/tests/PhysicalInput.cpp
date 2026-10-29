@@ -52,7 +52,7 @@ int main() {
     event.type = SDL_CONTROLLERAXISMOTION;
     event.caxis.value = 32767;
     pad.HandleEvent(event, window);
-    pad.Update();
+    pad.Update(window);
     const auto state = Pad::ReadState();
     Require(state.buttons == 0x4000, "physical state not neutral or scripted Cross lost");
     Require(state.left_stick_x == 128, "initial stale stick was not cleared");
