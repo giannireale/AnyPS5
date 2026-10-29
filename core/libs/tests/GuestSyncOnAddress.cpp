@@ -357,16 +357,16 @@ static bool WaitForReturned(const std::array<std::atomic<int>, 3>& results, std:
 static void DeterministicWaiterAccounting() {
 
     alignas(8) std::uint32_t value32 = 7;
-    Require(sceKernelSyncOnAddressWait(&value32, 8, nullptr, nullptr) == 0);
+    Require(sceKernelSyncOnAddressWait(&value32, 8, nullptr, nullptr) == static_cast<int>(SCE_KERNEL_ERROR_EAGAIN));
 
-    const std::uint32_t noWait = 0;
+    KernelUseconds noWait = 0;
     Require(sceKernelSyncOnAddressWait32(&value32, value32, &noWait, nullptr) == SCE_KERNEL_ERROR_ETIMEDOUT);
-    const std::uint32_t finiteWait = 10000;
+    KernelUseconds finiteWait = 10000;
     Require(sceKernelSyncOnAddressWait32(&value32, value32, &finiteWait, nullptr) == SCE_KERNEL_ERROR_ETIMEDOUT);
     Require(KernelSyncOnAddressTestAccess::WaiterCount(&value32) == 0);
 
     alignas(8) std::uint64_t value64 = 0x123456789abcdef0ULL;
-    Require(sceKernelSyncOnAddressWait64(&value64, value64 ^ 1, nullptr, nullptr) == 0);
+    Require(sceKernelSyncOnAddressWait64(&value64, value64 ^ 1, nullptr, nullptr) == static_cast<int>(SCE_KERNEL_ERROR_EAGAIN));
 
     alignas(4) std::uint32_t blockedValue = 3;
     std::array<std::atomic<int>, 3> results;
