@@ -4281,18 +4281,25 @@ public:
         std::map<std::pair<VkDescriptorSet, std::uint32_t>, std::uint32_t> written;
     };
     explicit DescriptorUpdates(Context& context) : context(context), previous(context.functions),
-        update(context.Resolved(&DeviceFunctions::updateDescriptorSets, "vkUpdateDescriptorSets")) {
+        update(context.Resolved(&DeviceFunctions::updateDescriptorSets, "vkUpdateDescriptorSets")),
+        bind(context.Resolved(&DeviceFunctions::cmdBindDescriptorSets, "vkCmdBindDescriptorSets")) {
         Require(active == nullptr, "nested descriptor update capture");
         if (previous != nullptr) functions = *previous;
         functions.updateDescriptorSets = captureUpdate;
+        functions.cmdBindDescriptorSets = captureBind;
         context.functions = &functions;
         active = this;
     }
     ~DescriptorUpdates() { context.functions = previous; active = nullptr; }
     std::vector<Contents> calls;
     std::uint32_t copies = 0;
+    std::map<std::uint32_t, VkDescriptorSet> bound;
 
 private:
+    static VKAPI_ATTR void VKAPI_CALL captureBind(VkCommandBuffer commands, VkPipelineBindPoint bindPoint, VkPipelineLayout layout, std::uint32_t firstSet, std::uint32_t count, const VkDescriptorSet* sets, std::uint32_t dynamicCount, const std::uint32_t* offsets) {
+        for (std::uint32_t index = 0; index < count; ++index) active->bound[firstSet + index] = sets[index];
+        if (commands != VK_NULL_HANDLE) active->bind(commands, bindPoint, layout, firstSet, count, sets, dynamicCount, offsets);
+    }
     static VKAPI_ATTR void VKAPI_CALL captureUpdate(VkDevice device, std::uint32_t count, const VkWriteDescriptorSet* writes, std::uint32_t copyCount, const VkCopyDescriptorSet* copies) {
         Contents contents;
         for (std::uint32_t i = 0; i < count; ++i) {
@@ -4312,6 +4319,7 @@ private:
     const DeviceFunctions* previous;
     DeviceFunctions functions{};
     PFN_vkUpdateDescriptorSets update;
+    PFN_vkCmdBindDescriptorSets bind;
     static inline DescriptorUpdates* active = nullptr;
 };
 
@@ -4369,6 +4377,17 @@ void drawDescriptorWriteTests(const Device& device, Recorder& recorder) {
         snapshots.Sync();
     }
     recorder.Activate();
+}
+
+template <typename Resources>
+void checkSnapshotBindings(Resources& resources, const ShaderResources::DrawBindings* draw, DescriptorUpdates& updates, VkDescriptorSet originalFragment) {
+    if constexpr (requires { resources.Bind(VK_NULL_HANDLE, VK_PIPELINE_BIND_POINT_GRAPHICS, VK_NULL_HANDLE, draw); }) {
+        updates.bound.clear();
+        resources.Bind(VK_NULL_HANDLE, VK_PIPELINE_BIND_POINT_GRAPHICS, VK_NULL_HANDLE, draw);
+        Require(updates.bound.at(0) == draw->allocation.set, "snapshot bind lost the rewritten main set");
+        const auto fragment = draw->fragmentAllocation.set != VK_NULL_HANDLE ? draw->fragmentAllocation.set : originalFragment;
+        Require(updates.bound.at(ShaderRecompiler::RuntimeAbi::FragmentDescriptorSet) == fragment, "snapshot bind lost the original fragment image table set");
+    }
 }
 
 void drawSnapshotTableSetTests(const Device& device, Recorder& recorder) {
@@ -4435,6 +4454,13 @@ void drawSnapshotTableSetTests(const Device& device, Recorder& recorder) {
         const ColorTarget target{};
         ShaderResources resources(context, vertex, fragment, target, 0, 0);
         Require(resources.SplitSets(), "a fragment image table did not get its own descriptor set");
+        VkDescriptorSet originalFragment = VK_NULL_HANDLE;
+        for (const auto& call : updates.calls) {
+            for (const auto& [key, count] : call.written) {
+                if (key.second == ShaderRecompiler::RuntimeAbi::ImageTableBinding && count == 2u) originalFragment = key.first;
+            }
+        }
+        Require(originalFragment != VK_NULL_HANDLE, "fixture lacks an initialized original fragment image table set");
         const std::array<std::uint32_t, 4> movedWords{5, 6, 7, 8};
         const ShaderResources::MovedBuffer moved{0, 0, 16, movedWords};
         const auto draw = resources.PrepareDrawBindings(snapshots, std::span(&moved, 1));
@@ -4445,7 +4471,12 @@ void drawSnapshotTableSetTests(const Device& device, Recorder& recorder) {
             return it == written.end() ? 0u : it->second;
         };
         Require(tableWrites(draw->allocation.set) == 1u, "the draw snapshot wrote the wrong number of image table descriptors into the vertex set");
-        Require(tableWrites(draw->fragmentAllocation.set) == 2u, "the draw snapshot wrote the wrong number of image table descriptors into the fragment set");
+        if (draw->fragmentAllocation.set != VK_NULL_HANDLE) {
+            Require(tableWrites(draw->fragmentAllocation.set) == 2u, "the draw snapshot wrote the wrong number of image table descriptors into the fragment set");
+        } else {
+            Require(tableWrites(originalFragment) == 0u && tableWrites(VK_NULL_HANDLE) == 0u, "snapshot rewrote or targeted an untouched fragment set");
+        }
+        checkSnapshotBindings(resources, draw.get(), updates, originalFragment);
         snapshots.Sync();
     }
     ClearCachedTextures(context.device);

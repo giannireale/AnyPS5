@@ -206,6 +206,7 @@ public:
         std::vector<Snapshot> snapshots;
         ~DrawBindings();
     };
+    void Bind(VkCommandBuffer commands, VkPipelineBindPoint bindPoint, VkPipelineLayout layout, const DrawBindings* bindings) const;
     struct MovedBuffer {
         std::size_t allocation;
         std::uint64_t address;
