@@ -967,6 +967,8 @@ void ExecuteIndirectRegisters(std::span<const std::uint32_t> packet, std::span<c
     const auto usable = [&](std::uint32_t value) { return !skipInvalid || IndirectRegistersValid(std::span(&value, 1)); };
     for (std::size_t i = 0; i < pairs.size(); i += 2) {
         if (skipInvalid && !IndirectRegistersValid(std::span(&pairs[i], 1))) continue;
+        if (IndirectRegistersValid(std::span(&pairs[i], 1))) continue;
+        if (pairs[i] == 0xffffffffu) registerOffset(pairs[i]);
         if (pairs[i] != 0xffffffffu && (pairs[i] & ~0x70000000u) > 0xffffu) {
             registerOffset(pairs[i]);
             continue;
