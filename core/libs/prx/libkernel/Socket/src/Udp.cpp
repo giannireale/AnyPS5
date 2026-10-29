@@ -1128,45 +1128,28 @@ int APS5_VABI fcntl_nid_postfix(int descriptor, int command, ...) {
         return closeOnExecDescriptors.count(descriptor) != 0 ? 1 : 0;
     }
     if (command == 2) {
-#ifdef _WIN32
-        __builtin_sysv_va_list arguments;
-        __builtin_sysv_va_start(arguments, command);
-        const int flags = __builtin_va_arg(arguments, int);
-        __builtin_sysv_va_end(arguments);
-#else
-        std::va_list arguments;
-        va_start(arguments, command);
-        const int flags = va_arg(arguments, int);
-        va_end(arguments);
-#endif
+        const int flags = static_cast<int>(argument);
         std::lock_guard registry(socketsMutex);
         if ((flags & 1) != 0) closeOnExecDescriptors.insert(descriptor);
         else closeOnExecDescriptors.erase(descriptor);
         return 0;
     }
     if (command == 3) return 2 | (socket->options.nonblocking ? 4 : 0); // F_GETFL, O_RDWR
-    if (command != 4) return Fail(22);
+    if (command == 4) {
+        const int flags = static_cast<int>(argument);
+        if ((flags & ~7) != 0) return Fail(45);
 #ifdef _WIN32
-    __builtin_sysv_va_list arguments;
-    __builtin_sysv_va_start(arguments, command);
-    const int flags = __builtin_va_arg(arguments, int);
-    __builtin_sysv_va_end(arguments);
+        unsigned long enabled = (flags & 4) != 0;
+        if (ioctlsocket(socket->value, FIONBIO, &enabled)) return Fail(NativeError());
 #else
-    std::va_list arguments;
-    va_start(arguments, command);
-    const int flags = va_arg(arguments, int);
-    va_end(arguments);
+        int enabled = (flags & 4) != 0;
+        if (::ioctl(socket->value, FIONBIO, &enabled)) return Fail(NativeError());
 #endif
-    if ((flags & ~7) != 0) return Fail(45);
-#ifdef _WIN32
-    unsigned long enabled = (flags & 4) != 0;
-    if (ioctlsocket(socket->value, FIONBIO, &enabled)) return Fail(NativeError());
-#else
-    int enabled = (flags & 4) != 0;
-    if (::ioctl(socket->value, FIONBIO, &enabled)) return Fail(NativeError());
-#endif
-    socket->options.nonblocking = enabled != 0;
-    return 0;
+        socket->options.nonblocking = enabled != 0;
+        return 0;
+    }
+    if ((command >= 7 && command <= 9) || (command >= 11 && command <= 13) || command == 15 || command == 16) return Fail(9);
+    return Fail(22);
 }
 int APS5_VABI _fcntl_nid_postfix(int descriptor, int command, ...) {
 #ifdef _WIN32
