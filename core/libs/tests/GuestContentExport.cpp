@@ -60,7 +60,7 @@ int main() {
     Require(Throws<std::runtime_error>([] { sceContentExportTerm(); }));
     int first = *sessions.begin();
     Require(Throws<std::runtime_error>([&] { sceContentExportGetProgress(first); }));
-    Require(Throws<std::runtime_error>([&] { sceContentExportCancel(first); }));
+    Require(sceContentExportCancel(first) == static_cast<int>(0x809D3002u));
     Require(Throws<std::runtime_error>([&] { Export(first); }));
     Require(path[0] == 0);
     Require(sceContentExportFinish(first) == 0);

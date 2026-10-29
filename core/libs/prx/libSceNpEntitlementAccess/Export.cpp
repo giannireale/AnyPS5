@@ -125,12 +125,14 @@ int APS5_VABI sceNpEntitlementAccessInitialize(const NpEntitlementAccessInitPara
     return 0;
 }
 
-int APS5_VABI sceNpEntitlementAccessAbortRequest(void) {
- return 0;
+int APS5_VABI sceNpEntitlementAccessAbortRequest(std::int64_t requestId) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
 }
 
-int APS5_VABI sceNpEntitlementAccessDeleteRequest(void) {
- return 0;
+int APS5_VABI sceNpEntitlementAccessDeleteRequest(std::int64_t requestId) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
 }
 
 int APS5_VABI sceNpEntitlementAccessGenerateTransactionId(void* transaction_id) {

@@ -181,18 +181,29 @@ struct Sampler {
         return frame;
     }
 
+    static void writeModules(std::FILE* file, const std::map<std::uint64_t, std::string>& loaded) {
+        for (const auto& [base, name] : loaded) {
+            const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+            const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+            std::fprintf(file, "# module %s 0x%lx 0x%lx\n", name.c_str(), static_cast<unsigned long>(nt->OptionalHeader.SizeOfImage), static_cast<unsigned long>(nt->FileHeader.TimeDateStamp));
+        }
+    }
+
     void write() {
         std::lock_guard lock(mutex);
         std::FILE* file = std::fopen(path.c_str(), "w");
         if (file == nullptr) return;
         std::fprintf(file, "# %llu samples\n", static_cast<unsigned long long>(samples));
+        std::map<std::uint64_t, std::string> loaded;
         for (const auto& [address, count] : counts) {
             HMODULE module = nullptr;
             char name[MAX_PATH] = "?";
             if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCSTR>(address), &module)) GetModuleFileNameA(module, name, sizeof(name));
             const char* base = std::strrchr(name, '\\');
+            if (module != nullptr) loaded.emplace(reinterpret_cast<std::uint64_t>(module), base ? base + 1 : name);
             std::fprintf(file, "%s 0x%llx %llu %llu\n", base ? base + 1 : name, static_cast<unsigned long long>(address - reinterpret_cast<std::uint64_t>(module)), static_cast<unsigned long long>(count.first), static_cast<unsigned long long>(count.second));
         }
+        writeModules(file, loaded);
         std::fclose(file);
         if (keepStacks) writeStacks();
     }
@@ -213,11 +224,7 @@ struct Sampler {
         const double tickUs = 1e6 / static_cast<double>(frequency.QuadPart);
         std::fprintf(file, "# samples=%llu depth=%d truncated=%llu suspended_us_mean=%.1f suspended_us_max=%.1f\n", static_cast<unsigned long long>(samples), depth, static_cast<unsigned long long>(stacks.Truncated()),
             samples != 0 ? static_cast<double>(suspendedTicks) * tickUs / static_cast<double>(samples) : 0.0, static_cast<double>(longestSuspendedTicks) * tickUs);
-        for (const auto& [base, name] : loaded) {
-            const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-            const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-            std::fprintf(file, "# module %s 0x%lx 0x%lx\n", name.c_str(), static_cast<unsigned long>(nt->OptionalHeader.SizeOfImage), static_cast<unsigned long>(nt->FileHeader.TimeDateStamp));
-        }
+        writeModules(file, loaded);
         const auto text = stacks.Format([&](std::uint64_t address) { return names.at(address); });
         const bool written = std::fwrite(text.data(), 1, text.size(), file) == text.size();
         if (std::fclose(file) != 0 || !written) return;
@@ -497,9 +504,13 @@ void StartCallingThreadSampler(const char* path, std::jthread& slot) {
 
 }
 
-void StartWorkerSampler() {
-    StartProcessSampler();
-    StartCallingThreadSampler(std::getenv("APS5_SAMPLE_WORKER"), workerSamplerThread);
+void StartWorkerSampler(std::uint32_t queue) {
+    if (queue == 0) StartProcessSampler();
+    static const auto sampledQueue = [] {
+        const char* value = std::getenv("APS5_SAMPLE_WORKER_QUEUE");
+        return value != nullptr ? static_cast<std::uint32_t>(std::strtoul(value, nullptr, 0)) : 0u;
+    }();
+    if (queue == sampledQueue) StartCallingThreadSampler(std::getenv("APS5_SAMPLE_WORKER"), workerSamplerThread);
 }
 
 void StartCommitterSampler() {
@@ -515,7 +526,7 @@ void StopWorkerSampler() {
     if (committerSamplerThread.joinable()) committerSamplerThread.join();
 }
 #else
-void StartWorkerSampler() {}
+void StartWorkerSampler(std::uint32_t) {}
 void StartCommitterSampler() {}
 void StopWorkerSampler() {}
 #endif
