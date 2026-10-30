@@ -2567,6 +2567,16 @@ if(BUILD_TESTING)
                 "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test(NAME agc_submit_progress COMMAND agc_driver_submit_progress_tests)
+    add_test(NAME agc_frametime COMMAND agc_driver_submit_progress_tests --frametime)
+    add_test(NAME agc_draw_frametime COMMAND agc_driver_depth_range_remap_draw_tests --frametime)
+    set_tests_properties(agc_draw_frametime PROPERTIES
+            TIMEOUT 120 SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" LABELS "graphics;frametime")
+    set_tests_properties(agc_frametime PROPERTIES
+            ENVIRONMENT "APS5_SUBMIT_PROGRESS=1" TIMEOUT 120 SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" LABELS "graphics;frametime")
+    if(WIN32)
+        set_tests_properties(agc_frametime agc_draw_frametime PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAgcDriver>;PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
     set_tests_properties(agc_submit_progress PROPERTIES
             ENVIRONMENT "APS5_SUBMIT_PROGRESS=1" TIMEOUT 30 SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
     if(WIN32)

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -17,6 +18,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -158,10 +160,30 @@ std::uint32_t Draw(AgcDriver::VulkanDevice& device, std::uint64_t depth, const T
 
 }
 
-int main() {
+int main(int argc, char** argv) {
     try {
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        if (argc == 2 && std::string_view(argv[1]) == "--frametime") {
+            std::vector<double> samples;
+            double coldMs = 0;
+            const auto depth = reinterpret_cast<std::uintptr_t>(Depths[0].data());
+            for (unsigned index = 0; index < 320; ++index) {
+                vertexSets = 0;
+                const auto started = std::chrono::steady_clock::now();
+                const auto covered = Draw(*device, depth, Plain, false, 0.5f, true, true, false, true);
+                const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+                if (index == 0) coldMs = ms;
+                Require(covered == Harness::Covered, "benchmark triangle did not cover the render target");
+                if (index >= 20) samples.push_back(ms);
+            }
+            std::sort(samples.begin(), samples.end());
+            const auto over = std::count_if(samples.begin(), samples.end(), [](double ms) { return ms > 1000.0 / 60.0; });
+            std::cout << "AGC_BENCH {\"workload\":\"triangle-depth-readback\",\"dispatches\":0,\"stage\":\"total\",\"samples\":300,\"p50_ms\":"
+                      << samples[149] << ",\"p95_ms\":" << samples[284] << ",\"p99_ms\":" << samples[296]
+                      << ",\"max_ms\":" << samples.back() << ",\"cold_total_ms\":" << coldMs << ",\"over_budget\":" << over << "}\n";
+            return 0;
+        }
         const auto context = device->graphicsContext();
         if (!context.depthClamp) {
             std::puts("skipped, the device has no depth clamping");
