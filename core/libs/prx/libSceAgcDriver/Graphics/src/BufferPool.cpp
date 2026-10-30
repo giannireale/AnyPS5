@@ -365,7 +365,7 @@ VkDeviceSize BufferPool::destroy(const BufferAllocation& allocation) noexcept {
     }
     // Device-local allocations (see DeviceBuffer) are never mapped.
     if (allocation.mapping != nullptr) unmap(device, allocation.memory);
-    destroyBuffer(device, allocation.buffer, nullptr);
+    if (allocation.buffer != VK_NULL_HANDLE) destroyBuffer(device, allocation.buffer, nullptr);
     freeMemory(device, allocation.memory, nullptr);
     return allocation.allocationBytes;
 }
@@ -434,6 +434,13 @@ void BufferPool::evictOldest(Tier& tier, std::vector<BufferAllocation>& evicted)
     const auto oldest = std::min_element(tier.free.begin(), tier.free.end(), [](const auto& left, const auto& right) { return left.second.front().lastUse < right.second.front().lastUse; });
     // First: a throw here leaves the slot retained and counted.
     evicted.push_back(oldest->second.front().allocation);
+    const auto& slot = oldest->second.front();
+    if (slot.allocation.buffer == VK_NULL_HANDLE) {
+        imageOrder.erase(slot.order);
+        imageBytes -= slot.allocation.allocationBytes;
+        --imageSlots;
+        ++imageEvictions;
+    }
     tier.retainedBytes -= oldest->second.front().allocation.allocationBytes;
     oldest->second.pop_front();
     if (oldest->second.empty()) tier.free.erase(oldest);
@@ -533,6 +540,10 @@ VkDeviceSize BufferPool::trim() {
             tier->retainedBytes = 0;
             tier->slots = 0;
         }
+        imageEvictions += imageSlots;
+        imageSlots = 0;
+        imageBytes = 0;
+        imageOrder.clear();
     }
     VkDeviceSize bytes = 0;
     for (const auto* tier : {&retiredSmall, &retiredLarge, &retiredDevice}) {
