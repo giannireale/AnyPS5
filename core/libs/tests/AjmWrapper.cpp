@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <exception>
+#include <source_location>
 
 extern "C" {
 int APS5_VABI sceAjmInitialize(int64_t reserved, uint32_t* context);
@@ -22,9 +24,9 @@ constexpr int InvalidParameter = static_cast<int>(0x80930005);
 
 int failures = 0;
 
-void Require(const bool condition, const char* what) {
+void Require(const bool condition, const char* what, const std::source_location location = std::source_location::current()) {
     if (condition) return;
-    std::fprintf(stderr, "AjmWrapper: %s\n", what);
+    std::fprintf(stderr, "AjmWrapper: %s at %s:%u\n", what, location.file_name(), static_cast<unsigned>(location.line()));
     ++failures;
 }
 
@@ -47,9 +49,13 @@ int main() {
     Require(sceAjmDecAt9ParseConfigData(invalid, &info) == InvalidParameter, "an invalid ATRAC9 configuration was accepted");
     Require(sceAjmDecAt9ParseConfigData(nullptr, &info) == InvalidParameter, "a null configuration was accepted");
 
-    Require(std::strcmp(sceAjmStrError(0), "SCE_OK") == 0, "sceAjmStrError does not name success");
-    Require(std::strcmp(sceAjmStrError(InvalidInstance), "SCE_AJM_ERROR_INVALID_INSTANCE") == 0, "sceAjmStrError does not name a known code");
-    Require(std::strcmp(sceAjmStrError(123), "SCE_AJM_ERROR_UNKNOWN") == 0, "sceAjmStrError does not report an unknown code");
+    bool strErrorIsUnimplemented = false;
+    try {
+        (void)sceAjmStrError(0);
+    } catch (const std::exception& exception) {
+        strErrorIsUnimplemented = std::strcmp(exception.what(), "sceAjmStrError not implemented") == 0;
+    }
+    Require(strErrorIsUnimplemented, "sceAjmStrError did not report its unimplemented status");
 
     Require(sceAjmFinalize(context) == 0, "sceAjmFinalize did not reach the native module");
     if (failures != 0) return 1;

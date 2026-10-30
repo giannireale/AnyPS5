@@ -3,6 +3,8 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <cstdint>
 #include <cstdlib>
+#include <cstdio>
+#include <source_location>
 #include <cmath>
 #include <cstring>
 #include <initializer_list>
@@ -12,7 +14,11 @@
 
 namespace {
 
-void Require(bool value) { if (!value) std::abort(); }
+void Require(bool value, const std::source_location location = std::source_location::current()) {
+    if (value) return;
+    std::fprintf(stderr, "GuestVoice check failed at %s:%u\n", location.file_name(), static_cast<unsigned>(location.line()));
+    std::abort();
+}
 
 constexpr auto AlreadyInitialized = static_cast<std::int32_t>(0x804e0802u);
 
@@ -54,6 +60,11 @@ std::uint32_t CreatePort(std::int32_t type, float volume) {
     param.port_type = type;
     param.volume = volume;
     if (type == 2 || type == 4) param.voice.bitrate = 16000;
+    if (type == 1 || type == 3) {
+        param.pcmaudio.buffer_size = 2048;
+        param.pcmaudio.data_type = 0;
+        param.pcmaudio.sample_rate = 16000;
+    }
     std::uint32_t id = 0;
     Require(sceVoiceCreatePort(&id, &param) == 0);
     return id;

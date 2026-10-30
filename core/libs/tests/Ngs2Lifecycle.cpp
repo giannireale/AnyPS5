@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <source_location>
 #include <vector>
 
 extern "C" {
@@ -41,9 +42,9 @@ int failures = 0;
 int allocations = 0;
 int releases = 0;
 
-void Require(const bool condition, const char* what) {
+void Require(const bool condition, const char* what, const std::source_location location = std::source_location::current()) {
     if (condition) return;
-    std::fprintf(stderr, "Ngs2Lifecycle: %s\n", what);
+    std::fprintf(stderr, "Ngs2Lifecycle: %s at %s:%u\n", what, location.file_name(), static_cast<unsigned>(location.line()));
     ++failures;
 }
 

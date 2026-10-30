@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <source_location>
 #include <vector>
 
 extern "C" {
@@ -26,9 +27,9 @@ namespace {
 
 int failures = 0;
 
-void Require(const bool condition, const char* what) {
+void Require(const bool condition, const char* what, const std::source_location location = std::source_location::current()) {
     if (condition) return;
-    std::fprintf(stderr, "Ngs2Mixer: %s\n", what);
+    std::fprintf(stderr, "Ngs2Mixer: %s at %s:%u\n", what, location.file_name(), static_cast<unsigned>(location.line()));
     ++failures;
 }
 
