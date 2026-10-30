@@ -445,7 +445,7 @@ const std::vector<std::uint32_t>& resultMemoPixelCode() {
     return code;
 }
 
-bool compileResultMemoPixel(std::uint32_t value) {
+bool compileResultMemoPixel(std::uint32_t value, std::shared_ptr<const ShaderRecompiler::RecompileResult>* retained = nullptr) {
     using namespace ShaderRecompiler;
     std::array<std::uint32_t, 1> color{value};
     auto request = FrontendRequest(resultMemoPixelCode(), color);
@@ -461,8 +461,29 @@ bool compileResultMemoPixel(std::uint32_t value) {
     const auto regions = memory.Regions();
     request.context.memory = regions;
     bool hit = false;
-    static_cast<void>(Recompile(request, *capture, &hit));
+    auto result = Recompile(request, *capture, &hit);
+    if (retained != nullptr) *retained = std::move(result);
     return hit;
+}
+
+void verifyResultMemoReplacement() {
+    using namespace ShaderRecompiler;
+    SetResultMemoBudget(0u);
+    std::shared_ptr<const RecompileResult> retained;
+    require(!compileResultMemoPixel(1u, &retained), "result memo replacement: first result hit");
+    const auto words = retained->spirv.Copy();
+    const auto push = retained->pushConstants;
+    const auto data = retained->shaderDataUserWords;
+    const auto identity = retained->Identity();
+    std::vector<std::weak_ptr<const RecompileResult>> results;
+    for (std::uint32_t value = 2u; value <= 1025u; ++value) {
+        std::shared_ptr<const RecompileResult> current;
+        require(!compileResultMemoPixel(value, &current), "result memo replacement: new snapshot hit");
+        results.emplace_back(current);
+    }
+    require(std::ranges::any_of(results, [](const auto& result) { return result.expired(); }), "result memo replacement: replaced results remained alive");
+    require(compileResultMemoPixel(1025u), "result memo replacement: newest result was not retained");
+    require(std::ranges::equal(retained->spirv.Words(), words) && retained->pushConstants == push && retained->shaderDataUserWords == data && retained->Identity() == identity, "result memo replacement: a retained result changed during replacement");
 }
 
 void verifyResultMemoBudgetThreads() {
@@ -9256,6 +9277,11 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--frontend-pair") {
             verifyFrontendPair();
             std::cout << "Prepared frontend reuse preserves full and partial-thread programs\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--result-memo-replacement") {
+            verifyResultMemoReplacement();
+            std::cout << "Result replacement releases unused entries and preserves live results\n";
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--result-memo-budget") {
