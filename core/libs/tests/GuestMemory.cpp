@@ -217,7 +217,7 @@ static void CheckUnsupportedMappingFlags() {
     heapBytes[heapLength - 1] = 0xA5;
     Require(heapBytes[0] == 0x5A && heapBytes[heapLength - 1] == 0xA5);
     Require(std::strcmp(NameAt(heap), "SceLibcHeap") == 0);
-    Require(sceKernelMunmap(heap, heapLength) == 0);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(heap), heapLength) == 0);
 }
 
 static void CheckAudioCoprocessorProtection() {
@@ -638,11 +638,11 @@ static void CheckDirectReleaseErrors() {
     void* released = nullptr;
     Require(sceKernelMapDirectMemory(&released, page, 3, 0, phys + page, 0) == SCE_KERNEL_ERROR_EINVAL);
     Require(released == nullptr);
-    Require(sceKernelMunmap(first, page) == 0);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(first), page) == 0);
     void* remapped = nullptr;
     Require(sceKernelMapDirectMemory(&remapped, page, 3, 0, phys, 0) == 0);
     Require(static_cast<unsigned char*>(remapped)[0] == 0xa5);
-    Require(sceKernelMunmap(remapped, page) == 0);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(remapped), page) == 0);
     Require(sceKernelReleaseDirectMemory(phys, page) == 0);
     Require(sceKernelReleaseDirectMemory(phys + page, page) == SCE_KERNEL_ERROR_EINVAL);
     Require(sceKernelCheckedReleaseDirectMemory(phys + page, page) == SCE_KERNEL_ERROR_ENOENT);

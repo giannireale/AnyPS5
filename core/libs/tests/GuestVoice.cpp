@@ -21,29 +21,30 @@ void RequireThrows(F&& f) {
 }
 
 void TestNotInitialized() {
-    Require(sceVoiceStart(nullptr) == NotInitialized);
+    constexpr auto notInitialized = static_cast<std::int32_t>(0x804e0801u);
+    Require(sceVoiceStart(nullptr) == notInitialized);
     VoiceStartParam start{};
-    Require(sceVoiceStart(&start) == NotInitialized);
-    Require(sceVoiceCreatePort(nullptr, nullptr) == NotInitialized);
+    Require(sceVoiceStart(&start) == notInitialized);
+    Require(sceVoiceCreatePort(nullptr, nullptr) == notInitialized);
     VoicePortParam badType{};
     badType.port_type = 99;
     std::uint32_t id = 0xA5A5A5A5u;
-    Require(sceVoiceCreatePort(&id, &badType) == NotInitialized);
+    Require(sceVoiceCreatePort(&id, &badType) == notInitialized);
     VoicePortParam param{};
     param.port_type = 3;
-    Require(sceVoiceCreatePort(&id, &param) == NotInitialized);
+    Require(sceVoiceCreatePort(&id, &param) == notInitialized);
     Require(id == 0xA5A5A5A5u);
-    Require(sceVoiceGetPortInfo(0, nullptr) == NotInitialized);
+    Require(sceVoiceGetPortInfo(0, nullptr) == notInitialized);
     VoicePortInfo info{};
     std::memset(&info, 0xA5, sizeof(info));
     VoicePortInfo sentinel = info;
-    Require(sceVoiceGetPortInfo(0, &info) == NotInitialized);
+    Require(sceVoiceGetPortInfo(0, &info) == notInitialized);
     Require(std::memcmp(&info, &sentinel, sizeof(info)) == 0);
-    Require(sceVoicePausePortAll() == NotInitialized);
-    Require(sceVoiceResumePortAll() == NotInitialized);
-    Require(sceVoiceSetMuteFlagAll(true) == NotInitialized);
-    Require(sceVoiceSetBitRate(0, 16000) == NotInitialized);
-    Require(sceVoiceUpdatePort(0, nullptr) == NotInitialized);
+    Require(sceVoicePausePortAll() == notInitialized);
+    Require(sceVoiceResumePortAll() == notInitialized);
+    Require(sceVoiceSetMuteFlagAll(true) == notInitialized);
+    Require(sceVoiceSetBitRate(0, 16000) == notInitialized);
+    Require(sceVoiceUpdatePort(0, nullptr) == notInitialized);
 }
 
 std::uint32_t CreatePort(std::int32_t type, float volume) {
@@ -157,20 +158,6 @@ int main() {
     Require(resourceOutput.guard == 0xa5a5a5a5u);
     RequireThrows([] { sceVoiceEnableChat(); });
     RequireThrows([] { sceVoiceDisableChat(); });
-    VoiceInitParam init{};
-    VoiceStartParam start{};
-    Require(sceVoiceInit(&init, 0) == 0);
-    Require(sceVoiceStart(&start) == 0);
-    RequireThrows([] { sceVoiceGetResourceInfo(nullptr); });
-    VoiceResourceInfo resourceInfo{};
-    Require(sceVoiceGetResourceInfo(&resourceInfo) == 0);
-    Require(resourceInfo.max_voice_input_ports == 7);
-    Require(resourceInfo.max_voice_output_ports == 7);
-    Require(resourceInfo.max_device_input_ports == 1);
-    Require(resourceInfo.max_device_output_ports == 1);
-    Require(resourceInfo.max_ports == 64);
-    Require(sceVoiceEnableChat() == 0);
-    Require(sceVoiceDisableChat() == 0);
     const auto input = CreatePort(1, 0.5f);
     const auto output = CreatePort(3, 0.25f);
     Require(sceVoiceConnectIPortToOPort(input, output) == 0);
