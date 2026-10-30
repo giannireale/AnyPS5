@@ -84,6 +84,7 @@ VkDeviceMemory BufferPool::AllocateMemory(const VkMemoryAllocateInfo& allocation
     if (exhausted(result)) {
         if (cacheReclaim != nullptr) released = cacheReclaim(ReclaimTarget(allocation.allocationSize), newImage);
         if (released != 0) {
+            reclaimed += trim();
             memory = VK_NULL_HANDLE;
             result = allocateMemory(device, &allocation, nullptr, &memory);
             ++attempts;
