@@ -1,4 +1,5 @@
 #include "SceTypes.hpp"
+#include "prx/libSceNgs2.native/include/Ngs2Types.hpp"
 
 #include <algorithm>
 #include <array>
@@ -46,15 +47,13 @@ void Require(const bool condition, const char* what) {
     ++failures;
 }
 
-std::int32_t Allocate(void* context) {
-    auto* info = static_cast<Ngs2ContextBufferInfo*>(context);
+std::int32_t APS5_VABI Allocate(Ngs2ContextBufferInfo* info) {
     info->host_buffer = std::malloc(info->host_buffer_size);
     ++allocations;
     return info->host_buffer != nullptr ? 0 : -1;
 }
 
-std::int32_t Release(void* context) {
-    auto* info = static_cast<Ngs2ContextBufferInfo*>(context);
+std::int32_t APS5_VABI Release(Ngs2ContextBufferInfo* info) {
     std::free(info->host_buffer);
     info->host_buffer = nullptr;
     ++releases;
