@@ -372,11 +372,13 @@ The shader recompilation logic in [core/shader/recompiler](../../core/shader/rec
 With `BUILD_TESTING=ON`, build the graphics test targets, then run:
 
 ```sh
-python tools/graphics_suite.py --build build --output artifacts/graphics-validation
+python tools/graphics_suite.py --build build --output artifacts/graphics-validation --prepare
 python tools/graphics_suite.py --build build --output artifacts/graphics-performance --performance --runs 3
 ```
 
 Set `VK_LAYER_PATH` to the Vulkan SDK layer directory if it is not registered, and put the compiler runtime DLL directory on `PATH` on Windows. The first command requires the validation layer to load, refuses skipped or missing tests, checks GPU output markers, and rejects VUID errors. It covers command submission, draw descriptors, memory revalidation, shader snapshots, pipeline caches, buffer pools, presentation, depth, sampled storage and multisampling. The second command disables the requested validation layer and measures synthetic submission latency in three fresh processes.
+
+`--prepare` builds only the selected executable targets, discovered from CTest, and saves compiler output in `build.log`. Without it, run against an already updated build. `--cmake` and `--ctest` accept explicit tool paths.
 
 `agc_frametime` submits 1, 32 and 128 compute dispatches per batch through the real AGC driver, warms up 20 batches and records 300 samples per workload. Its JSON measurements separate CPU preparation/submission from completion waiting, and report p50/p95/p99/max plus samples exceeding 16.67 ms. `agc_draw_frametime` also measures 300 offscreen triangle draws with depth writes, shader preparation, pipeline lookup, GPU completion and pixel readback; it verifies target coverage on every draw. This small target measures fixed costs, not fill rate at game resolution. The performance runner fails when any total p99 exceeds `--budget-ms` (default 1000/60). CTest alone checks correctness and does not apply a timing threshold. Logs, JUnit results and `summary.json` are written to the requested artifact directory.
 

@@ -14,6 +14,8 @@ def main():
     parser.add_argument("--build", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--ctest", default="ctest")
+    parser.add_argument("--cmake", default="cmake")
+    parser.add_argument("--prepare", action="store_true", help="Build the selected test executables before running")
     parser.add_argument("--performance", action="store_true", help="Measure without validation instrumentation; run correctness separately first")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--budget-ms", type=float, default=1000 / 60)
@@ -38,9 +40,22 @@ def main():
                  "agc_sampled_storage_base_level_usage", "agc_multisample_guest_access",
                  "guest_shader_link", "guest_agc_driver_resources",
                  "agc_driver_depth_bounds_state", "agc_driver_unused_viewport_depth"]
+    pattern = "^(" + "|".join(names) + ")$"
+    if args.prepare:
+        listing = subprocess.run([args.ctest, "--test-dir", str(args.build.resolve()), "-R", pattern,
+                                  "--show-only=json-v1"], capture_output=True, text=True, check=True)
+        targets = sorted({Path(test["command"][0]).stem for test in json.loads(listing.stdout)["tests"]})
+        if not targets or any(re.fullmatch(r"[A-Za-z0-9_]+", target) is None for target in targets):
+            raise RuntimeError("cannot identify graphics executable build targets")
+        with (args.output / "build.log").open("w", encoding="utf-8") as log:
+            built = subprocess.run([args.cmake, "--build", str(args.build.resolve()), "--target", *targets,
+                                    "--parallel", "4"], env=env, stdout=log, stderr=subprocess.STDOUT)
+        if built.returncode:
+            print(json.dumps(dict(passed=False, build_exit=built.returncode, report=str(args.output / "build.log"))))
+            return 1
     results = []
     for run in range(args.runs if args.performance else 1):
-        command = [args.ctest, "--test-dir", str(args.build.resolve()), "-R", "^(" + "|".join(names) + ")$",
+        command = [args.ctest, "--test-dir", str(args.build.resolve()), "-R", pattern,
                    "-V", "--output-junit", str((args.output / f"tests-{run}.xml").resolve())]
         started = time.monotonic()
         with (args.output / f"run-{run}.log").open("w", encoding="utf-8") as log:
