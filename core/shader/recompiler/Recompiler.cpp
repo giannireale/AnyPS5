@@ -1563,6 +1563,48 @@ std::uint64_t resultBytes(const RecompileResult& result) {
     return total;
 }
 
+struct ResultMemoPool {
+    static constexpr std::size_t Capacity = 32;
+    static constexpr std::uint64_t ByteLimit = 256u * 1024u;
+    std::mutex mutex;
+    std::array<std::unique_ptr<RecompileResult>, Capacity> results;
+    std::size_t count = 0;
+    std::uint64_t bytes = 0;
+
+    std::unique_ptr<RecompileResult> Acquire() {
+        std::lock_guard lock(mutex);
+        if (count == 0) return {};
+        auto result = std::move(results[--count]);
+        bytes -= resultBytes(*result);
+        return result;
+    }
+
+    void Release(RecompileResult* result) noexcept {
+        std::unique_ptr<RecompileResult> owned(result);
+        result->spirv = SharedSpirv{};
+        result->drawKeyMemo.words.store(nullptr, std::memory_order_relaxed);
+        const auto held = resultBytes(*result);
+        if (held > ByteLimit) return;
+        try {
+            std::lock_guard lock(mutex);
+            if (count == Capacity || held > ByteLimit - bytes) return;
+            results[count++] = std::move(owned);
+            bytes += held;
+        } catch (...) {
+        }
+    }
+};
+
+std::shared_ptr<RecompileResult> copyMemoResult(const RecompileResult& donor) {
+    static const bool reuse = std::getenv("APS5_RESULT_REUSE") != nullptr && std::getenv("APS5_NO_RESULT_REUSE") == nullptr;
+    if (!reuse) return std::make_shared<RecompileResult>(donor);
+    static const auto pool = std::make_shared<ResultMemoPool>();
+    auto result = pool->Acquire();
+    if (result == nullptr) result = std::make_unique<RecompileResult>();
+    *result = donor;
+    return {result.release(), [owner = pool](RecompileResult* released) noexcept { owner->Release(released); }};
+}
+
 std::uint64_t patchBytes(const MemoPatch& patch) {
     auto total = static_cast<std::uint64_t>(sizeof(MemoPatch)) + vectorBytes(patch.buffers) + vectorBytes(patch.userWords);
     for (const auto& buffer : patch.buffers) total += vectorBytes(buffer.second);
@@ -1852,7 +1894,7 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
     std::shared_ptr<RecompileResult> result;
     std::shared_ptr<MemoPatch> patch;
     if (donor != nullptr) {
-        result = std::make_shared<RecompileResult>(*donor);
+        result = copyMemoResult(*donor);
         if (profile) counters.copyNanoseconds.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count()), std::memory_order_relaxed);
         applyMemoPatch(*result, *donorPatch, snapshot);
         if (VerifyMaskedResultMemo()) verifyPatchedResult(*result, materializeResult(*variant, request, snapshot), variantId);
