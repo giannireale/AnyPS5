@@ -5,17 +5,6 @@
 
 extern "C" {
 
-
-int APS5_VABI __ubsan_handle_cfi_check_fail_nid_postfix() {
-    NotImplemented_nid_no_patch(__func__);
-}
-APS5_EXPORT("K4M0IhFb88Q", __ubsan_handle_cfi_check_fail_nid_postfix);
-
-int APS5_VABI __ubsan_handle_cfi_check_fail_abort_nid_postfix() {
-    NotImplemented_nid_no_patch(__func__);
-}
-APS5_EXPORT("sPU6b2LaPqg", __ubsan_handle_cfi_check_fail_abort_nid_postfix);
-
 int APS5_VABI sceNKWebKitRequirementsUnknown_gnWUEMlAxZY_nid_no_patch() {
     NotImplemented_nid_no_patch(__func__);
 }
