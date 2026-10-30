@@ -1,6 +1,7 @@
 #include <codegen/x86/StubBodyBuilder.hpp>
 #include <span>
 #include <elfpatcher/general/TrampolineWriter.hpp>
+#include <elfpatcher/general/AddressDistance.hpp>
 #include <codegen/x86/Amd64OnlySubstitutionTable.hpp>
 #include <domain/Types.hpp>
 #include <io/BufferUtils.hpp>
@@ -26,9 +27,8 @@ void AppendTrampoline(std::vector<std::uint8_t>& bytes, const Codegen::Trampolin
     const auto inRange = [](const std::int64_t displacement) {
         return displacement >= std::numeric_limits<std::int32_t>::min() && displacement <= std::numeric_limits<std::int32_t>::max();
     };
-    const auto returnDisplacement = static_cast<std::int64_t>(site.Address + site.Length) - static_cast<std::int64_t>(bodyAddress + site.ReturnBranchOffset + kJmpRel32.Size);
-    const auto jumpDisplacement = static_cast<std::int64_t>(bodyAddress) - static_cast<std::int64_t>(site.Address + kJmpRel32.Size);
-    if (!inRange(returnDisplacement) || !inRange(jumpDisplacement))
+    std::int64_t returnDisplacement = 0, jumpDisplacement = 0;
+    if (!SignedDistance(site.Address + site.Length, bodyAddress + site.ReturnBranchOffset + kJmpRel32.Size, returnDisplacement) || !SignedDistance(bodyAddress, site.Address + kJmpRel32.Size, jumpDisplacement) || !inRange(returnDisplacement) || !inRange(jumpDisplacement))
         throw Domain::RelinkerException("AMD-only stub exceeds rel32 range", site.Offset);
     Io::WriteU32(bytes, static_cast<std::size_t>(bodyOffset + site.ReturnBranchOffset + 1), static_cast<std::uint32_t>(returnDisplacement));
 
@@ -38,8 +38,8 @@ void AppendTrampoline(std::vector<std::uint8_t>& bytes, const Codegen::Trampolin
         if (fixup.BodyOffset + 4 > site.Body.size())
             throw Domain::RelinkerException("Relocated operand is outside the stub body", site.Offset);
         const auto operandAddress = bodyAddress + fixup.BodyOffset + 4;
-        const auto relocated = static_cast<std::int64_t>(fixup.Target) - static_cast<std::int64_t>(operandAddress);
-        if (!inRange(relocated))
+        std::int64_t relocated = 0;
+        if (!SignedDistance(fixup.Target, operandAddress, relocated) || !inRange(relocated))
             throw Domain::RelinkerException("Relocated operand exceeds rel32 range", site.Offset);
         Io::WriteU32(bytes, static_cast<std::size_t>(bodyOffset + fixup.BodyOffset), static_cast<std::uint32_t>(relocated));
     }
@@ -47,8 +47,8 @@ void AppendTrampoline(std::vector<std::uint8_t>& bytes, const Codegen::Trampolin
     for (const auto& branch : site.Incoming) {
         if (branch.DisplacementOffset + 4 > bytes.size())
             throw Domain::RelinkerException("Incoming branch is outside the image", branch.DisplacementOffset);
-        const auto entry = static_cast<std::int64_t>(bodyAddress + branch.BodyOffset) - static_cast<std::int64_t>(branch.BranchEnd);
-        if (!inRange(entry))
+        std::int64_t entry = 0;
+        if (!SignedDistance(bodyAddress + branch.BodyOffset, branch.BranchEnd, entry) || !inRange(entry))
             throw Domain::RelinkerException("Incoming branch cannot reach the stub", branch.DisplacementOffset);
         Io::WriteU32(bytes, static_cast<std::size_t>(branch.DisplacementOffset), static_cast<std::uint32_t>(entry));
     }
