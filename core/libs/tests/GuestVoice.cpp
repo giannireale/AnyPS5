@@ -14,6 +14,8 @@ namespace {
 
 void Require(bool value) { if (!value) std::abort(); }
 
+constexpr auto AlreadyInitialized = static_cast<std::int32_t>(0x804e0802u);
+
 template<class F>
 void RequireThrows(F&& f) {
     try { f(); } catch (const std::exception&) { return; }
