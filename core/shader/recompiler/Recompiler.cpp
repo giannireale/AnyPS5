@@ -1480,6 +1480,18 @@ struct ResultMemoCounters {
     std::atomic<std::uint64_t> hits{0}, patched{0}, misses{0}, evictions{0}, trimmed{0}, populateNanoseconds{0}, patchNanoseconds{0}, copyNanoseconds{0}, mismatches{0};
     std::atomic<std::int64_t> lastReport{0};
     std::atomic<std::uint64_t> clock{0}, heldBytes{0}, heldEntries{0};
+    std::array<std::atomic<std::uint64_t>, 6> phaseNanoseconds{};
+};
+
+struct ResultMemoPhaseTimer {
+    std::atomic<std::uint64_t>& counter;
+    bool enabled;
+    std::chrono::steady_clock::time_point started;
+
+    ResultMemoPhaseTimer(std::atomic<std::uint64_t>& counter, bool enabled) : counter(counter), enabled(enabled), started(enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
+    ~ResultMemoPhaseTimer() {
+        if (enabled) counter.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count()), std::memory_order_relaxed);
+    }
 };
 
 void applyMemoPatch(RecompileResult& result, const MemoPatch& patch, const ResourceSnapshot& snapshot) {
@@ -1670,8 +1682,11 @@ void reportResultMemo() {
     const auto populate = counters.populateNanoseconds.exchange(0, std::memory_order_relaxed);
     const auto patching = counters.patchNanoseconds.exchange(0, std::memory_order_relaxed);
     const auto copying = counters.copyNanoseconds.exchange(0, std::memory_order_relaxed);
+    std::array<double, 6> phaseMilliseconds{};
+    for (std::size_t index = 0; index < phaseMilliseconds.size(); ++index) phaseMilliseconds[index] = static_cast<double>(counters.phaseNanoseconds[index].exchange(0, std::memory_order_relaxed)) / 1e6;
     const auto mismatches = counters.mismatches.exchange(0, std::memory_order_relaxed);
     const auto total = static_cast<double>(hits + patched + misses);
+    std::fprintf(stderr, "[recompile] memo phases (10 s, nested): total %.1f ms, hash %.1f ms, exact lookup %.1f ms, masked lookup %.1f ms, result accounting %.1f ms, insertion %.1f ms\n", phaseMilliseconds[0], phaseMilliseconds[1], phaseMilliseconds[2], phaseMilliseconds[3], phaseMilliseconds[4], phaseMilliseconds[5]);
     std::fprintf(stderr, "[recompile] result memo (10 s): %llu hits, %llu patched, %llu misses (%.1f%% hits, %.1f%% patched), Populate %.1f us per miss / %.1f ms in total, patch %.1f us each / %.1f ms in total, %llu evictions, %llu patch mismatches, %llu trimmed; %llu results held, %.1f MiB\n", static_cast<unsigned long long>(hits), static_cast<unsigned long long>(patched), static_cast<unsigned long long>(misses), total != 0.0 ? 100.0 * static_cast<double>(hits) / total : 0.0, total != 0.0 ? 100.0 * static_cast<double>(patched) / total : 0.0, misses != 0 ? static_cast<double>(populate) / 1000.0 / static_cast<double>(misses) : 0.0, static_cast<double>(populate) / 1e6, patched != 0 ? static_cast<double>(patching) / 1000.0 / static_cast<double>(patched) : 0.0, static_cast<double>(patching) / 1e6, static_cast<unsigned long long>(evictions), static_cast<unsigned long long>(mismatches), static_cast<unsigned long long>(trimmed), static_cast<unsigned long long>(counters.heldEntries.load(std::memory_order_relaxed)), static_cast<double>(counters.heldBytes.load(std::memory_order_relaxed)) / 1048576.0);
     std::fprintf(stderr, "[recompile] memo donor copy (10 s): %.1f ms total, %.1f us per patched result; included in patch total\n", static_cast<double>(copying) / 1e6, patched != 0 ? static_cast<double>(copying) / 1000.0 / static_cast<double>(patched) : 0.0);
 }
@@ -1789,10 +1804,15 @@ std::uint64_t snapshotHash(const RecompileRequest& request, const ResourceSnapsh
 std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& source, const std::shared_ptr<const CompiledVariant>& variant, const RecompileRequest& request, const ResourceSnapshot& snapshot, bool cacheHit, bool* memoHit) {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     const auto variantId = variant->artifact.variantId;
-    const auto hash = snapshotHash(request, snapshot, false);
-    const auto index = (variantId * 0x9e3779b97f4a7c15ull) ^ hash;
     auto& counters = resultMemoCounters();
+    const ResultMemoPhaseTimer totalTiming(counters.phaseNanoseconds[0], profile);
+    const auto hash = [&] {
+        const ResultMemoPhaseTimer timing(counters.phaseNanoseconds[1], profile);
+        return snapshotHash(request, snapshot, false);
+    }();
+    const auto index = (variantId * 0x9e3779b97f4a7c15ull) ^ hash;
     {
+        const ResultMemoPhaseTimer timing(counters.phaseNanoseconds[2], profile);
         std::lock_guard lock(source.mutex);
         if (auto* set = memoSet(source.memo, index)) {
             for (std::size_t way = 0; way < ResultMemoWays; ++way) {
@@ -1807,11 +1827,15 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
         }
     }
     const bool masking = MaskedResultMemo();
-    const auto maskedHash = masking ? snapshotHash(request, snapshot, true) : 0u;
+    const auto maskedHash = [&] {
+        const ResultMemoPhaseTimer timing(counters.phaseNanoseconds[1], profile);
+        return masking ? snapshotHash(request, snapshot, true) : 0u;
+    }();
     const auto maskedIndex = (variantId * 0x9e3779b97f4a7c15ull) ^ maskedHash;
     std::shared_ptr<const RecompileResult> donor;
     std::shared_ptr<const MemoPatch> donorPatch;
     if (masking) {
+        const ResultMemoPhaseTimer timing(counters.phaseNanoseconds[3], profile);
         std::lock_guard lock(source.mutex);
         if (auto* set = memoSet(source.maskedMemo, maskedIndex)) {
             for (std::size_t way = 0; way < ResultMemoWays; ++way) {
@@ -1842,7 +1866,10 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
     }
     result->cacheHit = cacheHit;
     std::shared_ptr<const RecompileResult> shared = std::move(result);
-    const auto bytes = resultBytes(*shared);
+    const auto bytes = [&] {
+        const ResultMemoPhaseTimer timing(counters.phaseNanoseconds[4], profile);
+        return resultBytes(*shared);
+    }();
     const auto insert = [&](std::unique_ptr<ResultMemoTable>& table, std::uint64_t at, std::uint64_t key, std::shared_ptr<const MemoPatch> recipe, bool count) {
         if (table == nullptr) {
             table = std::make_unique<ResultMemoTable>();
@@ -1874,6 +1901,7 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
         return shared;
     };
     {
+        const ResultMemoPhaseTimer timing(counters.phaseNanoseconds[5], profile);
         std::lock_guard lock(source.mutex);
         shared = insert(source.memo, index, hash, nullptr, true);
         if (patch != nullptr && patch->valid) static_cast<void>(insert(source.maskedMemo, maskedIndex, maskedHash, patch, false));
