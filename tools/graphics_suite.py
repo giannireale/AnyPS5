@@ -1,4 +1,5 @@
 import argparse
+import importlib.util
 import json
 import math
 import os
@@ -7,6 +8,30 @@ import re
 import subprocess
 import sys
 import time
+
+REGISTRATION_SPEC = importlib.util.spec_from_file_location("check_test_registration", Path(__file__).with_name("check_test_registration.py"))
+REGISTRATION = importlib.util.module_from_spec(REGISTRATION_SPEC)
+REGISTRATION_SPEC.loader.exec_module(REGISTRATION)
+
+
+def test_commands(root, names):
+    found, visited, pending = {}, set(), [Path(root).resolve()]
+    while pending:
+        directory = pending.pop()
+        file = directory / "CTestTestfile.cmake"
+        if directory in visited or not file.is_file():
+            continue
+        visited.add(directory)
+        try:
+            commands = list(REGISTRATION.commands(file.read_text(encoding="utf-8-sig")))
+        except (OSError, UnicodeError, ValueError):
+            continue
+        for command, arguments in commands:
+            if command == "subdirs":
+                pending.extend(directory / argument for argument in arguments)
+            elif command == "add_test" and arguments and arguments[0] in names and len(arguments) > 1:
+                found.setdefault(arguments[0], set()).add(tuple(arguments[1:]))
+    return found
 
 
 def main():
@@ -44,7 +69,17 @@ def main():
     if args.prepare:
         listing = subprocess.run([args.ctest, "--test-dir", str(args.build.resolve()), "-R", pattern,
                                   "--show-only=json-v1"], capture_output=True, text=True, check=True)
-        targets = sorted({Path(test["command"][0]).stem for test in json.loads(listing.stdout)["tests"]})
+        tests = json.loads(listing.stdout)["tests"]
+        missing = {test["name"] for test in tests if not test.get("command")}
+        if missing:
+            resolved = test_commands(args.build, missing)
+            for test in tests:
+                candidates = resolved.get(test["name"], set())
+                if test["name"] in missing and len(candidates) == 1:
+                    command = next(iter(candidates))
+                    if command and os.path.isabs(command[0]):
+                        test["command"] = list(command)
+        targets = sorted({Path(test["command"][0]).stem for test in tests if test.get("command")})
         if not targets or any(re.fullmatch(r"[A-Za-z0-9_]+", target) is None for target in targets):
             raise RuntimeError("cannot identify graphics executable build targets")
         with (args.output / "build.log").open("w", encoding="utf-8") as log:
