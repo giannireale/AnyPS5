@@ -52,6 +52,7 @@ BufferPool::BufferPool(const Context& context) : maxSlots(std::max<std::size_t>(
     smallTier.budget = hostBudget("APS5_HOST_SMALL_POOL_MIB", smallBudget);
     largeTier.budget = hostBudget("APS5_HOST_LARGE_POOL_MIB", budget);
     deviceTier.budget = deviceBudget(context);
+    imageBudget = ImageBudget(deviceTier.budget);
 }
 
 BufferPool::~BufferPool() {
