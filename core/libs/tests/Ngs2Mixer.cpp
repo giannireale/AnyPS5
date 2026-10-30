@@ -1,4 +1,5 @@
 #include "SceTypes.hpp"
+#include "prx/libSceNgs2.native/include/Ngs2Types.hpp"
 
 #include <array>
 #include <cmath>

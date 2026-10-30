@@ -1,4 +1,5 @@
 #include "prx/libSceAgc/Shader/include/LinkShaders.hpp"
+#include "prx/libSceAgc/Shader/include/InterpolantMapping.hpp"
 #include "prx/libSceAgc/Misc/include/RegisterDefaults.hpp"
 #include "SceShaders.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
