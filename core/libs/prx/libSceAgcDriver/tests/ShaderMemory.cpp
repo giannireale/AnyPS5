@@ -466,6 +466,31 @@ bool compileResultMemoPixel(std::uint32_t value, std::shared_ptr<const ShaderRec
     return hit;
 }
 
+void benchmarkResultMemoReplacement() {
+    using namespace ShaderRecompiler;
+    SetResultMemoBudget(0u);
+    std::shared_ptr<const RecompileResult> retained;
+    require(!compileResultMemoPixel(1u, &retained), "result memo benchmark: first result hit");
+    const auto words = retained->spirv.Copy();
+    const auto identity = retained->Identity();
+    for (std::uint32_t value = 2u; value < 258u; ++value) compileResultMemoPixel(value);
+    std::vector<double> samples;
+    for (std::uint32_t batch = 0u; batch < 31u; ++batch) {
+        const auto started = std::chrono::steady_clock::now();
+        for (std::uint32_t index = 0u; index < 256u; ++index) {
+            require(!compileResultMemoPixel(258u + batch * 256u + index), "result memo benchmark: new snapshot hit");
+        }
+        samples.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - started).count() / 256.0);
+    }
+    require(std::ranges::equal(retained->spirv.Words(), words) && retained->Identity() == identity, "result memo benchmark: retained result changed");
+    require(compileResultMemoPixel(258u + 31u * 256u - 1u), "result memo benchmark: newest result missing");
+    std::ranges::sort(samples);
+    const bool reuse = std::getenv("APS5_RESULT_REUSE") != nullptr && std::getenv("APS5_NO_RESULT_REUSE") == nullptr;
+    std::cout << "RESULT_MEMO_BENCH {\"reuse\":" << (reuse ? "true" : "false")
+              << ",\"batches\":31,\"iterations_per_batch\":256,\"p50_us\":" << samples[15]
+              << ",\"p95_us\":" << samples[29] << ",\"max_us\":" << samples.back() << "}\n";
+}
+
 void verifyResultMemoReplacement() {
     using namespace ShaderRecompiler;
     SetResultMemoBudget(0u);
@@ -9391,6 +9416,10 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--frontend-pair") {
             verifyFrontendPair();
             std::cout << "Prepared frontend reuse preserves full and partial-thread programs\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--result-memo-bench") {
+            benchmarkResultMemoReplacement();
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--result-memo-replacement") {
