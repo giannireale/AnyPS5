@@ -466,7 +466,7 @@ bool compileResultMemoPixel(std::uint32_t value, std::shared_ptr<const ShaderRec
     return hit;
 }
 
-void benchmarkResultMemoReplacement() {
+void benchmarkResultMemoReplacement(std::uint32_t threads = 1u) {
     using namespace ShaderRecompiler;
     SetResultMemoBudget(0u);
     std::shared_ptr<const RecompileResult> retained;
@@ -477,17 +477,27 @@ void benchmarkResultMemoReplacement() {
     std::vector<double> samples;
     for (std::uint32_t batch = 0u; batch < 31u; ++batch) {
         const auto started = std::chrono::steady_clock::now();
-        for (std::uint32_t index = 0u; index < 256u; ++index) {
-            require(!compileResultMemoPixel(258u + batch * 256u + index), "result memo benchmark: new snapshot hit");
+        const auto run = [&](std::uint32_t worker) {
+            for (std::uint32_t index = 0u; index < 256u; ++index) {
+                require(!compileResultMemoPixel(258u + (batch * threads + worker) * 256u + index), "result memo benchmark: new snapshot hit");
+            }
+        };
+        if (threads == 1u) {
+            run(0u);
+        } else {
+            std::vector<std::future<void>> workers;
+            for (std::uint32_t worker = 0u; worker < threads; ++worker) workers.push_back(std::async(std::launch::async, run, worker));
+            for (auto& worker : workers) worker.get();
         }
-        samples.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - started).count() / 256.0);
+        samples.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - started).count() / (256.0 * threads));
     }
     require(std::ranges::equal(retained->spirv.Words(), words) && retained->Identity() == identity, "result memo benchmark: retained result changed");
-    require(compileResultMemoPixel(258u + 31u * 256u - 1u), "result memo benchmark: newest result missing");
+    if (threads == 1u) require(compileResultMemoPixel(258u + 31u * 256u - 1u), "result memo benchmark: newest result missing");
+    require(!compileResultMemoPixel(0xffffffffu) && compileResultMemoPixel(0xffffffffu), "result memo benchmark: final result was not retained");
     std::ranges::sort(samples);
     const bool reuse = std::getenv("APS5_RESULT_REUSE") != nullptr && std::getenv("APS5_NO_RESULT_REUSE") == nullptr;
     std::cout << "RESULT_MEMO_BENCH {\"reuse\":" << (reuse ? "true" : "false")
-              << ",\"batches\":31,\"iterations_per_batch\":256,\"p50_us\":" << samples[15]
+              << ",\"threads\":" << threads << ",\"batches\":31,\"iterations_per_batch\":" << 256u * threads << ",\"p50_us\":" << samples[15]
               << ",\"p95_us\":" << samples[29] << ",\"max_us\":" << samples.back() << "}\n";
 }
 
@@ -9420,6 +9430,10 @@ int main(int argc, char** argv) {
         }
         if (argc == 2 && std::string_view(argv[1]) == "--result-memo-bench") {
             benchmarkResultMemoReplacement();
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--result-memo-bench-threads") {
+            benchmarkResultMemoReplacement(4u);
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--result-memo-replacement") {
